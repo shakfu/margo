@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
-.PHONY: help dev build build-debug build-universal package run cli \
+.PHONY: help dev build build-debug build-universal package run cli cli-run \
         tidy fmt vet test cover lint \
-        frontend-install frontend-dev frontend-build bindings \
+        frontend-install frontend-dev frontend-build vendor-mathjax bindings \
         clean clean-frontend clean-all doctor
 
 BINARY     := margo
@@ -67,8 +67,15 @@ lint: ## Run golangci-lint (requires golangci-lint installed)
 
 # ---------- Frontend ----------
 
-frontend-install: ## npm install in frontend/
+frontend-install: ## npm install in frontend/ and vendor mathjax
 	cd frontend && npm install
+	$(MAKE) vendor-mathjax
+
+vendor-mathjax: ## Copy mathjax bundle from node_modules to frontend/public/mathjax
+	@mkdir -p frontend/public/mathjax
+	cp frontend/node_modules/mathjax/es5/tex-svg-full.js frontend/public/mathjax/tex-svg-full.js
+	cp frontend/node_modules/mathjax/LICENSE frontend/public/mathjax/LICENSE
+	@echo "vendored mathjax: $$(ls -lh frontend/public/mathjax/tex-svg-full.js | awk '{print $$5}')"
 
 frontend-dev: ## Run Vite dev server standalone (no Wails)
 	cd frontend && npm run dev

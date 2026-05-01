@@ -1,12 +1,48 @@
+:root {
+    --bg: #ffffff;
+    --bg-elev: #f5f5f5;
+    --fg: #1a1a1a;
+    --fg-muted: rgba(0, 0, 0, 0.55);
+    --fg-faint: rgba(0, 0, 0, 0.4);
+    --border: rgba(0, 0, 0, 0.15);
+    --border-strong: rgba(0, 0, 0, 0.3);
+    --accent: rgba(60, 120, 200, 0.15);
+    --bubble-user: rgba(60, 120, 200, 0.12);
+    --bubble-assistant: rgba(0, 0, 0, 0.04);
+    --error-bg: rgba(200, 50, 50, 0.08);
+    --error-fg: #b03030;
+    --error-border: rgba(200, 50, 50, 0.4);
+    --input-bg: rgba(0, 0, 0, 0.03);
+    --hover-bg: rgba(0, 0, 0, 0.06);
+}
+
+:root.dark {
+    --bg: #1b2636;
+    --bg-elev: #243246;
+    --fg: #ffffff;
+    --fg-muted: rgba(255, 255, 255, 0.65);
+    --fg-faint: rgba(255, 255, 255, 0.4);
+    --border: rgba(255, 255, 255, 0.15);
+    --border-strong: rgba(255, 255, 255, 0.35);
+    --accent: rgba(120, 170, 230, 0.2);
+    --bubble-user: rgba(80, 140, 220, 0.22);
+    --bubble-assistant: rgba(255, 255, 255, 0.07);
+    --error-bg: rgba(220, 80, 80, 0.18);
+    --error-fg: #ff9090;
+    --error-border: rgba(220, 80, 80, 0.4);
+    --input-bg: rgba(255, 255, 255, 0.06);
+    --hover-bg: rgba(255, 255, 255, 0.12);
+}
+
 html {
-    background-color: rgba(27, 38, 54, 1);
-    text-align: center;
-    color: white;
+    background-color: var(--bg);
+    color: var(--fg);
 }
 
 body {
     margin: 0;
-    color: white;
+    background-color: var(--bg);
+    color: var(--fg);
     font-family: "Nunito", -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto",
     "Oxygen", "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue",
     sans-serif;
@@ -22,5 +58,4 @@ body {
 
 #app {
     height: 100vh;
-    text-align: center;
 }

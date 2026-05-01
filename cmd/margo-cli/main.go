@@ -16,6 +16,8 @@ import (
 func main() {
 	provider := flag.String("provider", "anthropic", "provider: anthropic | openai")
 	prompt := flag.String("prompt", "What is a quaternion?", "prompt to send")
+	system := flag.String("system", "", "optional system prompt")
+	stream := flag.Bool("stream", false, "stream tokens to stdout as they arrive")
 	flag.Parse()
 
 	cfg, err := config.Load()
@@ -43,7 +45,29 @@ func main() {
 		os.Exit(2)
 	}
 
-	resp, err := client.Complete(context.Background(), margo.Request{Prompt: *prompt})
+	req := margo.Request{
+		System:   *system,
+		Messages: []margo.Message{{Role: margo.RoleUser, Content: *prompt}},
+	}
+	ctx := context.Background()
+
+	if *stream {
+		ch, err := client.Stream(ctx, req)
+		if err != nil {
+			log.Fatalf("%s: %v", client.Name(), err)
+		}
+		for c := range ch {
+			if c.Err != nil {
+				fmt.Fprintln(os.Stderr)
+				log.Fatalf("%s: %v", client.Name(), c.Err)
+			}
+			fmt.Print(c.Text)
+		}
+		fmt.Println()
+		return
+	}
+
+	resp, err := client.Complete(ctx, req)
 	if err != nil {
 		log.Fatalf("%s: %v", client.Name(), err)
 	}

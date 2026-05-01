@@ -4,6 +4,33 @@
     <meta charset="UTF-8"/>
     <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
     <title>margo</title>
+    <script>
+      // Apply persisted theme before first paint to avoid flash.
+      (function () {
+        try {
+          var t = localStorage.getItem('margo:theme') || 'light';
+          if (t === 'dark') document.documentElement.classList.add('dark');
+        } catch (e) {}
+      })();
+
+      // MathJax 3 config — must be set BEFORE the script loads.
+      window.MathJax = {
+        tex: {
+          inlineMath: [['$', '$'], ['\\(', '\\)']],
+          displayMath: [['$$', '$$'], ['\\[', '\\]']],
+          processEscapes: true
+        },
+        svg: { fontCache: 'global' },
+        startup: {
+          typeset: false  // we typeset on demand per-message
+        },
+        options: {
+          enableMenu: false,
+          renderActions: { addMenu: [] }
+        }
+      };
+    </script>
+    <script src="/mathjax/tex-svg-full.js" async></script>
 </head>
 <body>
 <div id="app"></div>
