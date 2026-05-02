@@ -64,25 +64,28 @@
   }
 </script>
 
-<div class="chatlist">
-  <div class="header">
-    <span class="title">Chats</span>
-    <button class="icon-btn" on:click={newChat} disabled={busy} title="New chat">+</button>
+<div class="flex flex-col h-full bg-bg-elev border-r border-border">
+  <div class="flex items-center justify-between px-3.5 pt-3 pb-1.5">
+    <span class="font-semibold text-[0.9rem]">Chats</span>
+    <button
+      class="bg-input-bg text-fg border border-border rounded px-2 py-0.5 text-base leading-none cursor-pointer hover:bg-hover-bg disabled:opacity-40 disabled:cursor-not-allowed"
+      on:click={newChat}
+      disabled={busy}
+      title="New chat"
+    >+</button>
   </div>
 
   <input
-    class="search"
+    class="mx-3.5 mb-2 px-2 py-1.5 bg-input-bg text-fg border border-border rounded outline-none text-[0.85rem] focus:border-border-strong"
     type="text"
     placeholder="Search chats..."
     bind:value={search}
   />
 
-  <div class="list">
+  <div class="flex-1 overflow-y-auto px-2 pb-2">
     {#each filtered as c (c.id)}
       <div
-        class="item"
-        class:active={c.id === $activeChatId}
-        class:armed={confirmingId === c.id}
+        class="group relative px-2.5 py-2 rounded cursor-pointer mb-0.5 hover:bg-hover-bg {c.id === $activeChatId ? 'bg-accent' : ''} {confirmingId === c.id ? 'is-armed' : ''}"
         on:click={() => select(c.id)}
         on:keydown={(e) => e.key === 'Enter' && select(c.id)}
         role="button"
@@ -90,7 +93,7 @@
       >
         {#if renamingId === c.id}
           <input
-            class="rename-input"
+            class="w-full px-1.5 py-1 border border-border-strong rounded bg-bg text-fg text-[0.85rem] outline-none box-border"
             bind:value={renameValue}
             on:blur={commitRename}
             on:keydown={onRenameKey}
@@ -98,16 +101,19 @@
             use:focus
           />
         {:else}
-          <div class="row">
-            <span class="name">{c.title}</span>
-            <span class="time">{relativeTime(c.updatedAt)}</span>
+          <div class="flex justify-between gap-2 items-baseline">
+            <span class="text-[0.88rem] overflow-hidden text-ellipsis whitespace-nowrap flex-1">{c.title}</span>
+            <span class="text-[0.7rem] text-fg-faint shrink-0">{relativeTime(c.updatedAt)}</span>
           </div>
-          <div class="meta">{c.messages.length} msg</div>
-          <div class="actions">
-            <button class="mini" on:click={(e) => startRename(c.id, c.title, e)} title="Rename">edit</button>
+          <div class="text-[0.7rem] text-fg-faint mt-0.5">{c.messages.length} msg</div>
+          <div class="absolute right-1.5 top-1.5 flex gap-0.5 opacity-0 transition-opacity duration-100 group-hover:opacity-100 [.is-armed_&]:opacity-100">
             <button
-              class="mini danger"
-              class:armed={confirmingId === c.id}
+              class="bg-bg text-fg-muted border border-border rounded-sm px-1.5 py-0.5 text-[0.7rem] cursor-pointer hover:bg-hover-bg hover:text-fg"
+              on:click={(e) => startRename(c.id, c.title, e)}
+              title="Rename"
+            >edit</button>
+            <button
+              class="bg-bg text-fg-muted border border-border rounded-sm px-1.5 py-0.5 text-[0.7rem] cursor-pointer hover:text-error-fg hover:border-error-border {confirmingId === c.id ? 'bg-error-bg! text-error-fg! border-error-border! px-2 font-semibold' : ''}"
               on:click={(e) => clickDelete(c.id, e)}
               title={confirmingId === c.id ? 'Click again to confirm' : 'Delete'}
             >{confirmingId === c.id ? 'sure?' : '×'}</button>
@@ -116,139 +122,7 @@
       </div>
     {/each}
     {#if filtered.length === 0}
-      <div class="empty">{search ? 'No matches.' : 'No chats yet.'}</div>
+      <div class="py-6 text-center text-fg-faint text-[0.85rem]">{search ? 'No matches.' : 'No chats yet.'}</div>
     {/if}
   </div>
 </div>
-
-<style>
-  .chatlist {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    background: var(--bg-elev);
-    border-right: 1px solid var(--border);
-  }
-
-  .header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.75rem 0.85rem 0.4rem;
-  }
-  .title { font-weight: 600; font-size: 0.9rem; }
-  .icon-btn {
-    background: var(--input-bg);
-    color: var(--fg);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 0.15rem 0.5rem;
-    font-size: 1rem;
-    line-height: 1;
-    cursor: pointer;
-  }
-  .icon-btn:hover:not(:disabled) { background: var(--hover-bg); }
-  .icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
-  .search {
-    margin: 0 0.85rem 0.5rem;
-    padding: 0.4rem 0.55rem;
-    background: var(--input-bg);
-    color: var(--fg);
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    outline: none;
-    font-size: 0.85rem;
-    font-family: inherit;
-  }
-  .search:focus { border-color: var(--border-strong); }
-
-  .list {
-    flex: 1;
-    overflow-y: auto;
-    padding: 0 0.5rem 0.5rem;
-  }
-
-  .item {
-    position: relative;
-    padding: 0.5rem 0.6rem;
-    border-radius: 5px;
-    cursor: pointer;
-    margin-bottom: 0.15rem;
-  }
-  .item:hover { background: var(--hover-bg); }
-  .item.active { background: var(--accent); }
-  .item:hover .actions, .item.armed .actions { opacity: 1; }
-
-  .row {
-    display: flex;
-    justify-content: space-between;
-    gap: 0.5rem;
-    align-items: baseline;
-  }
-  .name {
-    font-size: 0.88rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex: 1;
-  }
-  .time {
-    font-size: 0.7rem;
-    color: var(--fg-faint);
-    flex-shrink: 0;
-  }
-  .meta {
-    font-size: 0.7rem;
-    color: var(--fg-faint);
-    margin-top: 0.15rem;
-  }
-
-  .actions {
-    position: absolute;
-    right: 0.4rem;
-    top: 0.4rem;
-    display: flex;
-    gap: 0.2rem;
-    opacity: 0;
-    transition: opacity 100ms;
-  }
-  .mini {
-    background: var(--bg);
-    color: var(--fg-muted);
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    padding: 0.1rem 0.35rem;
-    font-size: 0.7rem;
-    cursor: pointer;
-  }
-  .mini:hover { background: var(--hover-bg); color: var(--fg); }
-  .mini.danger:hover { color: var(--error-fg); border-color: var(--error-border); }
-  .mini.armed {
-    background: var(--error-bg);
-    color: var(--error-fg);
-    border-color: var(--error-border);
-    padding: 0.1rem 0.5rem;
-    font-weight: 600;
-  }
-
-  .rename-input {
-    width: 100%;
-    padding: 0.3rem 0.4rem;
-    border: 1px solid var(--border-strong);
-    border-radius: 4px;
-    background: var(--bg);
-    color: var(--fg);
-    font-family: inherit;
-    font-size: 0.85rem;
-    outline: none;
-    box-sizing: border-box;
-  }
-
-  .empty {
-    padding: 1.5rem 0.5rem;
-    text-align: center;
-    color: var(--fg-faint);
-    font-size: 0.85rem;
-  }
-</style>

@@ -1,13 +1,99 @@
 <script lang="ts">
   import { settings } from './store';
   import { setHighlightTheme } from './markdown';
+  import { createSelect, createCollapsible, melt } from '@melt-ui/svelte';
+  import { get } from 'svelte/store';
 
   export let providers: string[] = [];
+  export let models: string[] = [];
   export let busy: boolean = false;
 
-  let showSystem = true;
-  let showAppearance = true;
-  let showProvider = true;
+  // Provider select
+  const {
+    elements: { trigger: provSelTrig, menu: provSelMenu, option: provSelOpt },
+    states: { selectedLabel: provLabel, open: provOpen, selected: provSelected },
+    helpers: { isSelected: isProvSelected }
+  } = createSelect<string>({
+    positioning: { placement: 'bottom', sameWidth: true },
+    defaultSelected: $settings.provider
+      ? { value: $settings.provider, label: $settings.provider }
+      : undefined
+  });
+
+  provSelected.subscribe(s => {
+    if (s && s.value !== get(settings).provider) {
+      settings.update(v => ({ ...v, provider: s.value, model: '' }));
+    }
+  });
+  settings.subscribe(s => {
+    const cur = get(provSelected);
+    if (s.provider && (!cur || cur.value !== s.provider)) {
+      provSelected.set({ value: s.provider, label: s.provider });
+    }
+  });
+
+  // Model select
+  const {
+    elements: { trigger: modSelTrig, menu: modSelMenu, option: modSelOpt },
+    states: { selectedLabel: modLabel, open: modOpen, selected: modSelected },
+    helpers: { isSelected: isModSelected }
+  } = createSelect<string>({
+    positioning: { placement: 'bottom', sameWidth: true },
+    defaultSelected: $settings.model
+      ? { value: $settings.model, label: $settings.model }
+      : undefined
+  });
+
+  modSelected.subscribe(s => {
+    if (s && s.value !== get(settings).model) {
+      settings.update(v => ({ ...v, model: s.value }));
+    }
+  });
+  settings.subscribe(s => {
+    const cur = get(modSelected);
+    if (s.model && (!cur || cur.value !== s.model)) {
+      modSelected.set({ value: s.model, label: s.model });
+    }
+  });
+
+  // When models prop arrives, ensure the persisted model is still in the
+  // allowlist; otherwise reset to the provider's default (first entry).
+  $: if (models.length > 0 && !models.includes($settings.model)) {
+    settings.update(s => ({ ...s, model: models[0] }));
+  }
+
+  // Sections
+  const mkSection = (open: boolean) => createCollapsible({ defaultOpen: open });
+
+  const {
+    elements: { root: provRoot, trigger: provTrig, content: provContent },
+    states: { open: provSectOpen }
+  } = mkSection(true);
+
+  const {
+    elements: { root: modRoot, trigger: modTrig, content: modContent },
+    states: { open: modSectOpen }
+  } = mkSection(true);
+
+  const {
+    elements: { root: sampRoot, trigger: sampTrig, content: sampContent },
+    states: { open: sampOpen }
+  } = mkSection(false);
+
+  const {
+    elements: { root: thinkRoot, trigger: thinkTrig, content: thinkContent },
+    states: { open: thinkSectOpen }
+  } = mkSection(false);
+
+  const {
+    elements: { root: sysRoot, trigger: sysTrig, content: sysContent },
+    states: { open: sysOpen }
+  } = mkSection(false);
+
+  const {
+    elements: { root: apprRoot, trigger: apprTrig, content: apprContent },
+    states: { open: apprOpen }
+  } = mkSection(false);
 
   function toggleTheme() {
     const next: 'light' | 'dark' = $settings.theme === 'light' ? 'dark' : 'light';
@@ -15,89 +101,223 @@
     document.documentElement.classList.toggle('dark', next === 'dark');
     setHighlightTheme(next);
   }
+
+  // Stop sequences edited as comma-separated text
+  let stopText = $settings.stopSequences.join(', ');
+  $: $settings.stopSequences, (stopText = $settings.stopSequences.join(', '));
+  function commitStopSequences() {
+    const arr = stopText
+      .split(',')
+      .map(s => s.trim())
+      .filter(s => s.length > 0);
+    settings.update(s => ({ ...s, stopSequences: arr }));
+  }
 </script>
 
-<div class="panel">
-  <div class="header">Model Parameters</div>
+<div class="flex flex-col h-full bg-bg-elev border-l border-border overflow-y-auto">
+  <div class="px-3.5 pt-3.5 pb-2.5 font-semibold text-[0.9rem] border-b border-border">Model Parameters</div>
 
-  <section>
-    <button class="section-head" on:click={() => (showProvider = !showProvider)}>
-      <span class="caret">{showProvider ? '▾' : '▸'}</span>
+  <!-- Provider -->
+  <section class="border-b border-border" use:melt={$provRoot}>
+    <button class="section-head" use:melt={$provTrig}>
+      <span class="caret">{$provSectOpen ? '▾' : '▸'}</span>
       <span>Provider</span>
     </button>
-    {#if showProvider}
-      <div class="section-body">
-        <label class="field">
-          <span>Provider</span>
-          <select
-            bind:value={$settings.provider}
-            disabled={busy || providers.length === 0}
-          >
-            {#each providers as p}<option value={p}>{p}</option>{/each}
-          </select>
-        </label>
-        <label class="field row">
-          <input type="checkbox" bind:checked={$settings.streaming} disabled={busy} />
-          <span>Stream tokens</span>
-        </label>
-      </div>
-    {/if}
+    <div use:melt={$provContent} class="section-body">
+      <button
+        class="select-trigger"
+        disabled={busy || providers.length === 0}
+        use:melt={$provSelTrig}
+      >
+        <span>{$provLabel || 'select provider'}</span>
+        <span class="text-fg-faint text-[0.7rem]">{$provOpen ? '▴' : '▾'}</span>
+      </button>
+      {#if $provOpen}
+        <div class="select-menu" use:melt={$provSelMenu}>
+          {#each providers as p}
+            <div
+              class="select-item {$isProvSelected(p) ? 'bg-accent' : ''}"
+              use:melt={$provSelOpt({ value: p, label: p })}
+            >{p}</div>
+          {/each}
+        </div>
+      {/if}
+      <label class="flex flex-row items-center gap-2 text-[0.8rem] text-fg-muted">
+        <input type="checkbox" bind:checked={$settings.streaming} disabled={busy} class="m-0" />
+        <span>Stream tokens</span>
+      </label>
+    </div>
   </section>
 
-  <section>
-    <button class="section-head" on:click={() => (showSystem = !showSystem)}>
-      <span class="caret">{showSystem ? '▾' : '▸'}</span>
+  <!-- Model -->
+  <section class="border-b border-border" use:melt={$modRoot}>
+    <button class="section-head" use:melt={$modTrig}>
+      <span class="caret">{$modSectOpen ? '▾' : '▸'}</span>
+      <span>Model</span>
+    </button>
+    <div use:melt={$modContent} class="section-body">
+      <button
+        class="select-trigger"
+        disabled={busy || models.length === 0}
+        use:melt={$modSelTrig}
+      >
+        <span>{$modLabel || 'select model'}</span>
+        <span class="text-fg-faint text-[0.7rem]">{$modOpen ? '▴' : '▾'}</span>
+      </button>
+      {#if $modOpen}
+        <div class="select-menu" use:melt={$modSelMenu}>
+          {#each models as m}
+            <div
+              class="select-item {$isModSelected(m) ? 'bg-accent' : ''}"
+              use:melt={$modSelOpt({ value: m, label: m })}
+            >{m}</div>
+          {/each}
+        </div>
+      {/if}
+    </div>
+  </section>
+
+  <!-- Sampling -->
+  <section class="border-b border-border" use:melt={$sampRoot}>
+    <button class="section-head" use:melt={$sampTrig}>
+      <span class="caret">{$sampOpen ? '▾' : '▸'}</span>
+      <span>Sampling</span>
+    </button>
+    <div use:melt={$sampContent} class="section-body">
+      <label class="field">
+        <div class="flex justify-between">
+          <span>Temperature</span>
+          <span class="text-fg-faint">{$settings.temperature ?? 'default'}</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <input
+            type="range"
+            min="0" max="2" step="0.05"
+            value={$settings.temperature ?? 1}
+            on:input={(e) => settings.update(s => ({ ...s, temperature: parseFloat(e.currentTarget.value) }))}
+            disabled={busy}
+            class="flex-1"
+          />
+          <button
+            class="mini-btn"
+            on:click={() => settings.update(s => ({ ...s, temperature: null }))}
+            disabled={busy}
+            title="Use provider default"
+          >reset</button>
+        </div>
+      </label>
+
+      <label class="field">
+        <div class="flex justify-between">
+          <span>Top-p</span>
+          <span class="text-fg-faint">{$settings.topP ?? 'default'}</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <input
+            type="range"
+            min="0" max="1" step="0.01"
+            value={$settings.topP ?? 1}
+            on:input={(e) => settings.update(s => ({ ...s, topP: parseFloat(e.currentTarget.value) }))}
+            disabled={busy}
+            class="flex-1"
+          />
+          <button
+            class="mini-btn"
+            on:click={() => settings.update(s => ({ ...s, topP: null }))}
+            disabled={busy}
+          >reset</button>
+        </div>
+      </label>
+
+      <label class="field">
+        <span>Max tokens</span>
+        <input
+          type="number"
+          class="text-input"
+          min="1" step="1"
+          bind:value={$settings.maxTokens}
+          disabled={busy}
+        />
+      </label>
+
+      <label class="field">
+        <span>Stop sequences (comma-separated)</span>
+        <input
+          type="text"
+          class="text-input"
+          bind:value={stopText}
+          on:blur={commitStopSequences}
+          disabled={busy}
+        />
+      </label>
+    </div>
+  </section>
+
+  <!-- Thinking -->
+  <section class="border-b border-border" use:melt={$thinkRoot}>
+    <button class="section-head" use:melt={$thinkTrig}>
+      <span class="caret">{$thinkSectOpen ? '▾' : '▸'}</span>
+      <span>Thinking</span>
+      {#if $settings.thinkEnabled}
+        <span class="ml-auto text-[0.65rem] text-fg-faint uppercase tracking-wider">on</span>
+      {/if}
+    </button>
+    <div use:melt={$thinkContent} class="section-body">
+      <label class="flex flex-row items-center gap-2 text-[0.8rem] text-fg-muted">
+        <input type="checkbox" bind:checked={$settings.thinkEnabled} disabled={busy} class="m-0" />
+        <span>Enable extended thinking (Anthropic)</span>
+      </label>
+      <label class="field">
+        <span>Budget tokens (min 1024)</span>
+        <input
+          type="number"
+          class="text-input"
+          min="1024" step="256"
+          bind:value={$settings.thinkBudget}
+          disabled={busy || !$settings.thinkEnabled}
+        />
+      </label>
+      <p class="text-[0.7rem] text-fg-faint leading-snug">
+        Thinking counts toward max_tokens and is only supported by Claude 3.7+ / 4.x. OpenAI ignores this setting.
+      </p>
+    </div>
+  </section>
+
+  <!-- System Prompt -->
+  <section class="border-b border-border" use:melt={$sysRoot}>
+    <button class="section-head" use:melt={$sysTrig}>
+      <span class="caret">{$sysOpen ? '▾' : '▸'}</span>
       <span>System Prompt</span>
     </button>
-    {#if showSystem}
-      <div class="section-body">
-        <textarea
-          bind:value={$settings.system}
-          disabled={busy}
-          rows="6"
-          placeholder="Optional system prompt. Applies to all messages in the active chat."
-        ></textarea>
-      </div>
-    {/if}
+    <div use:melt={$sysContent} class="section-body">
+      <textarea
+        class="text-input"
+        bind:value={$settings.system}
+        disabled={busy}
+        rows="6"
+        placeholder="Optional system prompt. Applies to all messages in the active chat."
+      ></textarea>
+    </div>
   </section>
 
-  <section>
-    <button class="section-head" on:click={() => (showAppearance = !showAppearance)}>
-      <span class="caret">{showAppearance ? '▾' : '▸'}</span>
+  <!-- Appearance -->
+  <section class="border-b border-border" use:melt={$apprRoot}>
+    <button class="section-head" use:melt={$apprTrig}>
+      <span class="caret">{$apprOpen ? '▾' : '▸'}</span>
       <span>Appearance</span>
     </button>
-    {#if showAppearance}
-      <div class="section-body">
-        <label class="field row">
-          <span>Theme</span>
-          <button class="theme-btn" on:click={toggleTheme}>
-            {$settings.theme === 'light' ? 'light → dark' : 'dark → light'}
-          </button>
-        </label>
-      </div>
-    {/if}
+    <div use:melt={$apprContent} class="section-body">
+      <label class="flex flex-row items-center gap-2 text-[0.8rem] text-fg-muted">
+        <span>Theme</span>
+        <button class="mini-btn" on:click={toggleTheme}>
+          {$settings.theme === 'light' ? 'light → dark' : 'dark → light'}
+        </button>
+      </label>
+    </div>
   </section>
 </div>
 
 <style>
-  .panel {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    background: var(--bg-elev);
-    border-left: 1px solid var(--border);
-    overflow-y: auto;
-  }
-
-  .header {
-    padding: 0.85rem 0.85rem 0.6rem;
-    font-weight: 600;
-    font-size: 0.9rem;
-    border-bottom: 1px solid var(--border);
-  }
-
-  section { border-bottom: 1px solid var(--border); }
-
   .section-head {
     width: 100%;
     background: transparent;
@@ -120,7 +340,7 @@
     padding: 0.4rem 0.85rem 0.75rem;
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 0.6rem;
   }
 
   .field {
@@ -130,50 +350,71 @@
     font-size: 0.8rem;
     color: var(--fg-muted);
   }
-  .field.row {
-    flex-direction: row;
-    align-items: center;
-    gap: 0.5rem;
-  }
-  .field.row input[type="checkbox"] { margin: 0; }
 
-  select {
+  .text-input {
     background: var(--input-bg);
     color: var(--fg);
     border: 1px solid var(--border);
     border-radius: 4px;
-    padding: 0.35rem 0.5rem;
-    font-size: 0.85rem;
-    outline: none;
-    font-family: inherit;
-  }
-  select:disabled { opacity: 0.5; }
-
-  textarea {
-    background: var(--input-bg);
-    color: var(--fg);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 0.5rem;
+    padding: 0.4rem 0.55rem;
     font-family: inherit;
     font-size: 0.85rem;
-    resize: vertical;
     outline: none;
     width: 100%;
     box-sizing: border-box;
+    resize: vertical;
   }
-  textarea:focus { border-color: var(--border-strong); }
-  textarea:disabled { opacity: 0.5; }
+  .text-input:focus { border-color: var(--border-strong); }
+  .text-input:disabled { opacity: 0.5; }
 
-  .theme-btn {
+  .select-trigger {
     background: var(--input-bg);
     color: var(--fg);
     border: 1px solid var(--border);
     border-radius: 4px;
-    padding: 0.3rem 0.6rem;
-    font-size: 0.8rem;
+    padding: 0.4rem 0.55rem;
+    font-size: 0.85rem;
+    outline: none;
+    font-family: inherit;
+    text-align: left;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    cursor: pointer;
+  }
+  .select-trigger:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .select-menu {
+    z-index: 50;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+    padding: 0.25rem 0;
+    max-height: 15rem;
+    overflow-y: auto;
+    outline: none;
+  }
+  .select-item {
+    padding: 0.4rem 0.7rem;
+    font-size: 0.85rem;
+    color: var(--fg);
+    cursor: pointer;
+  }
+  .select-item:hover { background: var(--hover-bg); }
+  .select-item :global(*) { pointer-events: none; }
+
+  .mini-btn {
+    background: var(--input-bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.25rem 0.55rem;
+    font-size: 0.75rem;
     cursor: pointer;
     font-family: inherit;
   }
-  .theme-btn:hover { background: var(--hover-bg); }
+  .mini-btn:hover:not(:disabled) { background: var(--hover-bg); }
+  .mini-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

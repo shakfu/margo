@@ -2,9 +2,18 @@ import { writable, derived } from 'svelte/store';
 
 export type Role = 'user' | 'assistant';
 
+export interface Usage {
+  inputTokens: number;
+  outputTokens: number;
+  firstTokenMs: number;
+  totalMs: number;
+}
+
 export interface Message {
   role: Role;
   content: string;
+  thinking?: string;
+  usage?: Usage;
 }
 
 export interface Chat {
@@ -13,15 +22,43 @@ export interface Chat {
   messages: Message[];
   createdAt: number;
   updatedAt: number;
+  tokensIn: number;
+  tokensOut: number;
 }
 
 export interface Settings {
   provider: string;
+  model: string;
   system: string;
   streaming: boolean;
   theme: 'light' | 'dark';
   showLeft: boolean;
   showRight: boolean;
+  maxTokens: number;
+  temperature: number | null;
+  topP: number | null;
+  stopSequences: string[];
+  thinkEnabled: boolean;
+  thinkBudget: number;
+}
+
+// Approximate context window per model. Used by the context-usage ring.
+// Numbers are conservative; intent is "is this conversation about to overflow",
+// not exact accounting.
+export const CONTEXT_WINDOWS: Record<string, number> = {
+  'claude-haiku-4-5': 200_000,
+  'claude-sonnet-4-6': 200_000,
+  'claude-opus-4-7': 1_000_000,
+  'gpt-5.5': 400_000,
+  'gpt-5.5-pro': 400_000,
+  'gpt-5.4': 400_000,
+  'gpt-5.4-mini': 400_000,
+  'gpt-5.4-nano': 400_000,
+  'gpt-5.4-pro': 400_000,
+};
+
+export function contextWindowFor(model: string): number {
+  return CONTEXT_WINDOWS[model] ?? 128_000;
 }
 
 const CHATS_KEY = 'margo:chats:v1';
@@ -36,18 +73,33 @@ function uuid(): string {
 function loadChats(): Chat[] {
   try {
     const raw = localStorage.getItem(CHATS_KEY);
-    if (raw) return JSON.parse(raw) as Chat[];
+    if (raw) {
+      const parsed = JSON.parse(raw) as Chat[];
+      // backfill new fields for chats persisted before tokens tracking
+      return parsed.map(c => ({
+        ...c,
+        tokensIn: c.tokensIn ?? 0,
+        tokensOut: c.tokensOut ?? 0,
+      }));
+    }
   } catch (_) {}
   return [];
 }
 
 const defaults: Settings = {
   provider: '',
+  model: '',
   system: '',
   streaming: true,
   theme: 'light',
   showLeft: true,
-  showRight: true
+  showRight: true,
+  maxTokens: 4096,
+  temperature: null,
+  topP: null,
+  stopSequences: [],
+  thinkEnabled: false,
+  thinkBudget: 4096,
 };
 
 function loadSettings(): Settings {
@@ -79,7 +131,15 @@ export function newChat(): string {
   const id = uuid();
   const now = Date.now();
   chats.update(cs => [
-    { id, title: 'New chat', messages: [], createdAt: now, updatedAt: now },
+    {
+      id,
+      title: 'New chat',
+      messages: [],
+      createdAt: now,
+      updatedAt: now,
+      tokensIn: 0,
+      tokensOut: 0,
+    },
     ...cs
   ]);
   activeChatId.set(id);
@@ -124,6 +184,39 @@ export function appendToLast(id: string, delta: string) {
       const last = messages[messages.length - 1];
       messages[messages.length - 1] = { ...last, content: last.content + delta };
       return { ...c, messages, updatedAt: Date.now() };
+    })
+  );
+}
+
+export function appendThinkingToLast(id: string, delta: string) {
+  chats.update(cs =>
+    cs.map(c => {
+      if (c.id !== id || c.messages.length === 0) return c;
+      const messages = [...c.messages];
+      const last = messages[messages.length - 1];
+      messages[messages.length - 1] = {
+        ...last,
+        thinking: (last.thinking ?? '') + delta,
+      };
+      return { ...c, messages, updatedAt: Date.now() };
+    })
+  );
+}
+
+export function setLastUsage(id: string, usage: Usage) {
+  chats.update(cs =>
+    cs.map(c => {
+      if (c.id !== id || c.messages.length === 0) return c;
+      const messages = [...c.messages];
+      const last = messages[messages.length - 1];
+      messages[messages.length - 1] = { ...last, usage };
+      return {
+        ...c,
+        messages,
+        tokensIn: c.tokensIn + usage.inputTokens,
+        tokensOut: c.tokensOut + usage.outputTokens,
+        updatedAt: Date.now(),
+      };
     })
   );
 }

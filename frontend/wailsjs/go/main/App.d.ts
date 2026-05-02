@@ -4,10 +4,12 @@ import {main} from '../models';
 
 export function CancelStream(arg1:string):Promise<void>;
 
-export function Chat(arg1:string,arg2:string,arg3:Array<main.ChatMessage>):Promise<string>;
+export function Chat(arg1:string,arg2:string,arg3:Array<main.ChatMessage>,arg4:main.ChatOptions):Promise<main.ChatResponse>;
 
 export function Greet(arg1:string):Promise<string>;
 
+export function Models(arg1:string):Promise<Array<string>>;
+
 export function Providers():Promise<Array<string>>;
 
-export function StreamChat(arg1:string,arg2:string,arg3:string,arg4:Array<main.ChatMessage>):Promise<void>;
+export function StreamChat(arg1:string,arg2:string,arg3:string,arg4:Array<main.ChatMessage>,arg5:main.ChatOptions):Promise<void>;

@@ -74,10 +74,74 @@ func (a *App) Providers() []string {
 	return out
 }
 
+// Models returns the list of model identifiers we expose for a provider. The
+// frontend uses this to populate the Model picker. The first entry is the
+// default.
+func (a *App) Models(provider string) []string {
+	switch provider {
+	case "anthropic":
+		return []string{
+			"claude-haiku-4-5",
+			"claude-sonnet-4-6",
+			"claude-opus-4-7",
+		}
+	case "openai":
+		return []string{
+			"gpt-5.4-nano",
+			"gpt-5.4-mini",
+			"gpt-5.4",
+			"gpt-5.4-pro",
+			"gpt-5.5",
+			"gpt-5.5-pro",
+		}
+	}
+	return []string{}
+}
+
 // ChatMessage mirrors margo.Message for JSON binding to the frontend.
 type ChatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+}
+
+// ChatOptions carries per-request sampling and reasoning settings from the
+// frontend. Pointer fields (Temperature, TopP) are omitted when nil so the
+// provider falls back to its default.
+type ChatOptions struct {
+	Model         string   `json:"model"`
+	MaxTokens     int      `json:"maxTokens"`
+	Temperature   *float64 `json:"temperature"`
+	TopP          *float64 `json:"topP"`
+	StopSequences []string `json:"stopSequences"`
+	ThinkEnabled  bool     `json:"thinkEnabled"`
+	ThinkBudget   int      `json:"thinkBudget"`
+}
+
+// StreamChunkEvent is the payload for the `margo:stream:<id>:chunk` event.
+type StreamChunkEvent struct {
+	Kind string `json:"kind"` // "text" | "thinking"
+	Text string `json:"text"`
+}
+
+// StreamUsage is the timing/token report emitted alongside :done.
+type StreamUsage struct {
+	InputTokens  int   `json:"inputTokens"`
+	OutputTokens int   `json:"outputTokens"`
+	FirstTokenMs int64 `json:"firstTokenMs"`
+	TotalMs      int64 `json:"totalMs"`
+}
+
+// StreamDoneEvent is the payload for the `margo:stream:<id>:done` event.
+type StreamDoneEvent struct {
+	Usage *StreamUsage `json:"usage"`
+}
+
+// ChatResponse is the non-streaming completion result returned to the frontend.
+type ChatResponse struct {
+	Text     string      `json:"text"`
+	Thinking string      `json:"thinking"`
+	Model    string      `json:"model"`
+	Usage    StreamUsage `json:"usage"`
 }
 
 func toMargoMessages(in []ChatMessage) []margo.Message {
@@ -92,32 +156,53 @@ func toMargoMessages(in []ChatMessage) []margo.Message {
 	return out
 }
 
+func toMargoRequest(system string, messages []ChatMessage, opts ChatOptions) margo.Request {
+	req := margo.Request{
+		Model:         opts.Model,
+		System:        system,
+		Messages:      toMargoMessages(messages),
+		MaxTokens:     opts.MaxTokens,
+		Temperature:   opts.Temperature,
+		TopP:          opts.TopP,
+		StopSequences: opts.StopSequences,
+	}
+	if opts.ThinkEnabled {
+		req.Thinking = &margo.Thinking{Enabled: true, BudgetTokens: opts.ThinkBudget}
+	}
+	return req
+}
+
 // Chat performs a non-streaming multi-turn completion.
-func (a *App) Chat(provider, system string, messages []ChatMessage) (string, error) {
+func (a *App) Chat(provider, system string, messages []ChatMessage, opts ChatOptions) (ChatResponse, error) {
 	c, err := a.clientFor(provider)
 	if err != nil {
-		return "", err
+		return ChatResponse{}, err
 	}
-	resp, err := c.Complete(a.ctx, margo.Request{
-		System:   system,
-		Messages: toMargoMessages(messages),
-	})
+	resp, err := c.Complete(a.ctx, toMargoRequest(system, messages, opts))
 	if err != nil {
-		return "", err
+		return ChatResponse{}, err
 	}
-	return resp.Text, nil
+	return ChatResponse{
+		Text:     resp.Text,
+		Thinking: resp.Thinking,
+		Model:    resp.Model,
+		Usage: StreamUsage{
+			InputTokens:  resp.Usage.InputTokens,
+			OutputTokens: resp.Usage.OutputTokens,
+		},
+	}, nil
 }
 
 // StreamChat starts a streaming completion. The caller (frontend) provides the
 // stream id, which lets it subscribe to events *before* this call so no chunks
 // are dropped. Events emitted:
 //
-//	margo:stream:<id>:chunk  payload = string (token delta)
+//	margo:stream:<id>:chunk  payload = StreamChunkEvent {kind, text}
 //	margo:stream:<id>:error  payload = string (error message)
-//	margo:stream:<id>:done   payload = nil
+//	margo:stream:<id>:done   payload = StreamDoneEvent {usage}
 //
 // Cancel an in-flight stream with CancelStream(id).
-func (a *App) StreamChat(id, provider, system string, messages []ChatMessage) error {
+func (a *App) StreamChat(id, provider, system string, messages []ChatMessage, opts ChatOptions) error {
 	c, err := a.clientFor(provider)
 	if err != nil {
 		return err
@@ -133,10 +218,7 @@ func (a *App) StreamChat(id, provider, system string, messages []ChatMessage) er
 	a.cancels[id] = cancel
 	a.mu.Unlock()
 
-	ch, err := c.Stream(ctx, margo.Request{
-		System:   system,
-		Messages: toMargoMessages(messages),
-	})
+	ch, err := c.Stream(ctx, toMargoRequest(system, messages, opts))
 	if err != nil {
 		a.mu.Lock()
 		delete(a.cancels, id)
@@ -153,14 +235,32 @@ func (a *App) StreamChat(id, provider, system string, messages []ChatMessage) er
 			a.mu.Unlock()
 			cancel()
 		}()
+		var lastUsage *margo.Usage
 		for chunk := range ch {
 			if chunk.Err != nil {
 				runtime.EventsEmit(a.ctx, base+":error", chunk.Err.Error())
 				return
 			}
-			runtime.EventsEmit(a.ctx, base+":chunk", chunk.Text)
+			if chunk.Usage != nil {
+				lastUsage = chunk.Usage
+				continue
+			}
+			kind := string(chunk.Kind)
+			if kind == "" {
+				kind = string(margo.ChunkText)
+			}
+			runtime.EventsEmit(a.ctx, base+":chunk", StreamChunkEvent{Kind: kind, Text: chunk.Text})
 		}
-		runtime.EventsEmit(a.ctx, base+":done")
+		var done StreamDoneEvent
+		if lastUsage != nil {
+			done.Usage = &StreamUsage{
+				InputTokens:  lastUsage.InputTokens,
+				OutputTokens: lastUsage.OutputTokens,
+				FirstTokenMs: lastUsage.FirstTokenMs,
+				TotalMs:      lastUsage.TotalMs,
+			}
+		}
+		runtime.EventsEmit(a.ctx, base+":done", done)
 	}()
 	return nil
 }

@@ -6,18 +6,22 @@ export function CancelStream(arg1) {
   return window['go']['main']['App']['CancelStream'](arg1);
 }
 
-export function Chat(arg1, arg2, arg3) {
-  return window['go']['main']['App']['Chat'](arg1, arg2, arg3);
+export function Chat(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['Chat'](arg1, arg2, arg3, arg4);
 }
 
 export function Greet(arg1) {
   return window['go']['main']['App']['Greet'](arg1);
 }
 
+export function Models(arg1) {
+  return window['go']['main']['App']['Models'](arg1);
+}
+
 export function Providers() {
   return window['go']['main']['App']['Providers']();
 }
 
-export function StreamChat(arg1, arg2, arg3, arg4) {
-  return window['go']['main']['App']['StreamChat'](arg1, arg2, arg3, arg4);
+export function StreamChat(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['StreamChat'](arg1, arg2, arg3, arg4, arg5);
 }

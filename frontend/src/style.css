@@ -1,3 +1,26 @@
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
+    --color-bg: var(--bg);
+    --color-bg-elev: var(--bg-elev);
+    --color-fg: var(--fg);
+    --color-fg-muted: var(--fg-muted);
+    --color-fg-faint: var(--fg-faint);
+    --color-border: var(--border);
+    --color-border-strong: var(--border-strong);
+    --color-accent: var(--accent);
+    --color-bubble-user: var(--bubble-user);
+    --color-bubble-assistant: var(--bubble-assistant);
+    --color-error-bg: var(--error-bg);
+    --color-error-fg: var(--error-fg);
+    --color-error-border: var(--error-border);
+    --color-input-bg: var(--input-bg);
+    --color-hover-bg: var(--hover-bg);
+}
+
 :root {
     --bg: #ffffff;
     --bg-elev: #f5f5f5;

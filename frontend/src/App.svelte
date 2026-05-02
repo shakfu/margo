@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { Providers, Chat, StreamChat, CancelStream } from '../wailsjs/go/main/App.js';
+  import { Providers, Models, Chat, StreamChat, CancelStream } from '../wailsjs/go/main/App.js';
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js';
   import { mathjax } from './lib/mathjax';
   import { renderMarkdown, setHighlightTheme } from './lib/markdown';
@@ -9,14 +9,19 @@
     activeChat,
     activeChatId,
     settings,
+    contextWindowFor,
     newChat,
     appendMessage,
-    appendToLast
+    appendToLast,
+    appendThinkingToLast,
+    setLastUsage,
+    type Usage
   } from './lib/store';
   import ChatList from './lib/ChatList.svelte';
   import SettingsPanel from './lib/SettingsPanel.svelte';
 
   let providers: string[] = [];
+  let models: string[] = [];
   let input = '';
   let busy = false;
   let error = '';
@@ -24,6 +29,22 @@
   let messagesEl: HTMLElement;
 
   $: messages = $activeChat?.messages ?? [];
+
+  $: gridCols =
+    $settings.showLeft && $settings.showRight ? 'grid-cols-[280px_1fr_320px]' :
+    $settings.showLeft && !$settings.showRight ? 'grid-cols-[280px_1fr_0]' :
+    !$settings.showLeft && $settings.showRight ? 'grid-cols-[0_1fr_320px]' :
+    'grid-cols-[0_1fr_0]';
+
+  // Refresh model list when provider changes.
+  $: if ($settings.provider) {
+    Models($settings.provider).then(m => { models = m; });
+  }
+
+  // Context usage for the active chat.
+  $: ctxWindow = contextWindowFor($settings.model);
+  $: ctxUsed = ($activeChat?.tokensIn ?? 0) + ($activeChat?.tokensOut ?? 0);
+  $: ctxPct = ctxWindow > 0 ? Math.min(100, Math.round((ctxUsed / ctxWindow) * 100)) : 0;
 
   onMount(async () => {
     document.documentElement.classList.toggle('dark', $settings.theme === 'dark');
@@ -56,6 +77,19 @@
     if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
+  function buildOptions() {
+    const s = $settings;
+    return {
+      model: s.model,
+      maxTokens: s.maxTokens,
+      temperature: s.temperature ?? undefined,
+      topP: s.topP ?? undefined,
+      stopSequences: s.stopSequences,
+      thinkEnabled: s.thinkEnabled,
+      thinkBudget: s.thinkBudget,
+    } as any;
+  }
+
   async function send() {
     const text = input.trim();
     if (!text || busy || !$settings.provider) return;
@@ -77,8 +111,14 @@
 
     if (!$settings.streaming) {
       try {
-        const reply = await Chat($settings.provider, $settings.system, history);
-        appendMessage(chat.id, { role: 'assistant', content: reply });
+        const resp = await Chat($settings.provider, $settings.system, history, buildOptions());
+        appendMessage(chat.id, {
+          role: 'assistant',
+          content: resp.text,
+          thinking: resp.thinking || undefined,
+          usage: resp.usage as Usage,
+        });
+        if (resp.usage) setLastUsage(chat.id, resp.usage as Usage);
       } catch (e) {
         error = String(e);
       } finally {
@@ -94,8 +134,12 @@
     const base = `margo:stream:${id}`;
     const targetChatId = chat.id;
 
-    EventsOn(`${base}:chunk`, (delta: string) => {
-      appendToLast(targetChatId, delta);
+    EventsOn(`${base}:chunk`, (payload: { kind: string; text: string }) => {
+      if (payload.kind === 'thinking') {
+        appendThinkingToLast(targetChatId, payload.text);
+      } else {
+        appendToLast(targetChatId, payload.text);
+      }
       scrollToBottom();
     });
     EventsOn(`${base}:error`, (msg: string) => {
@@ -104,7 +148,8 @@
       activeStreamId = '';
       EventsOff(`${base}:chunk`, `${base}:error`, `${base}:done`);
     });
-    EventsOn(`${base}:done`, () => {
+    EventsOn(`${base}:done`, (payload: { usage: Usage | null }) => {
+      if (payload?.usage) setLastUsage(targetChatId, payload.usage);
       busy = false;
       activeStreamId = '';
       EventsOff(`${base}:chunk`, `${base}:error`, `${base}:done`);
@@ -112,7 +157,7 @@
     });
 
     try {
-      await StreamChat(id, $settings.provider, $settings.system, history);
+      await StreamChat(id, $settings.provider, $settings.system, history, buildOptions());
     } catch (e) {
       error = String(e);
       busy = false;
@@ -132,132 +177,145 @@
 
   function toggleLeft()  { settings.update(s => ({ ...s, showLeft:  !s.showLeft  })); }
   function toggleRight() { settings.update(s => ({ ...s, showRight: !s.showRight })); }
+
+  function fmtTokSec(u: Usage): string {
+    if (!u.totalMs) return '';
+    const elapsed = (u.totalMs - u.firstTokenMs) / 1000;
+    if (elapsed <= 0) return '';
+    return `${(u.outputTokens / elapsed).toFixed(1)} tok/s`;
+  }
+  function fmtMs(ms: number): string {
+    if (ms < 1000) return `${ms}ms`;
+    return `${(ms / 1000).toFixed(2)}s`;
+  }
 </script>
 
-<div class="app" class:left-hidden={!$settings.showLeft} class:right-hidden={!$settings.showRight}>
+<div class="grid h-screen bg-bg text-fg {gridCols}">
   {#if $settings.showLeft}
-    <aside class="left">
+    <aside class="overflow-hidden min-w-0">
       <ChatList {busy} />
     </aside>
   {/if}
 
-  <main class="center">
-    <header class="topbar">
-      <button class="toggle" on:click={toggleLeft} title={$settings.showLeft ? 'Hide chats' : 'Show chats'}>
-        {$settings.showLeft ? '⟨' : '⟩'}
-      </button>
-      <div class="title">
+  <main class="flex flex-col min-w-0 h-screen">
+    <header class="flex items-center gap-2 px-3.5 py-2 border-b border-border bg-bg">
+      <button
+        class="topbar-btn"
+        on:click={toggleLeft}
+        title={$settings.showLeft ? 'Hide chats' : 'Show chats'}
+      >{$settings.showLeft ? '⟨' : '⟩'}</button>
+      <div class="flex-1 text-center text-[0.9rem] font-medium text-fg-muted overflow-hidden text-ellipsis whitespace-nowrap">
         {$activeChat?.title ?? 'margo'}
       </div>
-      <div class="topbar-right">
-        <span class="provider-badge">{$settings.provider || 'no provider'}</span>
-        <button class="toggle" on:click={toggleRight} title={$settings.showRight ? 'Hide settings' : 'Show settings'}>
-          {$settings.showRight ? '⟩' : '⟨'}
-        </button>
+      <div class="flex items-center gap-2">
+        <span class="badge">{$settings.provider || 'no provider'}</span>
+        {#if $settings.model}<span class="badge">{$settings.model}</span>{/if}
+        {#if $settings.thinkEnabled}<span class="badge badge-active">thinking</span>{/if}
+        <button
+          class="topbar-btn"
+          on:click={toggleRight}
+          title={$settings.showRight ? 'Hide settings' : 'Show settings'}
+        >{$settings.showRight ? '⟩' : '⟨'}</button>
       </div>
     </header>
 
-    <section class="messages" bind:this={messagesEl}>
+    <section class="flex-1 overflow-y-auto px-5 py-4 flex flex-col gap-4 max-w-[820px] w-full mx-auto box-border" bind:this={messagesEl}>
       {#each messages as m, i (i)}
-        <div class="msg msg-{m.role}">
-          <div class="role">{m.role}</div>
-          <div class="content">
+        <div class="flex flex-col gap-1">
+          <div class="text-[0.68rem] uppercase text-fg-faint tracking-wider">{m.role}</div>
+          <div
+            class="leading-[1.55] px-4 py-3 rounded-lg text-[0.95rem] {m.role === 'user' ? 'bg-bubble-user' : 'bg-bubble-assistant'}"
+          >
+            {#if m.role === 'assistant' && m.thinking}
+              <details class="thinking-block" open={busy && i === messages.length - 1}>
+                <summary>thinking ({m.thinking.length} chars)</summary>
+                <div class="thinking-body">{m.thinking}</div>
+              </details>
+            {/if}
             {#if m.role === 'user'}
-              <div class="md plain">{m.content}</div>
+              <div class="md whitespace-pre-wrap">{m.content}</div>
             {:else}
               <div class="md" use:mathjax={m.content}>{@html renderMarkdown(m.content)}</div>
             {/if}
-            {#if busy && i === messages.length - 1 && m.role === 'assistant'}<span class="cursor">_</span>{/if}
+            {#if busy && i === messages.length - 1 && m.role === 'assistant'}<span class="cursor opacity-60">_</span>{/if}
           </div>
+          {#if m.role === 'assistant' && m.usage}
+            <div class="msg-footer">
+              {#if fmtTokSec(m.usage)}<span>{fmtTokSec(m.usage)}</span>{/if}
+              <span>{m.usage.outputTokens} tokens</span>
+              {#if m.usage.firstTokenMs > 0}<span>ttft {fmtMs(m.usage.firstTokenMs)}</span>{/if}
+              {#if m.usage.totalMs > 0}<span>total {fmtMs(m.usage.totalMs)}</span>{/if}
+            </div>
+          {/if}
         </div>
       {/each}
       {#if messages.length === 0}
-        <div class="empty">
-          <div class="empty-title">Start a conversation</div>
-          <div class="empty-sub">
+        <div class="m-auto text-center text-fg-faint p-8">
+          <div class="text-base text-fg-muted mb-2">Start a conversation</div>
+          <div class="text-[0.85rem] max-w-[480px] leading-[1.5]">
             Markdown, code blocks (with syntax highlighting), and math like $\int_0^1 x^2\,dx$ or $$e^{'{i\\pi}'} + 1 = 0$$ all render after the response completes.
           </div>
         </div>
       {/if}
     </section>
 
-    {#if error}<div class="error">{error}</div>{/if}
+    {#if error}
+      <div class="bg-error-bg text-error-fg border border-error-border px-3 py-2 rounded mx-5 mb-2 text-[0.85rem]">{error}</div>
+    {/if}
 
-    <footer class="composer">
+    <footer class="flex items-end gap-2 px-5 pt-3.5 pb-4 border-t border-border max-w-[820px] w-full mx-auto box-border">
       <textarea
-        class="input"
+        class="flex-1 bg-input-bg text-fg border border-border rounded-md px-3 py-2.5 font-[inherit] text-[0.9rem] resize-none outline-none focus:border-border-strong disabled:opacity-50 disabled:cursor-not-allowed"
         placeholder={$settings.provider ? "Send a message... (Enter to send, Shift+Enter for newline)" : "Configure a provider in the settings panel..."}
         bind:value={input}
         on:keydown={onKey}
         disabled={busy || !$settings.provider}
         rows="2"
       ></textarea>
-      {#if busy && activeStreamId}
-        <button class="btn-cancel" on:click={cancel}>cancel</button>
-      {:else}
-        <button class="btn-send" on:click={send} disabled={busy || !$settings.provider || !input.trim()}>
-          {busy ? '...' : 'send'}
-        </button>
-      {/if}
+      <div class="flex flex-col items-center gap-1">
+        <div
+          class="ctx-ring"
+          title="{ctxUsed.toLocaleString()} / {ctxWindow.toLocaleString()} tokens"
+          style="--pct: {ctxPct}"
+        >
+          <span>{ctxPct}%</span>
+        </div>
+        {#if busy && activeStreamId}
+          <button class="composer-btn cancel-btn" on:click={cancel}>cancel</button>
+        {:else}
+          <button
+            class="composer-btn send-btn"
+            on:click={send}
+            disabled={busy || !$settings.provider || !input.trim()}
+          >{busy ? '...' : 'send'}</button>
+        {/if}
+      </div>
     </footer>
   </main>
 
   {#if $settings.showRight}
-    <aside class="right">
-      <SettingsPanel {providers} {busy} />
+    <aside class="overflow-hidden min-w-0">
+      <SettingsPanel {providers} {models} {busy} />
     </aside>
   {/if}
 </div>
 
 <style>
-  .app {
-    display: grid;
-    grid-template-columns: 280px 1fr 300px;
-    height: 100vh;
-    background: var(--bg);
-    color: var(--fg);
-  }
-  .app.left-hidden  { grid-template-columns: 0 1fr 300px; }
-  .app.right-hidden { grid-template-columns: 280px 1fr 0; }
-  .app.left-hidden.right-hidden { grid-template-columns: 0 1fr 0; }
-
-  aside.left, aside.right {
-    overflow: hidden;
-    min-width: 0;
-  }
-
-  .center {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    height: 100vh;
-  }
-
-  .topbar {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem 0.85rem;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg);
-  }
-  .topbar .title {
-    flex: 1;
-    text-align: center;
-    font-size: 0.9rem;
-    font-weight: 500;
+  .topbar-btn {
+    background: transparent;
     color: var(--fg-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.2rem 0.5rem;
+    font-size: 0.85rem;
+    line-height: 1;
+    cursor: pointer;
+    font-family: inherit;
   }
-  .topbar-right {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-  .provider-badge {
-    font-size: 0.72rem;
+  .topbar-btn:hover { background: var(--hover-bg); color: var(--fg); }
+
+  .badge {
+    font-size: 0.7rem;
     color: var(--fg-faint);
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -266,51 +324,102 @@
     border-radius: 3px;
     border: 1px solid var(--border);
   }
-  .toggle {
-    background: transparent;
-    color: var(--fg-muted);
+  .badge-active {
+    color: var(--fg);
+    background: var(--accent);
+    border-color: transparent;
+  }
+
+  .composer-btn {
+    padding: 0 1.1rem;
+    min-width: 80px;
+    height: 2rem;
+    border-radius: 6px;
     border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 0.2rem 0.5rem;
+    background: var(--input-bg);
+    color: var(--fg);
+    font-family: inherit;
     font-size: 0.85rem;
     cursor: pointer;
-    font-family: inherit;
-    line-height: 1;
   }
-  .toggle:hover { background: var(--hover-bg); color: var(--fg); }
+  .send-btn:hover:not(:disabled) { background: var(--hover-bg); }
+  .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .cancel-btn {
+    background: var(--error-bg);
+    color: var(--error-fg);
+    border-color: var(--error-border);
+  }
+  .cancel-btn:hover { filter: brightness(1.05); }
 
-  .messages {
-    flex: 1;
-    overflow-y: auto;
-    padding: 1rem 1.2rem;
+  .ctx-ring {
+    width: 2rem;
+    height: 2rem;
+    border-radius: 50%;
+    background:
+      conic-gradient(var(--fg-muted) calc(var(--pct) * 1%), var(--input-bg) 0);
     display: flex;
-    flex-direction: column;
-    gap: 1rem;
-    max-width: 820px;
-    width: 100%;
-    margin: 0 auto;
-    box-sizing: border-box;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.6rem;
+    color: var(--fg-muted);
+    font-variant-numeric: tabular-nums;
+    position: relative;
+  }
+  .ctx-ring::before {
+    content: '';
+    position: absolute;
+    inset: 3px;
+    background: var(--bg);
+    border-radius: 50%;
+  }
+  .ctx-ring span { position: relative; z-index: 1; }
+
+  .msg-footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    font-size: 0.7rem;
+    color: var(--fg-faint);
+    padding-top: 0.25rem;
+    font-variant-numeric: tabular-nums;
   }
 
-  .msg { display: flex; flex-direction: column; gap: 0.25rem; }
-  .role {
-    font-size: 0.68rem;
-    text-transform: uppercase;
-    color: var(--fg-faint);
-    letter-spacing: 0.05em;
+  .thinking-block {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    margin-bottom: 0.5rem;
+    background: var(--input-bg);
   }
-  .content {
-    line-height: 1.55;
-    padding: 0.7rem 0.95rem;
-    border-radius: 8px;
-    font-size: 0.95rem;
+  .thinking-block summary {
+    cursor: pointer;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.75rem;
+    color: var(--fg-muted);
+    user-select: none;
+    list-style: none;
   }
-  .msg-user .content { background: var(--bubble-user); }
-  .msg-assistant .content { background: var(--bubble-assistant); }
-  .cursor { animation: blink 1s steps(2) infinite; opacity: 0.6; }
+  .thinking-block summary::-webkit-details-marker { display: none; }
+  .thinking-block summary::before {
+    content: '▸ ';
+    display: inline-block;
+    transition: transform 100ms;
+  }
+  .thinking-block[open] summary::before {
+    content: '▾ ';
+  }
+  .thinking-body {
+    padding: 0 0.6rem 0.5rem;
+    font-size: 0.82rem;
+    color: var(--fg-muted);
+    white-space: pre-wrap;
+    line-height: 1.45;
+    border-top: 1px solid var(--border);
+    padding-top: 0.5rem;
+  }
+
+  .cursor { animation: blink 1s steps(2) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
 
-  .md.plain { white-space: pre-wrap; }
   .md :global(p) { margin: 0.4em 0; }
   .md :global(p:first-child) { margin-top: 0; }
   .md :global(p:last-child) { margin-bottom: 0; }
@@ -357,68 +466,4 @@
     font-size: 0.85em;
     line-height: 1.45;
   }
-
-  .empty {
-    margin: auto;
-    text-align: center;
-    color: var(--fg-faint);
-    padding: 2rem;
-  }
-  .empty-title { font-size: 1rem; color: var(--fg-muted); margin-bottom: 0.5rem; }
-  .empty-sub { font-size: 0.85rem; max-width: 480px; line-height: 1.5; }
-
-  .error {
-    background: var(--error-bg);
-    color: var(--error-fg);
-    border: 1px solid var(--error-border);
-    padding: 0.5rem 0.75rem;
-    border-radius: 4px;
-    margin: 0 1.2rem 0.5rem;
-    font-size: 0.85rem;
-  }
-
-  .composer {
-    display: flex;
-    gap: 0.5rem;
-    padding: 0.85rem 1.2rem 1rem;
-    border-top: 1px solid var(--border);
-    max-width: 820px;
-    width: 100%;
-    margin: 0 auto;
-    box-sizing: border-box;
-  }
-  .composer .input {
-    flex: 1;
-    background: var(--input-bg);
-    color: var(--fg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 0.6rem 0.75rem;
-    font-family: inherit;
-    font-size: 0.9rem;
-    resize: none;
-    outline: none;
-  }
-  .composer .input:focus { border-color: var(--border-strong); }
-  .composer .input:disabled { opacity: 0.5; cursor: not-allowed; }
-
-  .btn-send, .btn-cancel {
-    padding: 0 1.3rem;
-    min-width: 90px;
-    border-radius: 6px;
-    border: 1px solid var(--border);
-    background: var(--input-bg);
-    color: var(--fg);
-    font-family: inherit;
-    font-size: 0.85rem;
-    cursor: pointer;
-  }
-  .btn-send:hover:not(:disabled) { background: var(--hover-bg); }
-  .btn-send:disabled { opacity: 0.4; cursor: not-allowed; }
-  .btn-cancel {
-    background: var(--error-bg);
-    color: var(--error-fg);
-    border-color: var(--error-border);
-  }
-  .btn-cancel:hover { filter: brightness(1.05); }
 </style>
