@@ -9,6 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Eino orchestration layer (`pkg/margo/agent`) bridging margo's chat
+  clients to the CloudWeGo Eino framework. `Adapter` exposes any
+  `margo.Client` as `model.ToolCallingChatModel` (Generate + Stream +
+  immutable `WithTools`); `*schema.ToolInfo` parameters are converted
+  to `margo.ToolDef.Parameters` via `ParamsOneOf.ToJSONSchema()` +
+  JSON round-trip. `Chat` / `ChatStream` entry points wrap simple
+  flows; `React` and `StreamReact` run a `react.NewAgent` loop with
+  tool callbacks emitting `StepEvent{Kind: text|tool_call|
+  tool_result|error|done}`. Built-in `current_time` tool included as
+  proof-of-life.
+- Tool calling end-to-end across all three first-party providers.
+  `margo.Request` gains `Tools []ToolDef` and `ToolChoice string`;
+  `margo.Message` gains `ToolCalls []ToolCall` and `ToolCallID`;
+  `margo.Response` gains `ToolCalls`; new `RoleSystem` / `RoleTool`
+  roles and `ChunkToolCall` chunk kind. OpenAI and OpenRouter wire
+  tools via `ChatCompletionFunctionTool` and accumulate per-index
+  tool-call deltas in streaming. Anthropic wires tools via
+  `ToolUnionParam{OfTool: ...}`, batches consecutive `RoleTool`
+  messages into a single user message with multiple `tool_result`
+  blocks (required by the Claude API), and accumulates `tool_use`
+  deltas across `content_block_start` / `input_json_delta` /
+  `content_block_stop` events.
+- Agent mode in the desktop UI. `App.StreamAgent(id, provider, system,
+  messages, opts, toolNames)` runs the ReAct loop and emits step
+  events on the existing `margo:stream:<id>:chunk` channel; `App.Tools()`
+  returns the registry of available tool names. `Message.steps?:
+  AgentStep[]` extends the persisted chat schema; `appendStepToLast` /
+  `updateLastStepResult` pair tool_call/tool_result events into a
+  single step entry. Composer gains an "agent mode" checkbox (visible
+  only when tools are configured) that routes `send` through
+  `StreamAgent` instead of `StreamChat`. Tool calls render as
+  monospace cards above the assistant content showing `→ name(args)`
+  and `← result` (or "running…" while in flight).
+- OpenRouter provider (`pkg/margo/providers/openrouter`) using the
+  existing `openai-go/v3` SDK pointed at
+  `https://openrouter.ai/api/v1` with `HTTP-Referer` / `X-Title`
+  headers. Reads `OPENROUTER_API_KEY` from env / `.env` via
+  `internal/config`. Default model `deepseek/deepseek-v3.2`; 17-model
+  allowlist exposed via `App.Models("openrouter")` (DeepSeek, Gemini,
+  Gemma, Kimi, Nemotron, OWL, Qwen, Grok families).
+- Vendored fonts under `frontend/public/fonts/` (no CDN). Merriweather
+  (serif, 3-axis variable: opsz/wdth/wght 300–900) for markdown body
+  text via `--font-serif`; Merriweather Sans (variable wght 300–800)
+  for UI chrome via `--font-sans`; JetBrains Mono (variable wght
+  100–800) for code via `--font-mono`. All include true italic
+  variants. Source TTFs subsetted to Latin coverage via `pyftsubset`
+  (Merriweather 4.4MB → 760KB upright, 756KB italic). OFL licenses
+  bundled alongside the woff2s.
+- Melt UI confirm dialog for chat deletion. The previous inline
+  "sure?" two-click pattern is replaced by a centered alertdialog
+  with proper focus trap, Escape, and click-outside handling. The
+  `×` button is now an inline 12×12 outline trash-can SVG.
 - Tailwind CSS v4 + Melt UI for the desktop frontend. CSS variables
   registered as `@theme inline` tokens (`bg-bg`, `text-fg-muted`,
   `border-border`, etc.) so existing `:root.dark` theming still drives
@@ -104,6 +156,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- macOS bundle and window title display as `Margo` (capitalized).
+  Added `info.productName: "Margo"` to `wails.json` (drives
+  `CFBundleName` for both production and dev plists) and updated
+  `options.App.Title` in `main.go`. Module name, binary name, and
+  config keys remain lowercase.
+- Default markdown body font is now Merriweather (serif) — chat
+  responses use `var(--font-serif)` so prose reads in a serif while
+  UI chrome (sidebar, composer, settings) stays in Merriweather Sans
+  via `var(--font-sans)`. Code blocks pick up `var(--font-mono)`
+  (JetBrains Mono) automatically.
+- `StreamChat`'s chunk payload carries a third event family beyond
+  `text` / `thinking`: agent runs additionally emit
+  `tool_call` / `tool_result` chunks. The frontend handler now
+  dispatches by `payload.kind`; consumers of the bus that ignored
+  unknown kinds continue to work unchanged.
 - Frontend toolchain upgraded: Svelte 3.49 -> 4.2, Vite 3 -> 5,
   TypeScript 4.6 -> 5.5, `@sveltejs/vite-plugin-svelte` 1 -> 3,
   `svelte-preprocess` 4 -> 6, `svelte-check` 2 -> 3.

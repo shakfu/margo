@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { Providers, Models, Chat, StreamChat, CancelStream } from '../wailsjs/go/main/App.js';
+  import { Providers, Models, Chat, StreamChat, StreamAgent, CancelStream, Tools } from '../wailsjs/go/main/App.js';
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js';
   import { mathjax } from './lib/mathjax';
   import { renderMarkdown, setHighlightTheme } from './lib/markdown';
@@ -14,14 +14,18 @@
     appendMessage,
     appendToLast,
     appendThinkingToLast,
+    appendStepToLast,
+    updateLastStepResult,
     setLastUsage,
-    type Usage
+    type Usage,
+    type AgentStep
   } from './lib/store';
   import ChatList from './lib/ChatList.svelte';
   import SettingsPanel from './lib/SettingsPanel.svelte';
 
   let providers: string[] = [];
   let models: string[] = [];
+  let availableTools: string[] = [];
   let input = '';
   let busy = false;
   let error = '';
@@ -57,6 +61,7 @@
       } else if (providers.length === 0) {
         error = 'No providers configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY in .env and restart.';
       }
+      availableTools = await Tools();
     } catch (e) {
       error = String(e);
     }
@@ -134,11 +139,30 @@
     const base = `margo:stream:${id}`;
     const targetChatId = chat.id;
 
-    EventsOn(`${base}:chunk`, (payload: { kind: string; text: string }) => {
-      if (payload.kind === 'thinking') {
-        appendThinkingToLast(targetChatId, payload.text);
-      } else {
-        appendToLast(targetChatId, payload.text);
+    EventsOn(`${base}:chunk`, (payload: { kind: string; text?: string; name?: string; arguments?: string; result?: string; isError?: boolean }) => {
+      switch (payload.kind) {
+        case 'thinking':
+          appendThinkingToLast(targetChatId, payload.text ?? '');
+          break;
+        case 'tool_call':
+          appendStepToLast(targetChatId, {
+            kind: 'tool_call',
+            name: payload.name ?? '',
+            arguments: payload.arguments ?? '',
+          });
+          break;
+        case 'tool_result':
+          updateLastStepResult(
+            targetChatId,
+            payload.name ?? '',
+            payload.result ?? '',
+            !!payload.isError,
+          );
+          break;
+        case 'text':
+        default:
+          appendToLast(targetChatId, payload.text ?? '');
+          break;
       }
       scrollToBottom();
     });
@@ -157,7 +181,11 @@
     });
 
     try {
-      await StreamChat(id, $settings.provider, $settings.system, history, buildOptions());
+      if ($settings.agentMode && availableTools.length > 0) {
+        await StreamAgent(id, $settings.provider, $settings.system, history, buildOptions(), availableTools);
+      } else {
+        await StreamChat(id, $settings.provider, $settings.system, history, buildOptions());
+      }
     } catch (e) {
       error = String(e);
       busy = false;
@@ -175,6 +203,10 @@
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
   }
 
+  function toggleAgentMode(e: Event) {
+    const checked = (e.currentTarget as HTMLInputElement).checked;
+    settings.update(s => ({ ...s, agentMode: checked }));
+  }
   function toggleLeft()  { settings.update(s => ({ ...s, showLeft:  !s.showLeft  })); }
   function toggleRight() { settings.update(s => ({ ...s, showRight: !s.showRight })); }
 
@@ -232,6 +264,26 @@
                 <div class="thinking-body">{m.thinking}</div>
               </details>
             {/if}
+            {#if m.role === 'assistant' && m.steps && m.steps.length > 0}
+              <div class="flex flex-col gap-1.5 mb-2">
+                {#each m.steps as step}
+                  <div class="border border-border rounded-md bg-input-bg overflow-hidden text-[0.78rem] font-[family-name:var(--font-mono)]">
+                    <div class="flex items-center gap-2 px-2.5 py-1 border-b border-border bg-bg-elev">
+                      <span class="text-fg-muted">→</span>
+                      <span class="font-semibold text-fg">{step.name}</span>
+                      <span class="text-fg-faint truncate flex-1">{step.arguments || '{}'}</span>
+                    </div>
+                    {#if step.result !== undefined}
+                      <div class="px-2.5 py-1.5 {step.isError ? 'text-error-fg' : 'text-fg-muted'} whitespace-pre-wrap break-words">
+                        <span class="text-fg-faint mr-1">←</span>{step.result}
+                      </div>
+                    {:else if busy && i === messages.length - 1}
+                      <div class="px-2.5 py-1.5 text-fg-faint italic">running…</div>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/if}
             {#if m.role === 'user'}
               <div class="md whitespace-pre-wrap">{m.content}</div>
             {:else}
@@ -263,7 +315,25 @@
       <div class="bg-error-bg text-error-fg border border-error-border px-3 py-2 rounded mx-5 mb-2 text-[0.85rem]">{error}</div>
     {/if}
 
-    <footer class="flex items-end gap-2 px-5 pt-3.5 pb-4 border-t border-border max-w-[820px] w-full mx-auto box-border">
+    <footer class="flex flex-col gap-2 px-5 pt-3.5 pb-4 border-t border-border max-w-[820px] w-full mx-auto box-border">
+      {#if availableTools.length > 0}
+        <div class="flex items-center gap-2 text-[0.78rem]">
+          <label class="inline-flex items-center gap-1.5 cursor-pointer text-fg-muted hover:text-fg">
+            <input
+              type="checkbox"
+              class="cursor-pointer"
+              checked={$settings.agentMode}
+              on:change={toggleAgentMode}
+              disabled={busy}
+            />
+            <span>agent mode</span>
+          </label>
+          {#if $settings.agentMode}
+            <span class="text-fg-faint">tools: {availableTools.join(', ')}</span>
+          {/if}
+        </div>
+      {/if}
+      <div class="flex items-end gap-2">
       <textarea
         class="flex-1 bg-input-bg text-fg border border-border rounded-md px-3 py-2.5 font-[inherit] text-[0.9rem] resize-none outline-none focus:border-border-strong disabled:opacity-50 disabled:cursor-not-allowed"
         placeholder={$settings.provider ? "Send a message... (Enter to send, Shift+Enter for newline)" : "Configure a provider in the settings panel..."}
@@ -289,6 +359,7 @@
             disabled={busy || !$settings.provider || !input.trim()}
           >{busy ? '...' : 'send'}</button>
         {/if}
+      </div>
       </div>
     </footer>
   </main>

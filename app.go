@@ -7,8 +7,12 @@ import (
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
+
 	"github.com/shakfu/margo/internal/config"
 	"github.com/shakfu/margo/pkg/margo"
+	"github.com/shakfu/margo/pkg/margo/agent"
 	"github.com/shakfu/margo/pkg/margo/providers/anthropic"
 	"github.com/shakfu/margo/pkg/margo/providers/openai"
 	"github.com/shakfu/margo/pkg/margo/providers/openrouter"
@@ -293,6 +297,125 @@ func (a *App) StreamChat(id, provider, system string, messages []ChatMessage, op
 		runtime.EventsEmit(a.ctx, base+":done", done)
 	}()
 	return nil
+}
+
+// Tools returns the list of built-in agent tools by name. The frontend uses
+// this to populate the agent-mode tool picker.
+func (a *App) Tools() []string {
+	out := make([]string, 0, len(builtinTools))
+	for name := range builtinTools {
+		out = append(out, name)
+	}
+	return out
+}
+
+// builtinTools is the registry of tools the agent path can equip. Today this
+// is a single proof-of-life clock tool; expand here as new tools land.
+var builtinTools = map[string]func() tool.InvokableTool{
+	"current_time": agent.CurrentTimeTool,
+}
+
+// AgentStepEvent is the payload for `margo:stream:<id>:chunk` events emitted
+// during a StreamAgent run. Kind values: "text", "tool_call", "tool_result".
+type AgentStepEvent struct {
+	Kind      string `json:"kind"`
+	Text      string `json:"text,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+	Result    string `json:"result,omitempty"`
+	IsError   bool   `json:"isError,omitempty"`
+}
+
+// StreamAgent runs a ReAct agent against the named tools and emits step events
+// (text deltas, tool_call, tool_result) over the same `margo:stream:<id>:*`
+// channels used by StreamChat.
+//
+// `toolNames` selects which tools from Tools() the agent can call this run;
+// pass empty for plain chat (which is what StreamChat already does — prefer
+// that path when no tools are needed).
+func (a *App) StreamAgent(id, provider, system string, messages []ChatMessage, opts ChatOptions, toolNames []string) error {
+	c, err := a.clientFor(provider)
+	if err != nil {
+		return err
+	}
+
+	tools := make([]tool.BaseTool, 0, len(toolNames))
+	for _, name := range toolNames {
+		ctor, ok := builtinTools[name]
+		if !ok {
+			return fmt.Errorf("unknown tool: %s", name)
+		}
+		tools = append(tools, ctor())
+	}
+
+	ctx, cancel := context.WithCancel(a.ctx)
+	a.mu.Lock()
+	if _, exists := a.cancels[id]; exists {
+		a.mu.Unlock()
+		cancel()
+		return fmt.Errorf("stream id %q already in use", id)
+	}
+	a.cancels[id] = cancel
+	a.mu.Unlock()
+
+	go func() {
+		base := "margo:stream:" + id
+		defer func() {
+			a.mu.Lock()
+			delete(a.cancels, id)
+			a.mu.Unlock()
+			cancel()
+		}()
+
+		input := toSchemaMessages(messages)
+		req := toMargoRequest(system, nil, opts)
+
+		err := agent.StreamReact(ctx, c, req, tools, input, func(ev agent.StepEvent) {
+			switch ev.Kind {
+			case agent.StepText:
+				runtime.EventsEmit(a.ctx, base+":chunk", AgentStepEvent{Kind: "text", Text: ev.Text})
+			case agent.StepToolCall:
+				runtime.EventsEmit(a.ctx, base+":chunk", AgentStepEvent{
+					Kind: "tool_call", Name: ev.Name, Arguments: ev.Arguments,
+				})
+			case agent.StepToolResult:
+				runtime.EventsEmit(a.ctx, base+":chunk", AgentStepEvent{
+					Kind: "tool_result", Name: ev.Name, Result: ev.Result, IsError: ev.IsError,
+				})
+			case agent.StepDone:
+				var done StreamDoneEvent
+				if ev.Usage != nil {
+					done.Usage = &StreamUsage{
+						InputTokens:  ev.Usage.InputTokens,
+						OutputTokens: ev.Usage.OutputTokens,
+						FirstTokenMs: ev.Usage.FirstTokenMs,
+						TotalMs:      ev.Usage.TotalMs,
+					}
+				}
+				runtime.EventsEmit(a.ctx, base+":done", done)
+			case agent.StepError:
+				runtime.EventsEmit(a.ctx, base+":error", ev.Text)
+			}
+		})
+		if err != nil {
+			runtime.EventsEmit(a.ctx, base+":error", err.Error())
+		}
+	}()
+	return nil
+}
+
+func toSchemaMessages(in []ChatMessage) []*schema.Message {
+	out := make([]*schema.Message, 0, len(in))
+	for _, m := range in {
+		role := schema.User
+		if m.Role == "assistant" {
+			role = schema.Assistant
+		} else if m.Role == "system" {
+			role = schema.System
+		}
+		out = append(out, &schema.Message{Role: role, Content: m.Content})
+	}
+	return out
 }
 
 // CancelStream cancels an in-flight stream. No-op if the id is unknown.

@@ -22,6 +22,14 @@ export function Providers() {
   return window['go']['main']['App']['Providers']();
 }
 
+export function StreamAgent(arg1, arg2, arg3, arg4, arg5, arg6) {
+  return window['go']['main']['App']['StreamAgent'](arg1, arg2, arg3, arg4, arg5, arg6);
+}
+
 export function StreamChat(arg1, arg2, arg3, arg4, arg5) {
   return window['go']['main']['App']['StreamChat'](arg1, arg2, arg3, arg4, arg5);
+}
+
+export function Tools() {
+  return window['go']['main']['App']['Tools']();
 }

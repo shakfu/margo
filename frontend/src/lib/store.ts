@@ -9,11 +9,22 @@ export interface Usage {
   totalMs: number;
 }
 
+export type StepKind = 'tool_call' | 'tool_result';
+
+export interface AgentStep {
+  kind: StepKind;
+  name: string;
+  arguments?: string;
+  result?: string;
+  isError?: boolean;
+}
+
 export interface Message {
   role: Role;
   content: string;
   thinking?: string;
   usage?: Usage;
+  steps?: AgentStep[];
 }
 
 export interface Chat {
@@ -40,6 +51,7 @@ export interface Settings {
   stopSequences: string[];
   thinkEnabled: boolean;
   thinkBudget: number;
+  agentMode: boolean;
 }
 
 // Approximate context window per model. Used by the context-usage ring.
@@ -100,6 +112,7 @@ const defaults: Settings = {
   stopSequences: [],
   thinkEnabled: false,
   thinkBudget: 4096,
+  agentMode: false,
 };
 
 function loadSettings(): Settings {
@@ -198,6 +211,47 @@ export function appendThinkingToLast(id: string, delta: string) {
         ...last,
         thinking: (last.thinking ?? '') + delta,
       };
+      return { ...c, messages, updatedAt: Date.now() };
+    })
+  );
+}
+
+export function appendStepToLast(id: string, step: AgentStep) {
+  chats.update(cs =>
+    cs.map(c => {
+      if (c.id !== id || c.messages.length === 0) return c;
+      const messages = [...c.messages];
+      const last = messages[messages.length - 1];
+      const steps = [...(last.steps ?? []), step];
+      messages[messages.length - 1] = { ...last, steps };
+      return { ...c, messages, updatedAt: Date.now() };
+    })
+  );
+}
+
+// updateLastStepResult finds the most recent tool_call step for `name` that
+// is missing a paired tool_result and attaches the result. Falls back to
+// appending a fresh tool_result step if no matching call is found.
+export function updateLastStepResult(id: string, name: string, result: string, isError: boolean) {
+  chats.update(cs =>
+    cs.map(c => {
+      if (c.id !== id || c.messages.length === 0) return c;
+      const messages = [...c.messages];
+      const last = messages[messages.length - 1];
+      const steps = [...(last.steps ?? [])];
+      let merged = false;
+      for (let i = steps.length - 1; i >= 0; i--) {
+        const s = steps[i];
+        if (s.kind === 'tool_call' && s.name === name && s.result === undefined) {
+          steps[i] = { ...s, result, isError };
+          merged = true;
+          break;
+        }
+      }
+      if (!merged) {
+        steps.push({ kind: 'tool_result', name, result, isError });
+      }
+      messages[messages.length - 1] = { ...last, steps };
       return { ...c, messages, updatedAt: Date.now() };
     })
   );

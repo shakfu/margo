@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -36,21 +37,10 @@ func (c *Client) buildParams(req margo.Request) sdk.MessageNewParams {
 		maxTokens = 1024
 	}
 
-	msgs := make([]sdk.MessageParam, 0, len(req.Messages))
-	for _, m := range req.Messages {
-		block := sdk.NewTextBlock(m.Content)
-		switch m.Role {
-		case margo.RoleAssistant:
-			msgs = append(msgs, sdk.NewAssistantMessage(block))
-		default:
-			msgs = append(msgs, sdk.NewUserMessage(block))
-		}
-	}
-
 	params := sdk.MessageNewParams{
 		MaxTokens: maxTokens,
 		Model:     sdk.Model(model),
-		Messages:  msgs,
+		Messages:  toAnthropicMessages(req.Messages),
 	}
 	if req.System != "" {
 		params.System = []sdk.TextBlockParam{{Text: req.System}}
@@ -71,7 +61,108 @@ func (c *Client) buildParams(req margo.Request) sdk.MessageNewParams {
 		}
 		params.Thinking = sdk.ThinkingConfigParamOfEnabled(budget)
 	}
+	if len(req.Tools) > 0 {
+		tools := make([]sdk.ToolUnionParam, 0, len(req.Tools))
+		for _, t := range req.Tools {
+			tools = append(tools, toAnthropicTool(t))
+		}
+		params.Tools = tools
+	}
+	if tc, ok := toolChoice(req.ToolChoice); ok {
+		params.ToolChoice = tc
+	}
 	return params
+}
+
+// toAnthropicMessages converts margo messages into Anthropic message params.
+//
+// Anthropic does not have a "tool" role: tool results are sent as one or more
+// tool_result content blocks inside a user message. Consecutive RoleTool
+// entries are batched into a single user message so the API accepts them.
+func toAnthropicMessages(msgs []margo.Message) []sdk.MessageParam {
+	out := make([]sdk.MessageParam, 0, len(msgs))
+	i := 0
+	for i < len(msgs) {
+		m := msgs[i]
+		switch m.Role {
+		case margo.RoleAssistant:
+			blocks := make([]sdk.ContentBlockParamUnion, 0, 1+len(m.ToolCalls))
+			if m.Content != "" {
+				blocks = append(blocks, sdk.NewTextBlock(m.Content))
+			}
+			for _, tc := range m.ToolCalls {
+				var input any
+				if tc.Arguments != "" {
+					if err := json.Unmarshal([]byte(tc.Arguments), &input); err != nil {
+						input = tc.Arguments
+					}
+				}
+				blocks = append(blocks, sdk.NewToolUseBlock(tc.ID, input, tc.Name))
+			}
+			out = append(out, sdk.NewAssistantMessage(blocks...))
+			i++
+		case margo.RoleTool:
+			blocks := []sdk.ContentBlockParamUnion{}
+			for i < len(msgs) && msgs[i].Role == margo.RoleTool {
+				blocks = append(blocks, sdk.NewToolResultBlock(msgs[i].ToolCallID, msgs[i].Content, false))
+				i++
+			}
+			out = append(out, sdk.NewUserMessage(blocks...))
+		case margo.RoleSystem:
+			// System content belongs in MessageNewParams.System, not here.
+			i++
+		default:
+			out = append(out, sdk.NewUserMessage(sdk.NewTextBlock(m.Content)))
+			i++
+		}
+	}
+	return out
+}
+
+func toAnthropicTool(t margo.ToolDef) sdk.ToolUnionParam {
+	inp := sdk.ToolInputSchemaParam{}
+	if t.Parameters != nil {
+		if props, ok := t.Parameters["properties"]; ok {
+			inp.Properties = props
+		}
+		if reqRaw, ok := t.Parameters["required"]; ok {
+			switch v := reqRaw.(type) {
+			case []string:
+				inp.Required = v
+			case []any:
+				for _, r := range v {
+					if s, ok := r.(string); ok {
+						inp.Required = append(inp.Required, s)
+					}
+				}
+			}
+		}
+	}
+	tp := sdk.ToolParam{
+		Name:        t.Name,
+		InputSchema: inp,
+	}
+	if t.Description != "" {
+		tp.Description = param.NewOpt(t.Description)
+	}
+	return sdk.ToolUnionParam{OfTool: &tp}
+}
+
+func toolChoice(s string) (sdk.ToolChoiceUnionParam, bool) {
+	switch s {
+	case "":
+		return sdk.ToolChoiceUnionParam{}, false
+	case "auto":
+		return sdk.ToolChoiceUnionParam{OfAuto: &sdk.ToolChoiceAutoParam{}}, true
+	case "required":
+		// Anthropic's "any" forces the model to call some tool.
+		return sdk.ToolChoiceUnionParam{OfAny: &sdk.ToolChoiceAnyParam{}}, true
+	case "none":
+		none := sdk.NewToolChoiceNoneParam()
+		return sdk.ToolChoiceUnionParam{OfNone: &none}, true
+	default:
+		return sdk.ToolChoiceUnionParam{OfTool: &sdk.ToolChoiceToolParam{Name: s}}, true
+	}
 }
 
 func (c *Client) Complete(ctx context.Context, req margo.Request) (margo.Response, error) {
@@ -80,23 +171,37 @@ func (c *Client) Complete(ctx context.Context, req margo.Request) (margo.Respons
 		return margo.Response{}, err
 	}
 	var text, thinking strings.Builder
+	var toolCalls []margo.ToolCall
 	for _, block := range msg.Content {
 		switch v := block.AsAny().(type) {
 		case sdk.TextBlock:
 			text.WriteString(v.Text)
 		case sdk.ThinkingBlock:
 			thinking.WriteString(v.Thinking)
+		case sdk.ToolUseBlock:
+			toolCalls = append(toolCalls, margo.ToolCall{
+				ID:        v.ID,
+				Name:      v.Name,
+				Arguments: string(v.Input),
+			})
 		}
 	}
 	return margo.Response{
-		Text:     text.String(),
-		Thinking: thinking.String(),
-		Model:    string(msg.Model),
+		Text:      text.String(),
+		Thinking:  thinking.String(),
+		Model:     string(msg.Model),
+		ToolCalls: toolCalls,
 		Usage: margo.Usage{
 			InputTokens:  int(msg.Usage.InputTokens),
 			OutputTokens: int(msg.Usage.OutputTokens),
 		},
 	}, nil
+}
+
+// pendingToolUse accumulates streamed tool_use deltas keyed by content-block index.
+type pendingToolUse struct {
+	id, name string
+	input    strings.Builder
 }
 
 func (c *Client) Stream(ctx context.Context, req margo.Request) (<-chan margo.Chunk, error) {
@@ -109,6 +214,7 @@ func (c *Client) Stream(ctx context.Context, req margo.Request) (<-chan margo.Ch
 		started := time.Now()
 		var firstToken time.Time
 		usage := margo.Usage{}
+		pending := map[int64]*pendingToolUse{}
 
 		for stream.Next() {
 			ev := stream.Current()
@@ -116,8 +222,17 @@ func (c *Client) Stream(ctx context.Context, req margo.Request) (<-chan margo.Ch
 			case "message_start":
 				ms := ev.AsMessageStart()
 				usage.InputTokens = int(ms.Message.Usage.InputTokens)
+			case "content_block_start":
+				start := ev.AsContentBlockStart()
+				if start.ContentBlock.Type == "tool_use" {
+					pending[start.Index] = &pendingToolUse{
+						id:   start.ContentBlock.ID,
+						name: start.ContentBlock.Name,
+					}
+				}
 			case "content_block_delta":
-				delta := ev.AsContentBlockDelta().Delta
+				cbd := ev.AsContentBlockDelta()
+				delta := cbd.Delta
 				switch delta.Type {
 				case "text_delta":
 					if firstToken.IsZero() {
@@ -140,6 +255,25 @@ func (c *Client) Stream(ctx context.Context, req margo.Request) (<-chan margo.Ch
 						case <-ctx.Done():
 							return
 						}
+					}
+				case "input_json_delta":
+					if p, ok := pending[cbd.Index]; ok && delta.PartialJSON != "" {
+						p.input.WriteString(delta.PartialJSON)
+					}
+				}
+			case "content_block_stop":
+				stop := ev.AsContentBlockStop()
+				if p, ok := pending[stop.Index]; ok {
+					delete(pending, stop.Index)
+					args := p.input.String()
+					if args == "" {
+						args = "{}"
+					}
+					tc := margo.ToolCall{ID: p.id, Name: p.name, Arguments: args}
+					select {
+					case out <- margo.Chunk{Kind: margo.ChunkToolCall, ToolCall: &tc}:
+					case <-ctx.Done():
+						return
 					}
 				}
 			case "message_delta":
