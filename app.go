@@ -11,15 +11,17 @@ import (
 	"github.com/shakfu/margo/pkg/margo"
 	"github.com/shakfu/margo/pkg/margo/providers/anthropic"
 	"github.com/shakfu/margo/pkg/margo/providers/openai"
+	"github.com/shakfu/margo/pkg/margo/providers/openrouter"
 )
 
 // App is the Wails-bound struct. Exported methods are callable from the frontend
 // via the auto-generated bindings in frontend/wailsjs/go/main/App.{js,d.ts}.
 type App struct {
-	ctx       context.Context
-	cfg       *config.Config
-	anthropic margo.Client
-	openai    margo.Client
+	ctx        context.Context
+	cfg        *config.Config
+	anthropic  margo.Client
+	openai     margo.Client
+	openrouter margo.Client
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
@@ -33,6 +35,9 @@ func NewApp() *App {
 	}
 	if cfg.OpenAIAPIKey != "" {
 		a.openai = openai.New(cfg.OpenAIAPIKey)
+	}
+	if cfg.OpenRouterAPIKey != "" {
+		a.openrouter = openrouter.New(cfg.OpenRouterAPIKey)
 	}
 	return a
 }
@@ -53,6 +58,8 @@ func (a *App) clientFor(provider string) (margo.Client, error) {
 		c = a.anthropic
 	case "openai":
 		c = a.openai
+	case "openrouter":
+		c = a.openrouter
 	default:
 		return nil, fmt.Errorf("unknown provider: %s", provider)
 	}
@@ -70,6 +77,9 @@ func (a *App) Providers() []string {
 	}
 	if a.openai != nil {
 		out = append(out, a.openai.Name())
+	}
+	if a.openrouter != nil {
+		out = append(out, a.openrouter.Name())
 	}
 	return out
 }
@@ -93,6 +103,26 @@ func (a *App) Models(provider string) []string {
 			"gpt-5.4-pro",
 			"gpt-5.5",
 			"gpt-5.5-pro",
+		}
+	case "openrouter":
+		return []string{
+			"deepseek/deepseek-v3.2",
+			"deepseek/deepseek-v4-flash",
+			"deepseek/deepseek-v4-pro",
+			"google/gemini-2.5-flash",
+			"google/gemini-2.5-flash-lite",
+			"google/gemini-3-flash-preview",
+			"google/gemma-4-26b-a4b-it:free",
+			"google/gemma-4-31b-it:free",
+			"moonshotai/kimi-k2.5",
+			"moonshotai/kimi-k2.6",
+			"nvidia/nemotron-3-super-120b-a12b:free",
+			"openrouter/owl-alpha",
+			"qwen/qwen3-235b-a22b-2507",
+			"qwen/qwen3.5-flash-02-23",
+			"qwen/qwen3.6-plus",
+			"x-ai/grok-4.1-fast",
+			"x-ai/grok-4.3",
 		}
 	}
 	return []string{}

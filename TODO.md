@@ -1,19 +1,18 @@
 # TODO
 
-## 0. Embedded CSS framework + fonts
+## 0. Vendored fonts
 
-Add a professional CSS framework and a few more font options. Everything must
-be vendored locally — no CDN references. Candidates worth evaluating: a
-utility framework (Tailwind via the Vite plugin so unused classes are purged)
-or a tokens-only sheet (Open Props) layered on top of the existing CSS
-variables. For fonts, vendor 1–2 sans options (Inter, IBM Plex Sans) and at
-least one mono (JetBrains Mono, Fira Code) under `frontend/public/fonts/` and
-register them via `@font-face` in `style.css`. Bundle impact: budget ~200KB
-per font family across weights.
+Tailwind v4 is already wired up via `@tailwindcss/vite` and in active use across
+the Svelte components, so the framework portion of this task is done. What
+remains is fonts: vendor 1–2 sans options (Inter, IBM Plex Sans) and at least
+one mono (JetBrains Mono, Fira Code) under `frontend/public/fonts/` and
+register them via `@font-face` in `style.css`. No CDN references. Bundle
+impact: budget ~200KB per font family across weights.
 
 ## 1. Streaming markdown flicker
 
-Each streamed chunk re-parses the entire message. Fine in practice for short
+Each streamed chunk re-parses the entire message (`App.svelte:238` calls
+`renderMarkdown(m.content)` on every update). Fine in practice for short
 responses, but for long responses with multiple code blocks it can cause
 visible jank. Fix: debounce `renderMarkdown` for in-flight assistant messages
 so the parse runs at most every ~50ms (or once on `done`). Track the
@@ -23,7 +22,9 @@ completes, then a final clean render.
 ## 2. Link target — open in system browser
 
 Markdown links currently open inside the Wails webview, replacing the app
-content (wrong). Fix:
+content (wrong). DOMPurify is already configured to allow `target`/`rel`
+attributes in `markdown.ts`, but nothing injects them, and there is no
+navigation interception on the Go side. Fix:
 
 - In `markdown.ts`, post-process anchor tags to add `target="_blank"` and
   `rel="noopener noreferrer"`.

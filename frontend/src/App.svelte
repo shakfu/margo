@@ -420,6 +420,7 @@
   .cursor { animation: blink 1s steps(2) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
 
+  .md { font-family: var(--font-serif); }
   .md :global(p) { margin: 0.4em 0; }
   .md :global(p:first-child) { margin-top: 0; }
   .md :global(p:last-child) { margin-bottom: 0; }
@@ -445,7 +446,7 @@
   .md :global(th), .md :global(td) { border: 1px solid var(--border); padding: 0.3em 0.6em; }
   .md :global(th) { background: var(--input-bg); }
   .md :global(code) {
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 0.88em;
     background: var(--input-bg);
     padding: 0.1em 0.35em;

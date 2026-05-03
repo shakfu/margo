@@ -8,8 +8,9 @@ import (
 )
 
 type Config struct {
-	AnthropicAPIKey string
-	OpenAIAPIKey    string
+	AnthropicAPIKey  string
+	OpenAIAPIKey     string
+	OpenRouterAPIKey string
 }
 
 // Load reads .env (if present) and returns config from the environment.
@@ -17,14 +18,15 @@ type Config struct {
 func Load(paths ...string) (*Config, error) {
 	_ = godotenv.Load(paths...)
 	return &Config{
-		AnthropicAPIKey: os.Getenv("ANTHROPIC_API_KEY"),
-		OpenAIAPIKey:    os.Getenv("OPENAI_API_KEY"),
+		AnthropicAPIKey:  os.Getenv("ANTHROPIC_API_KEY"),
+		OpenAIAPIKey:     os.Getenv("OPENAI_API_KEY"),
+		OpenRouterAPIKey: os.Getenv("OPENROUTER_API_KEY"),
 	}, nil
 }
 
 func (c *Config) Validate() error {
-	if c.AnthropicAPIKey == "" && c.OpenAIAPIKey == "" {
-		return errors.New("no provider API keys set: need ANTHROPIC_API_KEY and/or OPENAI_API_KEY")
+	if c.AnthropicAPIKey == "" && c.OpenAIAPIKey == "" && c.OpenRouterAPIKey == "" {
+		return errors.New("no provider API keys set: need ANTHROPIC_API_KEY, OPENAI_API_KEY, and/or OPENROUTER_API_KEY")
 	}
 	return nil
 }
