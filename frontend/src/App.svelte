@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { Providers, Models, Chat, StreamChat, StreamAgent, CancelStream, Tools, OutputDir, OpenPath } from '../wailsjs/go/main/App.js';
+  import { Providers, Models, Chat, StreamChat, StreamAgent, CancelStream, Tools, OutputDir, OpenPath, RespondPermission } from '../wailsjs/go/main/App.js';
   import { EventsOn, EventsOff, BrowserOpenURL } from '../wailsjs/runtime/runtime.js';
   import { mathjax } from './lib/mathjax';
   import { renderMarkdownStreaming, setHighlightTheme } from './lib/markdown';
@@ -16,6 +16,7 @@
     appendThinkingToLast,
     appendStepToLast,
     updateLastStepResult,
+    resolvePermissionStep,
     setLastUsage,
     type Usage,
     type AgentStep
@@ -166,7 +167,7 @@
     const base = `margo:stream:${id}`;
     const targetChatId = chat.id;
 
-    EventsOn(`${base}:chunk`, (payload: { kind: string; text?: string; name?: string; arguments?: string; result?: string; isError?: boolean }) => {
+    EventsOn(`${base}:chunk`, (payload: { kind: string; text?: string; name?: string; arguments?: string; result?: string; isError?: boolean; permissionId?: string }) => {
       switch (payload.kind) {
         case 'thinking':
           appendThinkingToLast(targetChatId, payload.text ?? '');
@@ -185,6 +186,15 @@
             payload.result ?? '',
             !!payload.isError,
           );
+          break;
+        case 'permission':
+          appendStepToLast(targetChatId, {
+            kind: 'permission',
+            name: payload.name ?? '',
+            arguments: payload.arguments ?? '',
+            permissionId: payload.permissionId,
+            permissionStatus: 'pending',
+          });
           break;
         case 'text':
         default:
@@ -211,7 +221,7 @@
 
     try {
       if ($settings.agentMode && availableTools.length > 0) {
-        await StreamAgent(id, $settings.provider, $settings.system, history, buildOptions(), availableTools);
+        await StreamAgent(id, $settings.provider, $settings.system, history, buildOptions(), availableTools, $settings.autoApproveTools);
       } else {
         await StreamChat(id, $settings.provider, $settings.system, history, buildOptions());
       }
@@ -221,6 +231,25 @@
       activeStreamId = '';
       cancelling = false;
       EventsOff(`${base}:chunk`, `${base}:error`, `${base}:done`);
+    }
+  }
+
+  async function respondPermission(
+    permissionId: string,
+    toolName: string,
+    decision: 'approve' | 'deny' | 'always',
+  ) {
+    const approved = decision !== 'deny';
+    const always = decision === 'always';
+    if (always) {
+      const cur = $settings.autoApproveTools ?? [];
+      if (!cur.includes(toolName)) {
+        settings.update(s => ({ ...s, autoApproveTools: [...cur, toolName] }));
+      }
+    }
+    try { await RespondPermission(permissionId, approved, always); } catch (_) {}
+    if (activeChatId) {
+      resolvePermissionStep($activeChatId, permissionId, approved ? 'approved' : 'denied');
     }
   }
 
@@ -314,11 +343,34 @@
                 {#each m.steps as step}
                   <div class="border border-border rounded-md bg-input-bg overflow-hidden text-[0.78rem] font-[family-name:var(--font-mono)]">
                     <div class="flex items-center gap-2 px-2.5 py-1 border-b border-border bg-bg-elev">
-                      <span class="text-fg-muted">→</span>
+                      <span class="text-fg-muted">{step.kind === 'permission' ? '?' : '→'}</span>
                       <span class="font-semibold text-fg">{step.name}</span>
                       <span class="text-fg-faint truncate flex-1">{step.arguments || '{}'}</span>
                     </div>
-                    {#if step.result !== undefined}
+                    {#if step.kind === 'permission'}
+                      {#if step.permissionStatus === 'pending' && step.permissionId}
+                        <div class="px-2.5 py-1.5 flex items-center gap-2 flex-wrap">
+                          <span class="text-fg-muted">Allow this tool to run?</span>
+                          <button
+                            class="px-2 py-0.5 text-[0.75rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg"
+                            on:click={() => respondPermission(step.permissionId ?? '', step.name, 'approve')}
+                          >Approve</button>
+                          <button
+                            class="px-2 py-0.5 text-[0.75rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg"
+                            on:click={() => respondPermission(step.permissionId ?? '', step.name, 'always')}
+                            title="Auto-approve this tool in future runs"
+                          >Always</button>
+                          <button
+                            class="px-2 py-0.5 text-[0.75rem] rounded border border-error-border bg-error-bg text-error-fg cursor-pointer hover:opacity-90"
+                            on:click={() => respondPermission(step.permissionId ?? '', step.name, 'deny')}
+                          >Deny</button>
+                        </div>
+                      {:else if step.permissionStatus === 'approved'}
+                        <div class="px-2.5 py-1.5 text-fg-muted"><span class="text-fg-faint mr-1">✓</span>approved</div>
+                      {:else if step.permissionStatus === 'denied'}
+                        <div class="px-2.5 py-1.5 text-error-fg"><span class="text-fg-faint mr-1">✗</span>denied</div>
+                      {/if}
+                    {:else if step.result !== undefined}
                       <div class="px-2.5 py-1.5 {step.isError ? 'text-error-fg' : 'text-fg-muted'} whitespace-pre-wrap break-words">
                         <span class="text-fg-faint mr-1">←</span>{step.result}
                       </div>

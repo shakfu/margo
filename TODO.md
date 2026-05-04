@@ -1,37 +1,5 @@
 # TODO
 
-## 1. Streaming markdown flicker — **done**
-
-`renderMarkdownStreaming(text, streaming)` in
-`frontend/src/lib/markdown.ts` throttles the parse rate to once per 50ms
-while `streaming=true` (the in-flight assistant message), returning a
-single-slot cached HTML between parses. When `streaming` flips to false
-the cache is cleared and a fresh clean parse runs on the trailing edge
-(driven by Svelte's reactive re-evaluation when `busy` changes). The
-non-streaming case in `App.svelte` was always cheap and is unaffected.
-(MathJax typesetting is already debounced 250ms in
-`frontend/src/lib/mathjax.ts`, so it doesn't compound the per-chunk
-cost.)
-
-## 2. Link target — open in system browser — **done**
-
-Implemented entirely on the frontend side (no Go-side navigation
-interception needed):
-
-- `frontend/src/lib/markdown.ts` registers a DOMPurify
-  `afterSanitizeAttributes` hook that injects `target="_blank"` and
-  `rel="noopener noreferrer"` on anchors with `http(s):` or `mailto:`
-  hrefs.
-- `frontend/src/App.svelte` adds a capture-phase document click handler
-  that intercepts those same anchors, prevents the default navigation,
-  and calls Wails' `BrowserOpenURL(href)` to open the URL in the
-  user's system browser.
-
-Internal `#fragment` and relative links are deliberately left alone.
-**Manual verification required**: click a markdown link in the running
-Wails app and confirm it opens in the default browser without replacing
-the app shell.
-
 ## 3. DOMPurify v3 / SSR
 
 Not actionable today — flagged for awareness. DOMPurify v3 works directly in
@@ -49,27 +17,6 @@ const DOMPurify = createDOMPurify(window as unknown as Window);
 
 No change required while the only consumer is the Wails webview.
 
-## 4. Agent run cancellation race — **done** (see #6.2)
-
-## 5. Mid-loop text streaming for agent runs
-
-`agent.StreamReact` consumes `react.Agent.Stream`, which only streams the
-*final* assistant answer. Intermediate model turns that produce both text and
-tool calls (e.g. "Let me check the time first.") emit the tool calls visibly
-through the callback path but the accompanying text is dropped. Fix:
-
-- Replace (or augment) the `Stream` consumption with a
-  `cbtmpl.ModelCallbackHandler{OnEndWithStreamOutput: ...}` registered
-  alongside the existing `ToolCallbackHandler` in
-  `pkg/margo/agent/stream.go`. The handler receives a
-  `*schema.StreamReader[*model.CallbackOutput]` per model turn — drain it
-  in a goroutine, emit each non-empty `Message.Content` delta as a
-  `StepText` event, and remember to `Close()` the reader.
-- Be careful about ordering: text deltas from turn N should land before
-  the tool_call cards from the same turn. The callback fires on `OnEnd`,
-  which is after the model has completed the turn, so this should be
-  naturally correct, but worth verifying with a multi-turn test.
-
 ## 6. Eino integration — incremental adoption
 
 We adopted Eino as a hard dependency (~10MB binary, ~117 transitive
@@ -78,49 +25,28 @@ adapter pattern + the pre-built ReAct loop). To justify the dep weight,
 work through the items below in order. Each subitem is independently
 shippable; treat the ordering as a recommendation, not a hard chain.
 
-Items 6.1 and 6.2 supersede tasks 5 and 4 respectively — they're listed
-here in priority order with concrete Eino APIs to reach for.
+### 6.3 Context-window management via MessageRewriter — **done**
 
-### 6.1 Mid-loop text streaming (supersedes #5) — **done**
+Drop-oldest variant shipped. `pkg/margo/agent/budget.go` provides
+`BudgetForModel(model)` (Go-side mirror of the frontend's
+`CONTEXT_WINDOWS` table), `RewriteForBudget(msgs, budget)` (operates
+on `[]*schema.Message` for the agent path), and
+`RewriteMargoForBudget(msgs, system, budget)` (operates on
+`[]margo.Message` for the plain-chat path). Both registered: the
+agent path via `react.AgentConfig.MessageRewriter` (so trimming runs
+between ReAct iterations as tool results accumulate); the plain-chat
+path via `toMargoRequest` in `app.go`. Algorithm trims oldest turns
+under a 25% output reserve, keeps system + final turn always, and
+groups Tool messages with their owning Assistant turn so tool_results
+are never orphaned. Token estimation is `len/4` chars-per-token —
+deliberately coarse, no tokenizer dep. Coverage:
+`budget_test.go::TestRewriteForBudget*` + `TestRewriteMargoForBudget`.
+Docs: `docs/dev/agents_and_tools.md` § "Context-window management".
 
-Implemented in `pkg/margo/agent/stream.go`: a
-`utils/callbacks.ModelCallbackHandler.OnEndWithStreamOutput` drains each
-intermediate model turn synchronously and emits its text as a single
-`StepText` event before the turn's tool callbacks fire. Final-turn text
-continues to flow through the outer agent stream; dedup is gated on
-"this turn produced tool calls". Also added a custom
-`StreamToolCallChecker` (`streamHasToolCall`) replacing eino's default
-first-chunk checker, which misclassified text-first-then-tool-call turns
-(typical for Claude) as terminal and silently broke tool invocation.
-Coverage: `TestStreamReactMidLoopTextOrdering`. See
-`docs/dev/agents_and_tools.md` § "Mid-loop text streaming" for the
-final-turn dedup assumption.
-
-### 6.2 Cancellation via interrupt (supersedes #4) — **done**
-
-Investigated Eino's interrupt machinery
-(`compose.WithInterruptBeforeNodes`, `core.InterruptSignal`,
-`StatefulInterrupt`) and found it is designed for human-in-the-loop
-checkpoint/resume, not for ctx cancellation — there is no graph-level
-"abort now" signal that nodes poll between steps. The pragmatic fix is
-the ctx-aware tool wrapper, registered as a `compose.ToolMiddleware`
-on the ReAct ToolsNode rather than per-tool. See `abortOnCtxCancel`
-in `pkg/margo/agent/stream.go`. UI shows "cancelling…" while the run
-unwinds. Coverage: `TestStreamReactCancelMidTool`. Docs:
-`docs/dev/agents_and_tools.md` § "Cancellation".
-
-### 6.3 Context-window management via MessageRewriter
-
-`react.AgentConfig.MessageRewriter` runs before each model call and can
-rewrite the accumulated message history. Wire it to:
-
-- Drop or summarise the oldest turns when token count approaches
-  `contextWindowFor(model)` (we already track running totals in
-  `Chat.tokensIn`/`tokensOut`).
-- Optionally inject ephemeral system reminders ("the user's preferred
-  language is X", from a future per-chat preferences store).
-
-This is real value users feel — long conversations stop overflowing.
+Deferred from the original task: summarisation-instead-of-drop (would
+preserve information but adds a model call per iteration); injecting
+ephemeral system reminders (waits on a per-chat preferences store
+that doesn't exist yet).
 
 ### 6.4 Streaming tools
 
@@ -315,13 +241,30 @@ variables (user name, project context, role).
 typed pathway instead. Tiny cleanup; do as part of any other
 adapter work, not standalone.
 
-### 6.10 Tool middleware
+### 6.10 Tool middleware — **partially done** (permission prompts shipped)
 
-`compose.ToolMiddleware` lets us wrap every tool invocation with
-cross-cutting concerns: logging, rate-limiting, permission prompts
-("the agent wants to call `delete_file(path=...)` — allow?"). The
-permission-prompt use case is the most user-valuable; build it once
-we have any tool that mutates state.
+Permission-prompt slice landed:
+`pkg/margo/agent/permission.go::permissionMiddleware` gates each
+non-read-only invocation behind a user prompt; read-only tools
+auto-approve via the `agent.ReadOnlyTools` allowlist. UI surfaces
+prompts as a step card with Approve / Always / Deny buttons; the
+Always list persists in `Settings.autoApproveTools`. Coverage:
+`permission_test.go`. Docs: `docs/dev/agents_and_tools.md` § "Tool
+permission prompts".
+
+Remaining cross-cutting middleware uses (not yet built; pursue when
+demand surfaces):
+
+- **Logging / tracing**: a middleware that logs invocation name +
+  args + duration to a sink. Useful for debugging agent runs in
+  production.
+- **Rate limiting**: per-tool or per-key rate limits. Relevant once
+  we have network-bound tools.
+- ~~**Trusted-tools management UI**: a Settings panel section showing
+  the persisted `autoApproveTools` list with per-entry remove
+  buttons.~~ Done — collapsible "Trusted tools" section in
+  `SettingsPanel.svelte` with per-entry Revoke buttons + a Revoke-all
+  shortcut.
 
 ### 6.11 ToolReturnDirectly
 
@@ -343,3 +286,119 @@ for each media type. Defer until we have a tool that needs it.
 The newer `adk/` package layers higher-level agent abstractions on
 top of the components we're using. API is younger and may shift;
 revisit after the items above land.
+
+## 7. File / image attachments as input
+
+The composer is text-only today. `ChatMessage.content` is a single string,
+`margo.Message.Content` is `string`, no provider has multipart-message
+plumbing. Adding attachments touches every layer (provider wire shapes,
+Wails surface, frontend composer, persistence, token accounting), so the
+work is sliced below in dependency order. Each slice is independently
+shippable; ship in order.
+
+### 7.1 Provider multipart message shape (foundation)
+
+Extend `margo.Message` to carry structured content parts in addition to
+its current `Content string`. Concrete:
+
+- New `Part` type: `{Kind: "text"|"image"|"document", Text string,
+  MimeType string, Data []byte}` (bytes inlined for now; revisit if
+  large files become common).
+- `Message.Parts []Part` field. `Content` stays as the legacy
+  text-only convenience; serializer prefers `Parts` when non-empty.
+- Per-provider conversion in `pkg/margo/providers/{anthropic,openai,
+  openrouter}`:
+  - **Anthropic**: each Part maps to `messages.ContentBlockParamUnion`
+    via `image` (base64) or `document` (PDF) blocks. The SDK already
+    expects multipart on user turns, so the conversion is mechanical.
+  - **OpenAI / OpenRouter**: parts map to `ChatCompletionContentPart`
+    with `image_url` carrying a `data:<mime>;base64,...` URL.
+- No UI yet — this slice is the wire-shape foundation. Cover with
+  unit tests that round-trip a `Message{Parts: [text+image]}` through
+  each provider's `to<SDK>Messages` converter.
+
+### 7.2 Image attachments end-to-end (Anthropic-only first slice)
+
+Smallest user-visible slice. Pick the most-tested multimodal model
+(Anthropic Claude Sonnet/Opus 4.x) and ship images-only.
+
+- **Wails surface.** New `App.AttachFile() ([]AttachedFile, error)`
+  that calls `runtime.OpenFileDialog` (or accepts a drag-drop
+  payload — see below) and returns base64-encoded bytes + mime type
+  + filename. Cap accepted MIMEs to `image/png`, `image/jpeg`,
+  `image/webp`, `image/gif`. Cap per-file size at e.g. 10MB.
+- **Composer UI.** Paperclip button that opens the file dialog.
+  Drag-drop zone over the composer. Selected images render as small
+  thumbnails above the textarea with a `×` to remove. Bound to a
+  Svelte store keyed by the active chat id so the user can attach
+  multiple images before sending.
+- **Send path.** `StreamChat` / `StreamAgent` get an additional
+  `attachments []AttachedFile` arg; the bindings translate them into
+  `margo.Message.Parts` on the latest user turn. Past turns remain
+  text-only for now (see #7.4).
+- **Model gating.** When attachments are present, force the model
+  selector to the multimodal allowlist (Anthropic only this slice).
+  Subsequent sends after the attachment is consumed re-allow all
+  models.
+- Coverage: a fake-client integration test asserting that an image
+  attachment shows up as an `image` block in the request the
+  Anthropic provider would send.
+
+### 7.3 Cross-provider parity
+
+Extend #7.2's image path to OpenAI and OpenRouter using each SDK's
+multimodal content shape. The provider-converter work landed in #7.1
+already; this slice expands the multimodal allowlist in
+`frontend/src/lib/store.ts` and tests the OpenAI-side wire conversion.
+GPT-4o family + OpenRouter's vision-capable models become eligible.
+
+### 7.4 Persistence + replay
+
+Today's `localStorage`-backed `Chat.messages` only stores text. After
+#7.2/#7.3, attached images are sent once and forgotten. Decide:
+
+- **Option A: store base64 in localStorage.** Simple, but localStorage
+  has a ~5MB origin quota and images blow through it fast.
+- **Option B: write attachments to `~/Documents/Margo/attachments/`
+  (mirroring `outputs/`) and store only the path in `Chat.messages`.**
+  Re-sending the chat reads bytes from disk. This is the right
+  long-term answer; pairs with the existing `OpenPath` plumbing for
+  click-to-open of attached images in the chat history.
+- Schema migration for the existing `margo:chats:v1` localStorage
+  shape: add `parts?: Part[]` to message; existing messages with
+  only `content` keep working unchanged.
+
+Defer the choice until #7.2 is shipped and we have feel for typical
+attachment sizes.
+
+### 7.5 Document (PDF / text) attachments
+
+Once images work, extend to documents. Two paths converge:
+
+- **Anthropic native**: PDFs ride as `document` blocks (the SDK
+  already supports this). No preprocessing.
+- **OpenAI / OpenRouter fallback**: extract text on the Go side
+  (`github.com/ledongthuc/pdf` for PDFs, `os.ReadFile` for plain
+  text/markdown) and inline as a text part with a `<file
+  name="...">` wrapper. Loses structure but works on any model.
+
+Per-file size cap higher than images (~25MB). Token cost for
+extracted text is real — feeds into #7.6.
+
+### 7.6 Attachment token accounting
+
+The context-usage ring (`frontend/src/lib/store.ts::contextWindowFor`)
+counts tokens-in / tokens-out from past completions, but
+attached-but-unsent images / docs aren't counted yet. Approximate cost:
+
+- **Images**: model-specific. Anthropic Claude charges by tile
+  (`(width / 1568) * (height / 1568) * 1568 tiles → ~tokens`); OpenAI
+  has a similar tile model. A coarse approximation is `width * height
+  / 750` tokens per image, which is good enough for a UI hint.
+- **Documents**: `len(extracted_text) / 4` chars-per-token heuristic
+  (or run tiktoken if we want precision — see if #6.3's
+  context-window work has already pulled in a tokenizer).
+
+Surface a "+N tokens" pip on the composer's attachment thumbnails so
+the user sees the cost before sending. Pairs naturally with #6.3 if
+both land — both feed the same context budget.

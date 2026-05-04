@@ -16,7 +16,9 @@ export function OutputDir():Promise<string>;
 
 export function Providers():Promise<Array<string>>;
 
-export function StreamAgent(arg1:string,arg2:string,arg3:string,arg4:Array<main.ChatMessage>,arg5:main.ChatOptions,arg6:Array<string>):Promise<void>;
+export function RespondPermission(arg1:string,arg2:boolean,arg3:boolean):Promise<void>;
+
+export function StreamAgent(arg1:string,arg2:string,arg3:string,arg4:Array<main.ChatMessage>,arg5:main.ChatOptions,arg6:Array<string>,arg7:Array<string>):Promise<void>;
 
 export function StreamChat(arg1:string,arg2:string,arg3:string,arg4:Array<main.ChatMessage>,arg5:main.ChatOptions):Promise<void>;
 

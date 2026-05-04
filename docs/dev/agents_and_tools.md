@@ -311,6 +311,86 @@ new stream start so it doesn't bleed between runs. Coverage:
 ctx and asserts that `StreamReact` returns within 2 seconds of cancel
 with `context.Canceled`.
 
+## Context-window management
+
+Long conversations would otherwise overflow the model's context window
+and error out mid-stream. `pkg/margo/agent/budget.go` ships a coarse
+budget-aware rewriter that runs at two layers:
+
+1. **Agent path** (`StreamReact`): registered as
+   `react.AgentConfig.MessageRewriter`. Eino calls it before each model
+   call inside the ReAct loop, so accumulated tool results that push
+   the conversation over budget mid-loop get trimmed too — not just
+   the entry-point history.
+2. **Plain chat path** (`App.StreamChat` / `App.Chat`): rewritten once
+   in `toMargoRequest` via `RewriteMargoForBudget`. There's no loop, so
+   one pass at the request boundary suffices.
+
+Both layers share the same algorithm: estimate token cost as
+`len(content)/4` plus small per-tool-call overhead (no real tokenizer —
+keeping the binary CGo-free and small), trim oldest *turns* until
+estimated total fits under `budget * 0.75` (25% reserve for the
+model's response). A "turn" is User-or-Assistant + any subsequent Tool
+messages, so a tool result is never orphaned from its assistant
+tool_call. The system prompt at index 0 is always preserved; the
+final turn is always preserved (even if it alone exceeds budget — the
+caller's request will then fail at the provider, but discarding the
+user's actual ask is a worse outcome).
+
+`BudgetForModel(model)` mirrors `frontend/src/lib/store.ts::CONTEXT_WINDOWS`
+by hand. Add new models in both places. Unknown models fall back to a
+conservative 128k. Coverage: `TestRewriteForBudget*` and
+`TestRewriteMargoForBudget` in `budget_test.go`.
+
+## Tool permission prompts
+
+State-mutating tools (anything that touches the filesystem, network,
+shell, or any persistent state) are gated behind a user-approval prompt
+before the underlying call runs. Read-only tools auto-approve via an
+explicit allowlist (`agent.ReadOnlyTools`) so benign metadata lookups
+like `current_time` don't accumulate noisy prompts.
+
+The pipeline:
+
+1. `StreamReact` accepts an optional `PermissionGate` and registers
+   `permissionMiddleware(gate)` ahead of `abortOnCtxCancel` in the
+   `ToolsConfig.ToolCallMiddlewares` slice. The middleware fires
+   before each non-read-only invocation; if `gate` returns `(false,
+   nil)` it returns `ErrPermissionDenied`, which surfaces as a
+   `tool_result` with `IsError=true` through the existing tool
+   callback handler.
+2. `app.go::StreamAgent` builds the gate per run. The gate emits a
+   `permission` step event carrying a unique `permissionId`,
+   registers a channel in `App.permissions` keyed by that id, and
+   blocks on either the channel or `ctx.Done()`.
+3. The frontend (`App.svelte`) renders the permission step as a
+   monospace card with Approve / Always / Deny buttons. On click,
+   it calls the new `App.RespondPermission(id, approved, always)`
+   Wails method, which delivers the decision via the registered
+   channel.
+4. **Always** elevates the tool to "auto-approve for the rest of this
+   run" on the Go side AND adds it to `Settings.autoApproveTools` in
+   the frontend's `localStorage`. The list is forwarded to
+   `StreamAgent` on every subsequent run, so the prompt doesn't
+   reappear until the user removes the entry.
+
+Cancellation: the gate's `select { case <-ctx.Done(): ... case d :=
+<-ch: ... }` honours stream cancellation, so a hung permission prompt
+unblocks promptly when the user clicks Cancel. Coverage:
+`permission_test.go::TestPermissionGate*` (approve/deny paths,
+read-only auto-approval, cancellation while pending).
+
+When you add a new tool, decide explicitly whether it's read-only:
+
+- **Read-only** (no side effects): add the tool name to
+  `agent.ReadOnlyTools` so users aren't prompted.
+- **State-mutating**: leave it out of `ReadOnlyTools`; the prompt
+  fires by default. Users can pre-authorise via the Always button.
+
+Anti-patterns: don't add a write-capable tool to `ReadOnlyTools` to
+"reduce friction" — the prompt is the trust boundary, and the Always
+button already gives users a one-click escape after the first prompt.
+
 ## Provider parity
 
 All three first-party providers (`anthropic`, `openai`, `openrouter`)

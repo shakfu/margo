@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tool permission prompts. State-mutating agent tools (anything that
+  isn't on the explicit `agent.ReadOnlyTools` allowlist) now require
+  user approval before execution. New `agent.permissionMiddleware`
+  registered alongside `abortOnCtxCancel` in the React loop's
+  `ToolsConfig.ToolCallMiddlewares`. When the gate fires, the Go
+  side emits a `permission` step event carrying a unique id, blocks
+  on a channel registered in `App.permissions`, and honours ctx
+  cancellation. The frontend renders the prompt as a step card with
+  Approve / Always / Deny buttons; clicking calls a new
+  `App.RespondPermission(id, approved, always)` Wails method to
+  deliver the decision. The "Always" choice persists in
+  `Settings.autoApproveTools` (localStorage) and is forwarded to
+  `App.StreamAgent` on subsequent runs so the prompt doesn't
+  reappear. `current_time` is on the read-only allowlist;
+  `quarto_render` requires approval. `App.StreamAgent` signature
+  gained an `autoApprove []string` parameter. Coverage:
+  `permission_test.go::TestPermissionGate*` (approve/deny paths,
+  read-only bypass, cancellation while pending). Settings panel
+  gains a collapsible "Trusted tools" section listing the persisted
+  `autoApproveTools` entries with per-entry Revoke buttons and a
+  Revoke-all shortcut, so users can manage approvals without
+  resetting the app or hand-editing localStorage. Docs:
+  `docs/dev/agents_and_tools.md` § "Tool permission prompts".
+- Context-window management. Long conversations no longer overflow
+  silently — `pkg/margo/agent/budget.go` ships a budget-aware message
+  rewriter wired into both the agent path
+  (`react.AgentConfig.MessageRewriter`, runs between ReAct iterations
+  so tool results accumulating mid-loop also get trimmed) and the
+  plain-chat path (`toMargoRequest` in `app.go`). Trims oldest turns
+  first under a 25% output reserve, preserves the system prompt and
+  the final user turn, and groups Tool messages with their owning
+  Assistant turn so tool_results are never orphaned from their
+  tool_call. Token estimation is chars/4 (coarse but no tokenizer
+  dep). Per-model context budgets (`BudgetForModel`) mirror the
+  frontend's `CONTEXT_WINDOWS` table by hand; unknown models fall
+  back to 128k. Coverage: `TestRewriteForBudget*`,
+  `TestRewriteMargoForBudget`. Docs:
+  `docs/dev/agents_and_tools.md` § "Context-window management".
 - `quarto_render` agent tool. Wraps the local `quarto` CLI to convert
   `.qmd` / `.md` / `.ipynb` documents (or quarto project directories) to
   html, pdf, docx, pptx, revealjs, beamer, latex, typst, and other

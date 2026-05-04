@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	goruntime "runtime"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
@@ -29,8 +31,9 @@ type App struct {
 	openai     margo.Client
 	openrouter margo.Client
 
-	mu      sync.Mutex
-	cancels map[string]context.CancelFunc
+	mu          sync.Mutex
+	cancels     map[string]context.CancelFunc
+	permissions sync.Map // map[string]chan permissionDecision
 }
 
 func NewApp() *App {
@@ -193,10 +196,14 @@ func toMargoMessages(in []ChatMessage) []margo.Message {
 }
 
 func toMargoRequest(system string, messages []ChatMessage, opts ChatOptions) margo.Request {
+	msgs := toMargoMessages(messages)
+	if opts.Model != "" {
+		msgs = agent.RewriteMargoForBudget(msgs, system, agent.BudgetForModel(opts.Model))
+	}
 	req := margo.Request{
 		Model:         opts.Model,
 		System:        system,
-		Messages:      toMargoMessages(messages),
+		Messages:      msgs,
 		MaxTokens:     opts.MaxTokens,
 		Temperature:   opts.Temperature,
 		TopP:          opts.TopP,
@@ -365,14 +372,22 @@ func (a *App) OutputDir() string {
 }
 
 // AgentStepEvent is the payload for `margo:stream:<id>:chunk` events emitted
-// during a StreamAgent run. Kind values: "text", "tool_call", "tool_result".
+// during a StreamAgent run. Kind values: "text", "tool_call", "tool_result",
+// "permission".
 type AgentStepEvent struct {
-	Kind      string `json:"kind"`
-	Text      string `json:"text,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
-	Result    string `json:"result,omitempty"`
-	IsError   bool   `json:"isError,omitempty"`
+	Kind         string `json:"kind"`
+	Text         string `json:"text,omitempty"`
+	Name         string `json:"name,omitempty"`
+	Arguments    string `json:"arguments,omitempty"`
+	Result       string `json:"result,omitempty"`
+	IsError      bool   `json:"isError,omitempty"`
+	PermissionID string `json:"permissionId,omitempty"`
+}
+
+// permissionDecision is the user's response to a tool-permission prompt.
+type permissionDecision struct {
+	approved bool
+	always   bool
 }
 
 // StreamAgent runs a ReAct agent against the named tools and emits step events
@@ -382,7 +397,7 @@ type AgentStepEvent struct {
 // `toolNames` selects which tools from Tools() the agent can call this run;
 // pass empty for plain chat (which is what StreamChat already does — prefer
 // that path when no tools are needed).
-func (a *App) StreamAgent(id, provider, system string, messages []ChatMessage, opts ChatOptions, toolNames []string) error {
+func (a *App) StreamAgent(id, provider, system string, messages []ChatMessage, opts ChatOptions, toolNames []string, autoApprove []string) error {
 	c, err := a.clientFor(provider)
 	if err != nil {
 		return err
@@ -397,6 +412,16 @@ func (a *App) StreamAgent(id, provider, system string, messages []ChatMessage, o
 		tools = append(tools, ctor())
 	}
 
+	// Per-run mutable approval set: seeded from the persisted "always
+	// approve" list the frontend forwards, augmented when the user clicks
+	// Always on a live prompt. Not reflected back to the frontend; the
+	// frontend stores its own copy in localStorage.
+	approvedThisRun := make(map[string]bool, len(autoApprove))
+	for _, n := range autoApprove {
+		approvedThisRun[n] = true
+	}
+	var approvedMu sync.Mutex
+
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.mu.Lock()
 	if _, exists := a.cancels[id]; exists {
@@ -407,8 +432,38 @@ func (a *App) StreamAgent(id, provider, system string, messages []ChatMessage, o
 	a.cancels[id] = cancel
 	a.mu.Unlock()
 
+	base := "margo:stream:" + id
+
+	gate := func(gctx context.Context, name, args string) (bool, error) {
+		approvedMu.Lock()
+		alreadyApproved := approvedThisRun[name]
+		approvedMu.Unlock()
+		if alreadyApproved {
+			return true, nil
+		}
+		reqID := newPermissionID()
+		ch := make(chan permissionDecision, 1)
+		a.permissions.Store(reqID, ch)
+		defer a.permissions.Delete(reqID)
+
+		runtime.EventsEmit(a.ctx, base+":chunk", AgentStepEvent{
+			Kind: "permission", Name: name, Arguments: args, PermissionID: reqID,
+		})
+
+		select {
+		case <-gctx.Done():
+			return false, gctx.Err()
+		case d := <-ch:
+			if d.always && d.approved {
+				approvedMu.Lock()
+				approvedThisRun[name] = true
+				approvedMu.Unlock()
+			}
+			return d.approved, nil
+		}
+	}
+
 	go func() {
-		base := "margo:stream:" + id
 		defer func() {
 			a.mu.Lock()
 			delete(a.cancels, id)
@@ -419,7 +474,7 @@ func (a *App) StreamAgent(id, provider, system string, messages []ChatMessage, o
 		input := toSchemaMessages(messages)
 		req := toMargoRequest(system, nil, opts)
 
-		err := agent.StreamReact(ctx, c, req, tools, input, func(ev agent.StepEvent) {
+		err := agent.StreamReact(ctx, c, req, tools, input, gate, func(ev agent.StepEvent) {
 			switch ev.Kind {
 			case agent.StepText:
 				runtime.EventsEmit(a.ctx, base+":chunk", AgentStepEvent{Kind: "text", Text: ev.Text})
@@ -451,6 +506,29 @@ func (a *App) StreamAgent(id, provider, system string, messages []ChatMessage, o
 		}
 	}()
 	return nil
+}
+
+// RespondPermission delivers the user's decision on a pending tool-
+// invocation permission prompt. `id` is the PermissionID that arrived in
+// the originating "permission" step event. `always` only takes effect
+// when `approved` is true; on Deny the field is ignored.
+func (a *App) RespondPermission(id string, approved bool, always bool) error {
+	v, ok := a.permissions.LoadAndDelete(id)
+	if !ok {
+		return fmt.Errorf("unknown permission id %q (already responded or run cancelled)", id)
+	}
+	v.(chan permissionDecision) <- permissionDecision{approved: approved, always: always}
+	return nil
+}
+
+// newPermissionID returns a short opaque id for a permission round-trip.
+// Crypto-strength randomness isn't needed — the id only has to be unique
+// across the in-flight permission requests of a single process.
+var permissionCounter uint64
+
+func newPermissionID() string {
+	n := atomic.AddUint64(&permissionCounter, 1)
+	return fmt.Sprintf("perm-%d-%d", time.Now().UnixNano(), n)
 }
 
 func toSchemaMessages(in []ChatMessage) []*schema.Message {

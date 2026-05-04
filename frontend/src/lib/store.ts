@@ -9,7 +9,7 @@ export interface Usage {
   totalMs: number;
 }
 
-export type StepKind = 'tool_call' | 'tool_result';
+export type StepKind = 'tool_call' | 'tool_result' | 'permission';
 
 export interface AgentStep {
   kind: StepKind;
@@ -17,6 +17,11 @@ export interface AgentStep {
   arguments?: string;
   result?: string;
   isError?: boolean;
+  // Only on permission steps: the round-trip id used by RespondPermission,
+  // and the user's resolved decision once they click. `permissionId` is
+  // cleared once resolved so the UI knows to drop the buttons.
+  permissionId?: string;
+  permissionStatus?: 'pending' | 'approved' | 'denied';
 }
 
 export interface Message {
@@ -52,6 +57,10 @@ export interface Settings {
   thinkEnabled: boolean;
   thinkBudget: number;
   agentMode: boolean;
+  // Tool names the user has previously clicked "Always approve" for.
+  // Forwarded to App.StreamAgent on each run so the Go-side gate can
+  // skip prompting for them. Persisted in localStorage.
+  autoApproveTools: string[];
 }
 
 // Approximate context window per model. Used by the context-usage ring.
@@ -113,6 +122,7 @@ const defaults: Settings = {
   thinkEnabled: false,
   thinkBudget: 4096,
   agentMode: false,
+  autoApproveTools: [],
 };
 
 function loadSettings(): Settings {
@@ -223,6 +233,33 @@ export function appendStepToLast(id: string, step: AgentStep) {
       const messages = [...c.messages];
       const last = messages[messages.length - 1];
       const steps = [...(last.steps ?? []), step];
+      messages[messages.length - 1] = { ...last, steps };
+      return { ...c, messages, updatedAt: Date.now() };
+    })
+  );
+}
+
+// resolvePermissionStep finds a pending permission step by its permissionId
+// (across the active chat's most-recent assistant message) and stamps it
+// with the user's decision. Clears the id so the UI hides the buttons.
+export function resolvePermissionStep(
+  id: string,
+  permissionId: string,
+  status: 'approved' | 'denied',
+) {
+  chats.update(cs =>
+    cs.map(c => {
+      if (c.id !== id || c.messages.length === 0) return c;
+      const messages = [...c.messages];
+      const last = messages[messages.length - 1];
+      const steps = [...(last.steps ?? [])];
+      for (let i = steps.length - 1; i >= 0; i--) {
+        const s = steps[i];
+        if (s.kind === 'permission' && s.permissionId === permissionId) {
+          steps[i] = { ...s, permissionStatus: status, permissionId: undefined };
+          break;
+        }
+      }
       messages[messages.length - 1] = { ...last, steps };
       return { ...c, messages, updatedAt: Date.now() };
     })

@@ -26,6 +26,7 @@ const (
 	StepText       StepKind = "text"
 	StepToolCall   StepKind = "tool_call"
 	StepToolResult StepKind = "tool_result"
+	StepPermission StepKind = "permission"
 	StepError      StepKind = "error"
 	StepDone       StepKind = "done"
 )
@@ -43,13 +44,14 @@ const (
 //                     further events.
 //   - StepDone:       The run has finished successfully; Usage is set.
 type StepEvent struct {
-	Kind      StepKind
-	Text      string
-	Name      string
-	Arguments string
-	Result    string
-	IsError   bool
-	Usage     *margo.Usage
+	Kind         StepKind
+	Text         string
+	Name         string
+	Arguments    string
+	Result       string
+	IsError      bool
+	PermissionID string
+	Usage        *margo.Usage
 }
 
 // abortOnCtxCancel races each tool invocation against ctx.Done(). When the
@@ -127,10 +129,19 @@ func StreamReact(
 	defaults margo.Request,
 	tools []tool.BaseTool,
 	input []*schema.Message,
+	gate PermissionGate,
 	emit func(StepEvent),
 ) error {
 	if emit == nil {
 		emit = func(StepEvent) {}
+	}
+
+	middlewares := []compose.ToolMiddleware{abortOnCtxCancel}
+	if gate != nil {
+		// Permission gate runs before the abort middleware so we don't
+		// race a cancellation against a pending user prompt — the gate's
+		// own ctx-aware select handles cancel correctly while waiting.
+		middlewares = append([]compose.ToolMiddleware{permissionMiddleware(gate)}, middlewares...)
 	}
 
 	adapter := NewAdapter(c, defaults)
@@ -138,9 +149,10 @@ func StreamReact(
 		ToolCallingModel: adapter,
 		ToolsConfig: compose.ToolsNodeConfig{
 			Tools:               tools,
-			ToolCallMiddlewares: []compose.ToolMiddleware{abortOnCtxCancel},
+			ToolCallMiddlewares: middlewares,
 		},
 		StreamToolCallChecker: streamHasToolCall,
+		MessageRewriter:       budgetRewriter(defaults.Model),
 	})
 	if err != nil {
 		return err
