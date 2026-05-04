@@ -18,6 +18,12 @@
     updateLastStepResult,
     resolvePermissionStep,
     setLastUsage,
+    setChatPersona,
+    setChatAgent,
+    findPersona,
+    findAgent,
+    agentMissingTools,
+    isMultimodal,
     type Usage,
     type AgentStep
   } from './lib/store';
@@ -30,6 +36,25 @@
   let outputDir = '';
   let input = '';
   let busy = false;
+
+  // Pending image attachments for the next message. Each entry carries
+  // already-base64-encoded bytes so the Wails IPC sees a clean string.
+  // Cleared after send. Not persisted in chat history (see §7.4).
+  type PendingAttachment = {
+    id: string;
+    name: string;
+    mimeType: string;
+    data: string;        // base64
+    previewUrl: string;  // blob URL for the thumbnail; revoked on remove
+    size: number;        // raw byte count for the size cap
+  };
+  let attachments: PendingAttachment[] = [];
+  // Anthropic / OpenAI vision / OpenRouter VL models all accept JPEG/PNG/
+  // WebP/GIF; this is the conservative intersection.
+  const ATTACHMENT_MIME_ACCEPT = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+  const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024; // 10 MB per file
+  let dragOver = false;
+  let fileInputEl: HTMLInputElement | null = null;
   let error = '';
   let activeStreamId = '';
   let cancelling = false;
@@ -51,6 +76,9 @@
   // Context usage for the active chat.
   $: ctxWindow = contextWindowFor($settings.model);
   $: ctxUsed = ($activeChat?.tokensIn ?? 0) + ($activeChat?.tokensOut ?? 0);
+  // Gate: attachments are pending but the active model isn't on the
+  // multimodal allowlist. Disables send + surfaces an inline warning.
+  $: attachmentsBlocked = attachments.length > 0 && !!$settings.model && !isMultimodal($settings.model);
   $: ctxPct = ctxWindow > 0 ? Math.min(100, Math.round((ctxUsed / ctxWindow) * 100)) : 0;
 
   onMount(async () => {
@@ -98,6 +126,85 @@
     }
   }
 
+  // ---- attachments ----
+
+  async function addFiles(files: FileList | File[] | null) {
+    if (!files) return;
+    for (const file of Array.from(files)) {
+      if (!ATTACHMENT_MIME_ACCEPT.includes(file.type)) {
+        error = `Unsupported attachment type: ${file.type || file.name}. Allowed: PNG, JPEG, WebP, GIF.`;
+        continue;
+      }
+      if (file.size > ATTACHMENT_MAX_BYTES) {
+        error = `Attachment "${file.name}" exceeds 10 MB.`;
+        continue;
+      }
+      try {
+        const data = await fileToBase64(file);
+        attachments = [
+          ...attachments,
+          {
+            id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            name: file.name,
+            mimeType: file.type,
+            data,
+            previewUrl: URL.createObjectURL(file),
+            size: file.size,
+          },
+        ];
+      } catch (e) {
+        error = `Failed to read "${file.name}": ${String(e)}`;
+      }
+    }
+  }
+
+  function fileToBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        // result is a "data:<mime>;base64,<payload>" URL — strip the prefix.
+        const i = result.indexOf(',');
+        resolve(i >= 0 ? result.slice(i + 1) : result);
+      };
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function removeAttachment(id: string) {
+    const found = attachments.find(a => a.id === id);
+    if (found) URL.revokeObjectURL(found.previewUrl);
+    attachments = attachments.filter(a => a.id !== id);
+  }
+
+  function clearAttachments() {
+    for (const a of attachments) URL.revokeObjectURL(a.previewUrl);
+    attachments = [];
+  }
+
+  function onPaperclip() {
+    fileInputEl?.click();
+  }
+
+  function onFileInputChange(ev: Event) {
+    const target = ev.currentTarget as HTMLInputElement;
+    addFiles(target.files);
+    target.value = ''; // reset so the same file can be picked again later
+  }
+
+  function onComposerDragOver(ev: DragEvent) {
+    if (!ev.dataTransfer || ev.dataTransfer.types.indexOf('Files') < 0) return;
+    ev.preventDefault();
+    dragOver = true;
+  }
+  function onComposerDragLeave() { dragOver = false; }
+  function onComposerDrop(ev: DragEvent) {
+    ev.preventDefault();
+    dragOver = false;
+    if (ev.dataTransfer?.files) addFiles(ev.dataTransfer.files);
+  }
+
   function newStreamId(): string {
     const c = (window as any).crypto;
     if (c?.randomUUID) return c.randomUUID();
@@ -124,7 +231,11 @@
 
   async function send() {
     const text = input.trim();
-    if (!text || busy || !$settings.provider) return;
+    if ((!text && attachments.length === 0) || busy || !$settings.provider) return;
+    if (attachmentsBlocked) {
+      error = `${$settings.model} doesn't accept images. Switch to a vision-capable model or remove the attachments.`;
+      return;
+    }
 
     if (!$activeChat) newChat();
     const chat = $activeChat;
@@ -134,16 +245,44 @@
     error = '';
     busy = true;
 
-    appendMessage(chat.id, { role: 'user', content: text });
+    appendMessage(chat.id, {
+      role: 'user',
+      content: text,
+      attachmentCount: attachments.length || undefined,
+    });
     const history = ($activeChat?.messages ?? []).map(m => ({
       role: m.role,
       content: m.content
     }));
     scrollToBottom();
 
+    // Resolve the active role (persona OR agent — they're mutually
+    // exclusive on the chat). Personas just swap the system prompt;
+    // agents additionally narrow the tool list and force the agent
+    // (StreamAgent) route. When neither is set we fall back to the
+    // legacy agentMode toggle for backwards compat. See
+    // docs/dev/personas_and_agents.md § "Three modes".
+    const persona = findPersona($settings.personas, chat.personaId);
+    const agent = findAgent($settings.agents, chat.agentId);
+    const systemPrompt = agent
+      ? agent.systemPrompt
+      : persona
+        ? persona.systemPrompt
+        : $settings.system;
+    const useAgentRoute = !!agent || ($settings.agentMode && !persona && availableTools.length > 0);
+    const agentTools = agent
+      ? agent.tools.filter(t => availableTools.includes(t))
+      : availableTools;
+    // Snapshot pending attachments and clear immediately — re-using the
+    // same array after a send would leak across messages.
+    const sendAttachments = attachments.map(a => ({
+      name: a.name, mimeType: a.mimeType, data: a.data,
+    }));
+    clearAttachments();
+
     if (!$settings.streaming) {
       try {
-        const resp = await Chat($settings.provider, $settings.system, history, buildOptions());
+        const resp = await Chat($settings.provider, systemPrompt, history, buildOptions(), sendAttachments);
         appendMessage(chat.id, {
           role: 'assistant',
           content: resp.text,
@@ -220,10 +359,10 @@
     });
 
     try {
-      if ($settings.agentMode && availableTools.length > 0) {
-        await StreamAgent(id, $settings.provider, $settings.system, history, buildOptions(), availableTools, $settings.autoApproveTools);
+      if (useAgentRoute) {
+        await StreamAgent(id, $settings.provider, systemPrompt, history, buildOptions(), agentTools, $settings.autoApproveTools, sendAttachments);
       } else {
-        await StreamChat(id, $settings.provider, $settings.system, history, buildOptions());
+        await StreamChat(id, $settings.provider, systemPrompt, history, buildOptions(), sendAttachments);
       }
     } catch (e) {
       error = String(e);
@@ -231,6 +370,25 @@
       activeStreamId = '';
       cancelling = false;
       EventsOff(`${base}:chunk`, `${base}:error`, `${base}:done`);
+    }
+  }
+
+  function rolePickerValue(chat: { personaId?: string; agentId?: string }): string {
+    if (chat.agentId) return `agent:${chat.agentId}`;
+    if (chat.personaId) return `persona:${chat.personaId}`;
+    return '';
+  }
+
+  function onRoleChange(ev: Event) {
+    if (!$activeChat) return;
+    const value = (ev.target as HTMLSelectElement).value;
+    if (value.startsWith('persona:')) {
+      setChatPersona($activeChat.id, value.slice('persona:'.length));
+    } else if (value.startsWith('agent:')) {
+      setChatAgent($activeChat.id, value.slice('agent:'.length));
+    } else {
+      // "Default" — clear both. setChatPersona(undefined) also clears agentId.
+      setChatPersona($activeChat.id, undefined);
     }
   }
 
@@ -277,10 +435,6 @@
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
   }
 
-  function toggleAgentMode(e: Event) {
-    const checked = (e.currentTarget as HTMLInputElement).checked;
-    settings.update(s => ({ ...s, agentMode: checked }));
-  }
   function toggleLeft()  { settings.update(s => ({ ...s, showLeft:  !s.showLeft  })); }
   function toggleRight() { settings.update(s => ({ ...s, showRight: !s.showRight })); }
 
@@ -317,6 +471,29 @@
         <span class="badge">{$settings.provider || 'no provider'}</span>
         {#if $settings.model}<span class="badge">{$settings.model}</span>{/if}
         {#if $settings.thinkEnabled}<span class="badge badge-active">thinking</span>{/if}
+        {#if $activeChat}
+          <select
+            class="role-picker"
+            value={rolePickerValue($activeChat)}
+            on:change={onRoleChange}
+            title="Pick a role for this chat"
+          >
+            <option value="">Default</option>
+            <optgroup label="Personas">
+              {#each $settings.personas as p (p.id)}
+                <option value={`persona:${p.id}`}>{p.name}</option>
+              {/each}
+            </optgroup>
+            <optgroup label="Agents">
+              {#each $settings.agents as a (a.id)}
+                {@const missing = agentMissingTools(a, availableTools)}
+                <option value={`agent:${a.id}`} disabled={missing.length > 0}>
+                  {a.name} [{a.tools.length}]{missing.length > 0 ? ` — needs ${missing.join(', ')}` : ''}
+                </option>
+              {/each}
+            </optgroup>
+          </select>
+        {/if}
         <button
           class="topbar-btn"
           on:click={toggleRight}
@@ -383,6 +560,11 @@
             {/if}
             {#if m.role === 'user'}
               <div class="md whitespace-pre-wrap">{m.content}</div>
+              {#if m.attachmentCount}
+                <div class="text-fg-faint text-[0.72rem] mt-1">
+                  📎 {m.attachmentCount} {m.attachmentCount === 1 ? 'attachment' : 'attachments'}
+                </div>
+              {/if}
             {:else}
               <div class="md" use:mathjax={m.content}>{@html renderMarkdownStreaming(m.content, busy && i === messages.length - 1)}</div>
             {/if}
@@ -419,25 +601,58 @@
       </div>
     {/if}
 
-    <footer class="flex flex-col gap-2 px-5 pt-3.5 pb-4 border-t border-border max-w-[820px] w-full mx-auto box-border">
-      {#if availableTools.length > 0}
-        <div class="flex items-center gap-2 text-[0.78rem]">
-          <label class="inline-flex items-center gap-1.5 cursor-pointer text-fg-muted hover:text-fg">
-            <input
-              type="checkbox"
-              class="cursor-pointer"
-              checked={$settings.agentMode}
-              on:change={toggleAgentMode}
-              disabled={busy}
-            />
-            <span>agent mode</span>
-          </label>
-          {#if $settings.agentMode}
-            <span class="text-fg-faint">tools: {availableTools.join(', ')}</span>
-          {/if}
+    <footer
+      class="flex flex-col gap-2 px-5 pt-3.5 pb-4 border-t border-border max-w-[820px] w-full mx-auto box-border {dragOver ? 'bg-bubble-user/40' : ''}"
+      on:dragover={onComposerDragOver}
+      on:dragleave={onComposerDragLeave}
+      on:drop={onComposerDrop}
+    >
+      {#if $activeChat}
+        {@const _activeAgent = findAgent($settings.agents, $activeChat.agentId)}
+        {#if _activeAgent}
+          <div class="text-[0.74rem] text-fg-faint">
+            agent: <span class="font-semibold text-fg-muted">{_activeAgent.name}</span> · tools: {_activeAgent.tools.join(', ')}
+          </div>
+        {/if}
+      {/if}
+      {#if attachments.length > 0}
+        <div class="flex flex-wrap gap-2">
+          {#each attachments as a (a.id)}
+            <div class="relative group" title="{a.name} ({Math.round(a.size / 1024)} KB)">
+              <img src={a.previewUrl} alt={a.name} class="h-14 w-14 object-cover rounded border border-border" />
+              <button
+                class="absolute -top-1 -right-1 bg-bg-elev border border-border rounded-full w-4 h-4 flex items-center justify-center text-[0.7rem] leading-none cursor-pointer hover:bg-hover-bg"
+                on:click={() => removeAttachment(a.id)}
+                aria-label="remove attachment"
+              >×</button>
+            </div>
+          {/each}
         </div>
       {/if}
+      {#if dragOver}
+        <div class="text-[0.74rem] text-fg-muted italic">Drop image to attach…</div>
+      {/if}
+      {#if attachmentsBlocked}
+        <div class="text-[0.74rem] text-error-fg">
+          <strong>{$settings.model}</strong> doesn't accept images. Switch to a vision-capable model (e.g. claude-sonnet-4-6, gpt-5.4) or remove the attachments to send.
+        </div>
+      {/if}
+      <input
+        type="file"
+        accept={ATTACHMENT_MIME_ACCEPT.join(',')}
+        multiple
+        bind:this={fileInputEl}
+        on:change={onFileInputChange}
+        class="hidden"
+      />
       <div class="flex items-end gap-2">
+      <button
+        class="topbar-btn h-9 w-9 flex items-center justify-center"
+        on:click={onPaperclip}
+        title="Attach image"
+        disabled={busy || !$settings.provider}
+        aria-label="attach image"
+      >📎</button>
       <textarea
         class="flex-1 bg-input-bg text-fg border border-border rounded-md px-3 py-2.5 font-[inherit] text-[0.9rem] resize-none outline-none focus:border-border-strong disabled:opacity-50 disabled:cursor-not-allowed"
         placeholder={$settings.provider ? "Send a message... (Enter to send, Shift+Enter for newline)" : "Configure a provider in the settings panel..."}
@@ -464,7 +679,7 @@
           <button
             class="composer-btn send-btn"
             on:click={send}
-            disabled={busy || !$settings.provider || !input.trim()}
+            disabled={busy || !$settings.provider || attachmentsBlocked || (!input.trim() && attachments.length === 0)}
           >{busy ? '...' : 'send'}</button>
         {/if}
       </div>
@@ -474,7 +689,7 @@
 
   {#if $settings.showRight}
     <aside class="overflow-hidden min-w-0">
-      <SettingsPanel {providers} {models} {busy} {outputDir} onReset={resetApp} />
+      <SettingsPanel {providers} {models} {busy} {outputDir} {availableTools} onReset={resetApp} />
     </aside>
   {/if}
 </div>
@@ -508,6 +723,19 @@
     background: var(--accent);
     border-color: transparent;
   }
+
+  .role-picker {
+    font-size: 0.72rem;
+    color: var(--fg-muted);
+    background: var(--input-bg);
+    padding: 0.2rem 0.4rem;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    font-family: inherit;
+    cursor: pointer;
+    max-width: 10rem;
+  }
+  .role-picker:hover { color: var(--fg); }
 
   .composer-btn {
     padding: 0 1.1rem;

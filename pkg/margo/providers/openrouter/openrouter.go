@@ -2,6 +2,7 @@ package openrouter
 
 import (
 	"context"
+	"encoding/base64"
 	"strings"
 	"time"
 
@@ -103,8 +104,42 @@ func toSDKMessage(m margo.Message) sdk.ChatCompletionMessageParamUnion {
 	case margo.RoleSystem:
 		return sdk.SystemMessage(m.Content)
 	default:
+		if len(m.Parts) > 0 {
+			return sdk.UserMessage(toSDKUserParts(m))
+		}
 		return sdk.UserMessage(m.Content)
 	}
+}
+
+// toSDKUserParts mirrors the OpenAI provider's helper. OpenRouter uses
+// the same OpenAI Chat Completions wire shape, so the multipart user
+// content array works identically; per-model multimodal support varies
+// (allowlist gating happens client-side).
+func toSDKUserParts(m margo.Message) []sdk.ChatCompletionContentPartUnionParam {
+	parts := make([]sdk.ChatCompletionContentPartUnionParam, 0, len(m.Parts)+1)
+	hasText := false
+	for _, p := range m.Parts {
+		switch p.Kind {
+		case margo.PartText:
+			if p.Text == "" {
+				continue
+			}
+			parts = append(parts, sdk.TextContentPart(p.Text))
+			hasText = true
+		case margo.PartImage:
+			if len(p.Data) == 0 || p.MimeType == "" {
+				continue
+			}
+			dataURL := "data:" + p.MimeType + ";base64," + base64.StdEncoding.EncodeToString(p.Data)
+			parts = append(parts, sdk.ImageContentPart(sdk.ChatCompletionContentPartImageImageURLParam{
+				URL: dataURL,
+			}))
+		}
+	}
+	if !hasText && m.Content != "" {
+		parts = append(parts, sdk.TextContentPart(m.Content))
+	}
+	return parts
 }
 
 func toSDKTools(tools []margo.ToolDef) []sdk.ChatCompletionToolUnionParam {

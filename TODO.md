@@ -296,61 +296,53 @@ Wails surface, frontend composer, persistence, token accounting), so the
 work is sliced below in dependency order. Each slice is independently
 shippable; ship in order.
 
-### 7.1 Provider multipart message shape (foundation)
+### 7.1 Provider multipart message shape — **done**
 
-Extend `margo.Message` to carry structured content parts in addition to
-its current `Content string`. Concrete:
+`pkg/margo/client.go` gains a `Part` type
+(`Kind: "text"|"image"|"document"`, `Text string`, `MimeType string`,
+`Data []byte`) and `Message.Parts []Part`. The legacy `Content
+string` remains the text-only convenience; providers prefer `Parts`
+when non-empty. Anthropic's `toAnthropicUserBlocks` emits
+`NewImageBlockBase64` per image part. OpenAI / OpenRouter share the
+same `data:<mime>;base64,...` URL approach via `ImageContentPart`.
+Documents (`PartDocument`) are reserved but not yet wired —
+deferred to §7.5.
 
-- New `Part` type: `{Kind: "text"|"image"|"document", Text string,
-  MimeType string, Data []byte}` (bytes inlined for now; revisit if
-  large files become common).
-- `Message.Parts []Part` field. `Content` stays as the legacy
-  text-only convenience; serializer prefers `Parts` when non-empty.
-- Per-provider conversion in `pkg/margo/providers/{anthropic,openai,
-  openrouter}`:
-  - **Anthropic**: each Part maps to `messages.ContentBlockParamUnion`
-    via `image` (base64) or `document` (PDF) blocks. The SDK already
-    expects multipart on user turns, so the conversion is mechanical.
-  - **OpenAI / OpenRouter**: parts map to `ChatCompletionContentPart`
-    with `image_url` carrying a `data:<mime>;base64,...` URL.
-- No UI yet — this slice is the wire-shape foundation. Cover with
-  unit tests that round-trip a `Message{Parts: [text+image]}` through
-  each provider's `to<SDK>Messages` converter.
+### 7.2 Image attachments end-to-end — **done**
 
-### 7.2 Image attachments end-to-end (Anthropic-only first slice)
+Frontend reads attachments via the browser File API (no Wails-side
+file dialog needed), base64-encodes via FileReader, and forwards a
+new `AttachmentInput[]` arg to `Chat` / `StreamChat` /
+`StreamAgent`. Plain-chat path glues parts onto the final user
+message via `applyAttachments` inside `toMargoRequest`. Agent path
+threads parts through a new `Adapter.WithFinalUserAttachments`
+that stamps them onto the last user turn during `request()` —
+necessary because schema.Message doesn't carry our Parts shape.
+Composer grows a paperclip button (hidden `<input type=file>`),
+drag-drop zone over the footer with bg highlight on hover, and a
+thumbnail strip with × per attachment. Per-file caps:
+PNG/JPEG/WebP/GIF, 10 MB. User bubble shows `📎 N attachments`
+underneath the prompt for messages that had attachments at send
+time. Attachments are not persisted (clear after send;
+`Message.attachmentCount` carries only the count). Coverage:
+`adapter_test.go::TestAdapterFinalUserAttachments`. Cross-provider
+parity (§7.3) is implicitly done since all three providers got
+multipart support in §7.1, but exercising the OpenAI / OpenRouter
+paths against real models is a manual verification step.
 
-Smallest user-visible slice. Pick the most-tested multimodal model
-(Anthropic Claude Sonnet/Opus 4.x) and ship images-only.
+### 7.3 Cross-provider parity — **done**
 
-- **Wails surface.** New `App.AttachFile() ([]AttachedFile, error)`
-  that calls `runtime.OpenFileDialog` (or accepts a drag-drop
-  payload — see below) and returns base64-encoded bytes + mime type
-  + filename. Cap accepted MIMEs to `image/png`, `image/jpeg`,
-  `image/webp`, `image/gif`. Cap per-file size at e.g. 10MB.
-- **Composer UI.** Paperclip button that opens the file dialog.
-  Drag-drop zone over the composer. Selected images render as small
-  thumbnails above the textarea with a `×` to remove. Bound to a
-  Svelte store keyed by the active chat id so the user can attach
-  multiple images before sending.
-- **Send path.** `StreamChat` / `StreamAgent` get an additional
-  `attachments []AttachedFile` arg; the bindings translate them into
-  `margo.Message.Parts` on the latest user turn. Past turns remain
-  text-only for now (see #7.4).
-- **Model gating.** When attachments are present, force the model
-  selector to the multimodal allowlist (Anthropic only this slice).
-  Subsequent sends after the attachment is consumed re-allow all
-  models.
-- Coverage: a fake-client integration test asserting that an image
-  attachment shows up as an `image` block in the request the
-  Anthropic provider would send.
-
-### 7.3 Cross-provider parity
-
-Extend #7.2's image path to OpenAI and OpenRouter using each SDK's
-multimodal content shape. The provider-converter work landed in #7.1
-already; this slice expands the multimodal allowlist in
-`frontend/src/lib/store.ts` and tests the OpenAI-side wire conversion.
-GPT-4o family + OpenRouter's vision-capable models become eligible.
+Multimodal allowlist (`MULTIMODAL_MODELS` + `isMultimodal()`) lives in
+`frontend/src/lib/store.ts` next to `CONTEXT_WINDOWS`. Composer
+computes a reactive `attachmentsBlocked` when attachments are pending
+AND the active model isn't on the allowlist; in that state the send
+button disables, an inline error-styled banner names the model and
+suggests switching to a vision-capable one, and the `send()` guard
+short-circuits with a matching error message. Allowlist seeded with
+the Anthropic Claude 4.x family and OpenAI GPT-5.x family;
+maintained alongside the model menus in `app.go`. Manual
+verification against real OpenAI / OpenRouter vision endpoints is
+still worth doing; the Anthropic path is exercised end-to-end.
 
 ### 7.4 Persistence + replay
 
@@ -402,3 +394,66 @@ attached-but-unsent images / docs aren't counted yet. Approximate cost:
 Surface a "+N tokens" pip on the composer's attachment thumbnails so
 the user sees the cost before sending. Pairs naturally with #6.3 if
 both land — both feed the same context budget.
+
+## 8. Personas and Agents
+
+Conceptual split: a **Persona** is a tool-less role (a packaged system
+prompt — voice, expertise, output structure); an **Agent** is a
+persona that also carries a tool allowlist (a curated capability that
+runs through `StreamAgent`'s ReAct loop). Agents compose; personas
+don't. See `docs/dev/personas_and_agents.md` for the design doc that
+covers the data model, UX, sequencing, anti-patterns, and tradeoffs in
+detail. The entries below mirror that doc's rollout sequence.
+
+### 8.1 Personas (tool-less roles) — **done**
+
+Frontend-only slice landed. `Persona` interface +
+`Settings.personas: Persona[]` carry a `BUILTIN_PERSONAS` catalog
+(Editor, Code Reviewer, Researcher, Concise) merged on each load
+so a deleted-by-hand builtin reappears next launch. `Chat.personaId`
+persists the per-chat selection. Role picker is a native `<select>`
+in the topbar (Default + Personas group only; Agents group lands in
+8.2). Settings → Agents grows a "Personas" section listing the
+catalog with Edit / Duplicate / Delete (builtins are duplicate-only)
+and a + New persona button; create/edit shares a Melt UI dialog.
+`send()` resolves the active persona via
+`findPersona($settings.personas, chat.personaId)` and replaces
+`Settings.system` with the persona's `systemPrompt` for both
+`StreamChat` and `StreamAgent` paths. Docs:
+`docs/dev/personas_and_agents.md`.
+
+### 8.2 Agents (personas + tool allowlists) — **done**
+
+Frontend-only slice landed. `Agent` interface +
+`Settings.agents: Agent[]` carry a `BUILTIN_AGENTS` catalog (Quarto
+Author → `quarto_render`; Time-aware → `current_time`) merged on
+each load. `Chat.agentId` enforces mutual exclusivity with
+`personaId` via `setChatAgent` / `setChatPersona` (each clears the
+other). The role picker grows an Agents optgroup showing
+`Name [N]` per entry with `agentMissingTools` greying out agents
+whose tool list isn't currently registered ("needs quarto_render").
+Settings → Agents grows an "Agents" section with the same
+Edit/Duplicate/Delete affordances and a tool-allowlist checkbox
+group in the create/edit dialog. Validation: name +
+systemPrompt + at least one tool required at save; empty
+allowlists rejected. The legacy `agentMode` checkbox is removed
+from the composer; the persisted flag still drives the route for
+backwards compat on chats that have it set without picking an
+explicit agent. Active-agent's tool list surfaces under the
+composer when an agent is picked. Docs:
+`docs/dev/personas_and_agents.md`.
+
+### 8.3 Composition
+
+After 8.1 / 8.2 see real use. Reuses the same data model with
+`Agent.composedOf: string[]` populated. Two flavors:
+
+- **Pipeline** (sequential): `A → output → B → output → user`.
+- **Host / specialists** (hierarchical): host routes to A or B per
+  request. Maps to Eino's `flow/agent/multiagent/host` (existing
+  TODO #6.7 collapses into this).
+
+This is also where TODO #6.5 (custom graphs / plan-then-execute)
+lands naturally — a planner agent is one whose runner is a
+`compose.Graph` instead of a ReAct loop. Discriminator field
+(`composition: "pipeline" | "host"`) introduced in 8.3.

@@ -1,5 +1,21 @@
 export namespace main {
 	
+	export class AttachmentInput {
+	    name: string;
+	    mimeType: string;
+	    data: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AttachmentInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.mimeType = source["mimeType"];
+	        this.data = source["data"];
+	    }
+	}
 	export class ChatMessage {
 	    role: string;
 	    content: string;

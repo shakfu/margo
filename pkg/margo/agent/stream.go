@@ -129,6 +129,7 @@ func StreamReact(
 	defaults margo.Request,
 	tools []tool.BaseTool,
 	input []*schema.Message,
+	attachments []margo.Part,
 	gate PermissionGate,
 	emit func(StepEvent),
 ) error {
@@ -144,7 +145,7 @@ func StreamReact(
 		middlewares = append([]compose.ToolMiddleware{permissionMiddleware(gate)}, middlewares...)
 	}
 
-	adapter := NewAdapter(c, defaults)
+	adapter := NewAdapter(c, defaults).WithFinalUserAttachments(attachments)
 	a, err := react.NewAgent(ctx, &react.AgentConfig{
 		ToolCallingModel: adapter,
 		ToolsConfig: compose.ToolsNodeConfig{

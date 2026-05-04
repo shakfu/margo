@@ -32,8 +32,40 @@ type ToolCall struct {
 	Arguments string // JSON-encoded
 }
 
+// PartKind classifies a structured content Part. Today only "text" and
+// "image" are supported; "document" is reserved for §7.5.
+type PartKind string
+
+const (
+	PartText     PartKind = "text"
+	PartImage    PartKind = "image"
+	PartDocument PartKind = "document"
+)
+
+// Part is a single piece of structured message content. When a Message
+// has Parts populated, providers convert each entry to its native
+// multipart shape (Anthropic content blocks, OpenAI content parts).
+//
+// Field semantics by Kind:
+//   - PartText:     Text holds the part's text. MimeType / Data ignored.
+//   - PartImage:    MimeType is e.g. "image/png" / "image/jpeg"; Data is
+//                   the raw image bytes. Providers base64-encode as needed.
+//   - PartDocument: same as image, with MimeType e.g. "application/pdf".
+//                   Reserved; not yet wired through any provider.
+type Part struct {
+	Kind     PartKind
+	Text     string
+	MimeType string
+	Data     []byte
+}
+
 // Message is one turn in a conversation. System prompts go in Request.System,
 // not here, because providers (e.g. Anthropic) handle them as a separate field.
+//
+// Content vs Parts: when Parts is non-empty, providers prefer it and
+// ignore Content (the multipart payload is authoritative). The string
+// Content remains the convenience path for the common text-only case;
+// providers fall back to it when Parts is nil.
 //
 // Tool fields:
 //   - On an assistant message, ToolCalls lists tool invocations the model wants.
@@ -42,6 +74,7 @@ type ToolCall struct {
 type Message struct {
 	Role       Role
 	Content    string
+	Parts      []Part
 	ToolCalls  []ToolCall
 	ToolCallID string
 }

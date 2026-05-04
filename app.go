@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os/exec"
 	goruntime "runtime"
@@ -143,6 +144,17 @@ type ChatMessage struct {
 	Content string `json:"content"`
 }
 
+// AttachmentInput carries an inline image (or future doc) attachment from
+// the frontend. Data is base64-encoded so it survives the Wails JSON IPC
+// without byte-array serialization quirks. Attachments are glued onto
+// the latest user-role message's Parts before the request goes out;
+// they are not persisted in chat history (§7.4 will revisit storage).
+type AttachmentInput struct {
+	Name     string `json:"name"`     // original filename, surfaced for UX only
+	MimeType string `json:"mimeType"` // "image/png" / "image/jpeg" / etc.
+	Data     string `json:"data"`     // base64-encoded bytes
+}
+
 // ChatOptions carries per-request sampling and reasoning settings from the
 // frontend. Pointer fields (Temperature, TopP) are omitted when nil so the
 // provider falls back to its default.
@@ -195,8 +207,65 @@ func toMargoMessages(in []ChatMessage) []margo.Message {
 	return out
 }
 
-func toMargoRequest(system string, messages []ChatMessage, opts ChatOptions) margo.Request {
+// attachmentsToParts decodes the inbound attachment list into a margo
+// Part slice. Used by the agent path, which threads parts through the
+// adapter rather than mutating margo.Request.Messages directly. Bad
+// entries (empty data, unknown mime) are silently dropped.
+func attachmentsToParts(in []AttachmentInput) []margo.Part {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]margo.Part, 0, len(in))
+	for _, a := range in {
+		raw, err := base64.StdEncoding.DecodeString(a.Data)
+		if err != nil || len(raw) == 0 || a.MimeType == "" {
+			continue
+		}
+		out = append(out, margo.Part{Kind: margo.PartImage, MimeType: a.MimeType, Data: raw})
+	}
+	return out
+}
+
+// applyAttachments glues attachments onto the final user-role message's
+// Parts. The original Content string is preserved as a leading text
+// part so the prompt and the image both reach the model in the same
+// turn. No-op when no attachments or when the message slice is empty.
+func applyAttachments(msgs []margo.Message, attachments []AttachmentInput) []margo.Message {
+	if len(attachments) == 0 || len(msgs) == 0 {
+		return msgs
+	}
+	// Find the last user-role message (index from the end). Anything
+	// past it is server-generated and not a place to attach to.
+	idx := -1
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == margo.RoleUser {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return msgs
+	}
+	target := msgs[idx]
+	parts := make([]margo.Part, 0, len(attachments)+1)
+	if target.Content != "" {
+		parts = append(parts, margo.Part{Kind: margo.PartText, Text: target.Content})
+	}
+	for _, a := range attachments {
+		raw, err := base64.StdEncoding.DecodeString(a.Data)
+		if err != nil || len(raw) == 0 || a.MimeType == "" {
+			continue
+		}
+		parts = append(parts, margo.Part{Kind: margo.PartImage, MimeType: a.MimeType, Data: raw})
+	}
+	target.Parts = parts
+	msgs[idx] = target
+	return msgs
+}
+
+func toMargoRequest(system string, messages []ChatMessage, opts ChatOptions, attachments []AttachmentInput) margo.Request {
 	msgs := toMargoMessages(messages)
+	msgs = applyAttachments(msgs, attachments)
 	if opts.Model != "" {
 		msgs = agent.RewriteMargoForBudget(msgs, system, agent.BudgetForModel(opts.Model))
 	}
@@ -216,12 +285,12 @@ func toMargoRequest(system string, messages []ChatMessage, opts ChatOptions) mar
 }
 
 // Chat performs a non-streaming multi-turn completion.
-func (a *App) Chat(provider, system string, messages []ChatMessage, opts ChatOptions) (ChatResponse, error) {
+func (a *App) Chat(provider, system string, messages []ChatMessage, opts ChatOptions, attachments []AttachmentInput) (ChatResponse, error) {
 	c, err := a.clientFor(provider)
 	if err != nil {
 		return ChatResponse{}, err
 	}
-	resp, err := c.Complete(a.ctx, toMargoRequest(system, messages, opts))
+	resp, err := c.Complete(a.ctx, toMargoRequest(system, messages, opts, attachments))
 	if err != nil {
 		return ChatResponse{}, err
 	}
@@ -245,7 +314,7 @@ func (a *App) Chat(provider, system string, messages []ChatMessage, opts ChatOpt
 //	margo:stream:<id>:done   payload = StreamDoneEvent {usage}
 //
 // Cancel an in-flight stream with CancelStream(id).
-func (a *App) StreamChat(id, provider, system string, messages []ChatMessage, opts ChatOptions) error {
+func (a *App) StreamChat(id, provider, system string, messages []ChatMessage, opts ChatOptions, attachments []AttachmentInput) error {
 	c, err := a.clientFor(provider)
 	if err != nil {
 		return err
@@ -261,7 +330,7 @@ func (a *App) StreamChat(id, provider, system string, messages []ChatMessage, op
 	a.cancels[id] = cancel
 	a.mu.Unlock()
 
-	ch, err := c.Stream(ctx, toMargoRequest(system, messages, opts))
+	ch, err := c.Stream(ctx, toMargoRequest(system, messages, opts, attachments))
 	if err != nil {
 		a.mu.Lock()
 		delete(a.cancels, id)
@@ -397,7 +466,7 @@ type permissionDecision struct {
 // `toolNames` selects which tools from Tools() the agent can call this run;
 // pass empty for plain chat (which is what StreamChat already does — prefer
 // that path when no tools are needed).
-func (a *App) StreamAgent(id, provider, system string, messages []ChatMessage, opts ChatOptions, toolNames []string, autoApprove []string) error {
+func (a *App) StreamAgent(id, provider, system string, messages []ChatMessage, opts ChatOptions, toolNames []string, autoApprove []string, attachments []AttachmentInput) error {
 	c, err := a.clientFor(provider)
 	if err != nil {
 		return err
@@ -472,9 +541,10 @@ func (a *App) StreamAgent(id, provider, system string, messages []ChatMessage, o
 		}()
 
 		input := toSchemaMessages(messages)
-		req := toMargoRequest(system, nil, opts)
+		req := toMargoRequest(system, nil, opts, nil)
+		parts := attachmentsToParts(attachments)
 
-		err := agent.StreamReact(ctx, c, req, tools, input, gate, func(ev agent.StepEvent) {
+		err := agent.StreamReact(ctx, c, req, tools, input, parts, gate, func(ev agent.StepEvent) {
 			switch ev.Kind {
 			case agent.StepText:
 				runtime.EventsEmit(a.ctx, base+":chunk", AgentStepEvent{Kind: "text", Text: ev.Text})

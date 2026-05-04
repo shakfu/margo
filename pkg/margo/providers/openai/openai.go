@@ -2,6 +2,7 @@ package openai
 
 import (
 	"context"
+	"encoding/base64"
 	"strings"
 	"time"
 
@@ -98,8 +99,42 @@ func toSDKMessage(m margo.Message) sdk.ChatCompletionMessageParamUnion {
 	case margo.RoleSystem:
 		return sdk.SystemMessage(m.Content)
 	default:
+		if len(m.Parts) > 0 {
+			return sdk.UserMessage(toSDKUserParts(m))
+		}
 		return sdk.UserMessage(m.Content)
 	}
+}
+
+// toSDKUserParts builds an OpenAI multipart user-message content array
+// from a margo message. Image parts ride as data: URLs (base64-encoded);
+// text parts ride as text content parts. Empty entries are skipped.
+func toSDKUserParts(m margo.Message) []sdk.ChatCompletionContentPartUnionParam {
+	parts := make([]sdk.ChatCompletionContentPartUnionParam, 0, len(m.Parts)+1)
+	hasText := false
+	for _, p := range m.Parts {
+		switch p.Kind {
+		case margo.PartText:
+			if p.Text == "" {
+				continue
+			}
+			parts = append(parts, sdk.TextContentPart(p.Text))
+			hasText = true
+		case margo.PartImage:
+			if len(p.Data) == 0 || p.MimeType == "" {
+				continue
+			}
+			dataURL := "data:" + p.MimeType + ";base64," + base64.StdEncoding.EncodeToString(p.Data)
+			parts = append(parts, sdk.ImageContentPart(sdk.ChatCompletionContentPartImageImageURLParam{
+				URL: dataURL,
+			}))
+		}
+	}
+	// Preserve the legacy Content string when Parts didn't include any text.
+	if !hasText && m.Content != "" {
+		parts = append(parts, sdk.TextContentPart(m.Content))
+	}
+	return parts
 }
 
 func toSDKTools(tools []margo.ToolDef) []sdk.ChatCompletionToolUnionParam {

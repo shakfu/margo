@@ -1,7 +1,12 @@
 <script lang="ts">
-  import { settings } from './store';
+  import {
+    settings,
+    upsertPersona, deletePersona, duplicatePersona,
+    upsertAgent, deleteAgent, duplicateAgent, agentMissingTools,
+    type Persona, type Agent,
+  } from './store';
   import { setHighlightTheme } from './markdown';
-  import { createSelect, createCollapsible, createDialog, melt } from '@melt-ui/svelte';
+  import { createSelect, createCollapsible, createDialog, createTabs, melt } from '@melt-ui/svelte';
   import { OpenPath } from '../../wailsjs/go/main/App.js';
   import { get } from 'svelte/store';
 
@@ -9,6 +14,7 @@
   export let models: string[] = [];
   export let busy: boolean = false;
   export let outputDir: string = '';
+  export let availableTools: string[] = [];
   export let onReset: () => void = () => {};
 
   function openOutputDir() {
@@ -127,6 +133,121 @@
     settings.update(s => ({ ...s, autoApproveTools: [] }));
   }
 
+  // Persona management
+  const {
+    elements: { root: persRoot, trigger: persTrig, content: persContent },
+    states: { open: persOpen }
+  } = mkSection(false);
+
+  // Edit dialog reused for both Create and Edit (and the Edit-after-
+  // Duplicate flow). `editing` carries the working copy; null when the
+  // dialog is closed.
+  const {
+    elements: { overlay: persDlgOverlay, content: persDlgContent, title: persDlgTitle, close: persDlgClose, portalled: persDlgPortalled },
+    states: { open: persDlgOpen },
+  } = createDialog({ role: 'dialog' });
+
+  let editing: Persona | null = null;
+
+  function openCreate() {
+    editing = {
+      id: crypto.randomUUID(),
+      name: '',
+      description: '',
+      systemPrompt: '',
+      builtin: false,
+    };
+    persDlgOpen.set(true);
+  }
+  function openEdit(p: Persona) {
+    if (p.builtin) return; // Edit on a builtin should have been intercepted in the UI.
+    editing = { ...p };
+    persDlgOpen.set(true);
+  }
+  function openDuplicate(p: Persona) {
+    const newId = duplicatePersona(p.id);
+    if (!newId) return;
+    // Open the freshly-duplicated entry in edit mode so the user can
+    // immediately rename / tweak. Reading from the store guarantees we
+    // see the same object the list will render.
+    const fresh = get(settings).personas.find(x => x.id === newId);
+    if (fresh) openEdit(fresh);
+  }
+  function commitEdit() {
+    if (!editing) return;
+    if (!editing.name.trim() || !editing.systemPrompt.trim()) return;
+    upsertPersona(editing);
+    editing = null;
+    persDlgOpen.set(false);
+  }
+  function cancelEdit() {
+    editing = null;
+    persDlgOpen.set(false);
+  }
+
+  // Agent management — same shape as personas but with a tool allowlist.
+  const {
+    elements: { root: agtsRoot, trigger: agtsTrig, content: agtsContent },
+    states: { open: agtsOpen }
+  } = mkSection(false);
+
+  const {
+    elements: { overlay: agtDlgOverlay, content: agtDlgContent, title: agtDlgTitle, close: agtDlgClose, portalled: agtDlgPortalled },
+    states: { open: agtDlgOpen },
+  } = createDialog({ role: 'dialog' });
+
+  let editingAgent: Agent | null = null;
+
+  function openCreateAgent() {
+    editingAgent = {
+      id: crypto.randomUUID(),
+      name: '',
+      description: '',
+      systemPrompt: '',
+      tools: [],
+      builtin: false,
+    };
+    agtDlgOpen.set(true);
+  }
+  function openEditAgent(a: Agent) {
+    if (a.builtin) return;
+    editingAgent = { ...a, tools: [...a.tools] };
+    agtDlgOpen.set(true);
+  }
+  function openDuplicateAgent(a: Agent) {
+    const newId = duplicateAgent(a.id);
+    if (!newId) return;
+    const fresh = get(settings).agents.find(x => x.id === newId);
+    if (fresh) openEditAgent(fresh);
+  }
+  function toggleAgentTool(name: string) {
+    if (!editingAgent) return;
+    const has = editingAgent.tools.includes(name);
+    editingAgent = {
+      ...editingAgent,
+      tools: has ? editingAgent.tools.filter(t => t !== name) : [...editingAgent.tools, name],
+    };
+  }
+  function commitAgent() {
+    if (!editingAgent) return;
+    if (!editingAgent.name.trim() || !editingAgent.systemPrompt.trim() || editingAgent.tools.length === 0) return;
+    upsertAgent(editingAgent);
+    editingAgent = null;
+    agtDlgOpen.set(false);
+  }
+  function cancelAgent() {
+    editingAgent = null;
+    agtDlgOpen.set(false);
+  }
+
+  // Top-level tabs grouping the sections by what they actually affect.
+  // "models"  — provider, model, sampling, thinking (model selection + params).
+  // "agents"  — agent / tool-related settings (trusted tools today).
+  // "general" — everything else: system prompt, appearance, output, reset.
+  const {
+    elements: { root: tabsRoot, list: tabsList, trigger: tabsTrigger, content: tabsContent },
+  } = createTabs({ defaultValue: 'models' });
+
   // Reset confirm dialog
   const {
     elements: { overlay: resetDlgOverlay, content: resetDlgContent, title: resetDlgTitle, close: resetDlgClose, portalled: resetDlgPortalled },
@@ -157,8 +278,16 @@
   }
 </script>
 
-<div class="flex flex-col h-full bg-bg-elev border-l border-border overflow-y-auto">
-  <div class="px-3.5 pt-3.5 pb-2.5 font-semibold text-[0.9rem] border-b border-border">Model Parameters</div>
+<div class="flex flex-col h-full bg-bg-elev border-l border-border overflow-y-auto" use:melt={$tabsRoot}>
+  <div class="px-3.5 pt-3.5 pb-2 font-semibold text-[0.9rem]">Settings</div>
+  <div use:melt={$tabsList} class="flex border-b border-border px-2 gap-0.5" aria-label="Settings tabs">
+    <button class="tab-trigger" use:melt={$tabsTrigger('models')}>Models</button>
+    <button class="tab-trigger" use:melt={$tabsTrigger('agents')}>Agents</button>
+    <button class="tab-trigger" use:melt={$tabsTrigger('general')}>General</button>
+  </div>
+
+  <!-- Models tab -->
+  <div use:melt={$tabsContent('models')}>
 
   <!-- Provider -->
   <section class="border-b border-border" use:melt={$provRoot}>
@@ -326,6 +455,136 @@
     </div>
   </section>
 
+  </div>
+
+  <!-- Agents tab -->
+  <div use:melt={$tabsContent('agents')}>
+
+  <!-- Personas -->
+  <section class="border-b border-border" use:melt={$persRoot}>
+    <button class="section-head" use:melt={$persTrig}>
+      <span class="caret">{$persOpen ? '▾' : '▸'}</span>
+      <span>Personas</span>
+      <span class="ml-1 text-fg-faint text-[0.72rem]">({$settings.personas.length})</span>
+    </button>
+    <div use:melt={$persContent} class="section-body">
+      <p class="text-[0.78rem] text-fg-muted leading-snug mb-2">
+        Tool-less roles. Pick one in the chat header to swap the system prompt.
+      </p>
+      <ul class="flex flex-col gap-1 mb-2">
+        {#each $settings.personas as p (p.id)}
+          <li class="flex items-start gap-2 text-[0.78rem] bg-input-bg border border-border rounded px-2 py-1.5">
+            <div class="flex-1 min-w-0">
+              <div class="font-semibold text-fg flex items-center gap-1">
+                <span>{p.name}</span>
+                {#if p.builtin}<span class="text-fg-faint text-[0.65rem] uppercase tracking-wider">builtin</span>{/if}
+              </div>
+              {#if p.description}
+                <div class="text-fg-faint text-[0.7rem] leading-snug mt-0.5">{p.description}</div>
+              {/if}
+            </div>
+            <div class="flex flex-col gap-1 shrink-0">
+              {#if p.builtin}
+                <button class="mini-btn" on:click={() => openDuplicate(p)} title="Duplicate; the copy is editable">Duplicate</button>
+              {:else}
+                <button class="mini-btn" on:click={() => openEdit(p)}>Edit</button>
+                <button class="mini-btn" on:click={() => deletePersona(p.id)}>Delete</button>
+              {/if}
+            </div>
+          </li>
+        {/each}
+      </ul>
+      <button class="mini-btn" on:click={openCreate}>+ New persona</button>
+    </div>
+  </section>
+
+  <!-- Agents -->
+  <section class="border-b border-border" use:melt={$agtsRoot}>
+    <button class="section-head" use:melt={$agtsTrig}>
+      <span class="caret">{$agtsOpen ? '▾' : '▸'}</span>
+      <span>Agents</span>
+      <span class="ml-1 text-fg-faint text-[0.72rem]">({$settings.agents.length})</span>
+    </button>
+    <div use:melt={$agtsContent} class="section-body">
+      <p class="text-[0.78rem] text-fg-muted leading-snug mb-2">
+        Personas with a tool allowlist. Picking one in the chat header runs the next message through the agent loop with only those tools available.
+      </p>
+      <ul class="flex flex-col gap-1 mb-2">
+        {#each $settings.agents as a (a.id)}
+          {@const missing = agentMissingTools(a, availableTools)}
+          <li class="flex items-start gap-2 text-[0.78rem] bg-input-bg border border-border rounded px-2 py-1.5">
+            <div class="flex-1 min-w-0">
+              <div class="font-semibold text-fg flex items-center gap-1 flex-wrap">
+                <span>{a.name}</span>
+                <span class="text-fg-faint text-[0.65rem] font-[family-name:var(--font-mono)]">[{a.tools.length}]</span>
+                {#if a.builtin}<span class="text-fg-faint text-[0.65rem] uppercase tracking-wider">builtin</span>{/if}
+                {#if missing.length > 0}
+                  <span class="text-error-fg text-[0.65rem] uppercase tracking-wider">needs {missing.join(', ')}</span>
+                {/if}
+              </div>
+              {#if a.description}
+                <div class="text-fg-faint text-[0.7rem] leading-snug mt-0.5">{a.description}</div>
+              {/if}
+              <div class="text-fg-faint text-[0.7rem] font-[family-name:var(--font-mono)] mt-0.5">
+                tools: {a.tools.join(', ')}
+              </div>
+            </div>
+            <div class="flex flex-col gap-1 shrink-0">
+              {#if a.builtin}
+                <button class="mini-btn" on:click={() => openDuplicateAgent(a)}>Duplicate</button>
+              {:else}
+                <button class="mini-btn" on:click={() => openEditAgent(a)}>Edit</button>
+                <button class="mini-btn" on:click={() => deleteAgent(a.id)}>Delete</button>
+              {/if}
+            </div>
+          </li>
+        {/each}
+      </ul>
+      <button class="mini-btn" on:click={openCreateAgent} disabled={availableTools.length === 0}>+ New agent</button>
+      {#if availableTools.length === 0}
+        <div class="text-[0.7rem] text-fg-faint mt-1">No tools registered. New agents need at least one tool.</div>
+      {/if}
+    </div>
+  </section>
+
+  <!-- Trusted tools -->
+  <section class="border-b border-border" use:melt={$trustRoot}>
+    <button class="section-head" use:melt={$trustTrig}>
+      <span class="caret">{$trustOpen ? '▾' : '▸'}</span>
+      <span>Trusted tools</span>
+      {#if ($settings.autoApproveTools ?? []).length > 0}
+        <span class="ml-1 text-fg-faint text-[0.72rem]">({$settings.autoApproveTools.length})</span>
+      {/if}
+    </button>
+    <div use:melt={$trustContent} class="section-body">
+      <p class="text-[0.78rem] text-fg-muted leading-snug mb-2">
+        Tools you've clicked <em>Always</em> on. These run without a permission prompt.
+      </p>
+      {#if ($settings.autoApproveTools ?? []).length === 0}
+        <div class="text-[0.78rem] text-fg-faint italic">No trusted tools yet.</div>
+      {:else}
+        <ul class="flex flex-col gap-1 mb-2">
+          {#each $settings.autoApproveTools as name (name)}
+            <li class="flex items-center gap-2 text-[0.78rem] font-[family-name:var(--font-mono)] bg-input-bg border border-border rounded px-2 py-1">
+              <span class="flex-1 break-all">{name}</span>
+              <button
+                class="mini-btn"
+                title="Revoke; future calls will prompt again"
+                on:click={() => revokeTool(name)}
+              >Revoke</button>
+            </li>
+          {/each}
+        </ul>
+        <button class="mini-btn" on:click={revokeAllTools}>Revoke all</button>
+      {/if}
+    </div>
+  </section>
+
+  </div>
+
+  <!-- General tab -->
+  <div use:melt={$tabsContent('general')}>
+
   <!-- System Prompt -->
   <section class="border-b border-border" use:melt={$sysRoot}>
     <button class="section-head" use:melt={$sysTrig}>
@@ -380,39 +639,6 @@
     </div>
   </section>
 
-  <!-- Trusted tools -->
-  <section class="border-b border-border" use:melt={$trustRoot}>
-    <button class="section-head" use:melt={$trustTrig}>
-      <span class="caret">{$trustOpen ? '▾' : '▸'}</span>
-      <span>Trusted tools</span>
-      {#if ($settings.autoApproveTools ?? []).length > 0}
-        <span class="ml-1 text-fg-faint text-[0.72rem]">({$settings.autoApproveTools.length})</span>
-      {/if}
-    </button>
-    <div use:melt={$trustContent} class="section-body">
-      <p class="text-[0.78rem] text-fg-muted leading-snug mb-2">
-        Tools you've clicked <em>Always</em> on. These run without a permission prompt.
-      </p>
-      {#if ($settings.autoApproveTools ?? []).length === 0}
-        <div class="text-[0.78rem] text-fg-faint italic">No trusted tools yet.</div>
-      {:else}
-        <ul class="flex flex-col gap-1 mb-2">
-          {#each $settings.autoApproveTools as name (name)}
-            <li class="flex items-center gap-2 text-[0.78rem] font-[family-name:var(--font-mono)] bg-input-bg border border-border rounded px-2 py-1">
-              <span class="flex-1 break-all">{name}</span>
-              <button
-                class="mini-btn"
-                title="Revoke; future calls will prompt again"
-                on:click={() => revokeTool(name)}
-              >Revoke</button>
-            </li>
-          {/each}
-        </ul>
-        <button class="mini-btn" on:click={revokeAllTools}>Revoke all</button>
-      {/if}
-    </div>
-  </section>
-
   <!-- Reset -->
   <section class="border-b border-border" use:melt={$resetRoot}>
     <button class="section-head" use:melt={$resetTrig}>
@@ -429,6 +655,124 @@
       >Reset margo…</button>
     </div>
   </section>
+
+  </div>
+</div>
+
+<div use:melt={$persDlgPortalled}>
+  {#if $persDlgOpen && editing}
+    <div use:melt={$persDlgOverlay} class="fixed inset-0 z-40 bg-black/40"></div>
+    <div
+      use:melt={$persDlgContent}
+      class="fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 w-[min(32rem,92vw)] rounded-md border border-border bg-bg-elev p-4 shadow-xl"
+    >
+      <h2 use:melt={$persDlgTitle} class="text-[0.95rem] font-semibold text-fg">
+        {$settings.personas.some(p => p.id === editing?.id) ? 'Edit persona' : 'New persona'}
+      </h2>
+      <div class="mt-3 flex flex-col gap-2.5">
+        <label class="flex flex-col gap-1 text-[0.78rem] text-fg-muted">
+          <span>Name</span>
+          <input
+            type="text"
+            class="text-input"
+            bind:value={editing.name}
+            placeholder="e.g. Concise Reviewer"
+          />
+        </label>
+        <label class="flex flex-col gap-1 text-[0.78rem] text-fg-muted">
+          <span>Description (optional)</span>
+          <input
+            type="text"
+            class="text-input"
+            bind:value={editing.description}
+            placeholder="Shown as the picker subtitle"
+          />
+        </label>
+        <label class="flex flex-col gap-1 text-[0.78rem] text-fg-muted">
+          <span>System prompt</span>
+          <textarea
+            class="text-input"
+            rows="8"
+            bind:value={editing.systemPrompt}
+            placeholder="What this role does. The text here replaces the global system prompt when this persona is active."
+          ></textarea>
+        </label>
+      </div>
+      <div class="mt-4 flex justify-end gap-2">
+        <button
+          use:melt={$persDlgClose}
+          class="px-3 py-1.5 text-[0.85rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg"
+          on:click={cancelEdit}
+        >Cancel</button>
+        <button
+          class="px-3 py-1.5 text-[0.85rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg font-semibold"
+          on:click={commitEdit}
+          disabled={!editing.name.trim() || !editing.systemPrompt.trim()}
+        >Save</button>
+      </div>
+    </div>
+  {/if}
+</div>
+
+<div use:melt={$agtDlgPortalled}>
+  {#if $agtDlgOpen && editingAgent}
+    <div use:melt={$agtDlgOverlay} class="fixed inset-0 z-40 bg-black/40"></div>
+    <div
+      use:melt={$agtDlgContent}
+      class="fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 w-[min(34rem,92vw)] max-h-[90vh] overflow-y-auto rounded-md border border-border bg-bg-elev p-4 shadow-xl"
+    >
+      <h2 use:melt={$agtDlgTitle} class="text-[0.95rem] font-semibold text-fg">
+        {$settings.agents.some(a => a.id === editingAgent?.id) ? 'Edit agent' : 'New agent'}
+      </h2>
+      <div class="mt-3 flex flex-col gap-2.5">
+        <label class="flex flex-col gap-1 text-[0.78rem] text-fg-muted">
+          <span>Name</span>
+          <input type="text" class="text-input" bind:value={editingAgent.name} placeholder="e.g. Quarto Author" />
+        </label>
+        <label class="flex flex-col gap-1 text-[0.78rem] text-fg-muted">
+          <span>Description (optional)</span>
+          <input type="text" class="text-input" bind:value={editingAgent.description} placeholder="Shown as the picker subtitle" />
+        </label>
+        <label class="flex flex-col gap-1 text-[0.78rem] text-fg-muted">
+          <span>System prompt</span>
+          <textarea class="text-input" rows="6" bind:value={editingAgent.systemPrompt}
+            placeholder="What this agent does. Mention the tools by name so the model knows when to call them."
+          ></textarea>
+        </label>
+        <div class="flex flex-col gap-1 text-[0.78rem] text-fg-muted">
+          <span>Tools (allowlist — at least one required)</span>
+          {#if availableTools.length === 0}
+            <div class="text-fg-faint italic">No tools available.</div>
+          {:else}
+            <div class="flex flex-col gap-1 bg-input-bg border border-border rounded px-2 py-1.5">
+              {#each availableTools as tool (tool)}
+                <label class="flex items-center gap-2 text-[0.78rem] text-fg cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={editingAgent.tools.includes(tool)}
+                    on:change={() => toggleAgentTool(tool)}
+                  />
+                  <span class="font-[family-name:var(--font-mono)]">{tool}</span>
+                </label>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      </div>
+      <div class="mt-4 flex justify-end gap-2">
+        <button
+          use:melt={$agtDlgClose}
+          class="px-3 py-1.5 text-[0.85rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg"
+          on:click={cancelAgent}
+        >Cancel</button>
+        <button
+          class="px-3 py-1.5 text-[0.85rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg font-semibold"
+          on:click={commitAgent}
+          disabled={!editingAgent.name.trim() || !editingAgent.systemPrompt.trim() || editingAgent.tools.length === 0}
+        >Save</button>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <div use:melt={$resetDlgPortalled}>
@@ -556,4 +900,22 @@
   }
   .mini-btn:hover:not(:disabled) { background: var(--hover-bg); }
   .mini-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .tab-trigger {
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 0.45rem 0.7rem;
+    font-size: 0.82rem;
+    color: var(--fg-muted);
+    cursor: pointer;
+    font-family: inherit;
+    margin-bottom: -1px; /* overlap parent's bottom border */
+  }
+  .tab-trigger:hover { color: var(--fg); }
+  .tab-trigger[data-state="active"] {
+    color: var(--fg);
+    border-bottom-color: var(--fg);
+    font-weight: 600;
+  }
 </style>

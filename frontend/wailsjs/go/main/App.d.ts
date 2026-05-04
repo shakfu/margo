@@ -4,7 +4,7 @@ import {main} from '../models';
 
 export function CancelStream(arg1:string):Promise<void>;
 
-export function Chat(arg1:string,arg2:string,arg3:Array<main.ChatMessage>,arg4:main.ChatOptions):Promise<main.ChatResponse>;
+export function Chat(arg1:string,arg2:string,arg3:Array<main.ChatMessage>,arg4:main.ChatOptions,arg5:Array<main.AttachmentInput>):Promise<main.ChatResponse>;
 
 export function Greet(arg1:string):Promise<string>;
 
@@ -18,8 +18,8 @@ export function Providers():Promise<Array<string>>;
 
 export function RespondPermission(arg1:string,arg2:boolean,arg3:boolean):Promise<void>;
 
-export function StreamAgent(arg1:string,arg2:string,arg3:string,arg4:Array<main.ChatMessage>,arg5:main.ChatOptions,arg6:Array<string>,arg7:Array<string>):Promise<void>;
+export function StreamAgent(arg1:string,arg2:string,arg3:string,arg4:Array<main.ChatMessage>,arg5:main.ChatOptions,arg6:Array<string>,arg7:Array<string>,arg8:Array<main.AttachmentInput>):Promise<void>;
 
-export function StreamChat(arg1:string,arg2:string,arg3:string,arg4:Array<main.ChatMessage>,arg5:main.ChatOptions):Promise<void>;
+export function StreamChat(arg1:string,arg2:string,arg3:string,arg4:Array<main.ChatMessage>,arg5:main.ChatOptions,arg6:Array<main.AttachmentInput>):Promise<void>;
 
 export function Tools():Promise<Array<string>>;

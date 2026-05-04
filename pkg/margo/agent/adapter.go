@@ -35,6 +35,13 @@ type Adapter struct {
 	client   margo.Client
 	defaults margo.Request
 	tools    []margo.ToolDef
+	// finalUserAttachments rides on the LAST user-role message converted
+	// from the eino schema. This is how multimodal input enters the agent
+	// path: schema.Message lacks a multipart slot we can use, so the
+	// adapter stamps margo.Parts onto the request just before it leaves.
+	// Subsequent React-loop turns (assistant/tool turns) don't carry
+	// attachments — only the user's original prompt does.
+	finalUserAttachments []margo.Part
 }
 
 // NewAdapter returns a chat-model adapter for the given margo client.
@@ -49,6 +56,20 @@ func NewAdapter(c margo.Client, defaults margo.Request) *Adapter {
 	return &Adapter{client: c, defaults: defaults}
 }
 
+// WithFinalUserAttachments returns a new Adapter that, on each request,
+// stamps the supplied parts onto the final user-role message before
+// shipping. Used by StreamReact to inject image attachments that came
+// in via the Wails surface; the parts are independent of WithTools.
+func (a *Adapter) WithFinalUserAttachments(parts []margo.Part) *Adapter {
+	out := &Adapter{
+		client:               a.client,
+		defaults:             a.defaults,
+		tools:                a.tools,
+		finalUserAttachments: parts,
+	}
+	return out
+}
+
 // Compile-time assertions.
 var (
 	_ einomodel.BaseChatModel        = (*Adapter)(nil)
@@ -60,8 +81,9 @@ var (
 // goroutines and derived per-request with different tool sets.
 func (a *Adapter) WithTools(tools []*schema.ToolInfo) (einomodel.ToolCallingChatModel, error) {
 	out := &Adapter{
-		client:   a.client,
-		defaults: a.defaults,
+		client:               a.client,
+		defaults:             a.defaults,
+		finalUserAttachments: a.finalUserAttachments,
 	}
 	if len(tools) > 0 {
 		converted := make([]margo.ToolDef, 0, len(tools))
@@ -142,6 +164,24 @@ func (a *Adapter) request(input []*schema.Message) margo.Request {
 		}
 	}
 	req.System = strings.Join(sys, "\n\n")
+
+	// Stamp attachments onto the LAST user-role message. Subsequent
+	// React-loop turns (assistant or tool messages) don't carry parts.
+	if len(a.finalUserAttachments) > 0 {
+		for i := len(req.Messages) - 1; i >= 0; i-- {
+			if req.Messages[i].Role == margo.RoleUser {
+				m := req.Messages[i]
+				parts := make([]margo.Part, 0, len(a.finalUserAttachments)+1)
+				if m.Content != "" {
+					parts = append(parts, margo.Part{Kind: margo.PartText, Text: m.Content})
+				}
+				parts = append(parts, a.finalUserAttachments...)
+				m.Parts = parts
+				req.Messages[i] = m
+				break
+			}
+		}
+	}
 	return req
 }
 

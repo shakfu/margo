@@ -103,6 +103,7 @@ func TestStreamReactMidLoopTextOrdering(t *testing.T) {
 		[]tool.BaseTool{echoTool},
 		[]*schema.Message{{Role: schema.User, Content: "echo hi"}},
 		nil,
+		nil,
 		emit,
 	)
 	if err != nil {
@@ -213,6 +214,7 @@ func TestStreamReactCancelMidTool(t *testing.T) {
 			margo.Request{Model: "test"},
 			[]tool.BaseTool{slowTool},
 			[]*schema.Message{{Role: schema.User, Content: "go slow"}},
+			nil,
 			nil,
 			emit,
 		)

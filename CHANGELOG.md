@@ -9,6 +9,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Multimodal-model gate (TODO §7.3). New `MULTIMODAL_MODELS` set +
+  `isMultimodal(model)` helper in `store.ts` (alongside
+  `CONTEXT_WINDOWS`) seeded with Anthropic Claude 4.x and OpenAI
+  GPT-5.x families. Composer disables the send button and surfaces
+  an inline error banner when attachments are pending against a
+  text-only model; the `send()` guard short-circuits with a matching
+  error to cover the keyboard-shortcut path. Avoids the previous
+  failure mode of silently shipping an image to a model that drops
+  it (or errors at the provider with a less-clear message).
+  Allowlist maintained alongside the model menus in `app.go`.
+- Image attachments end-to-end (TODO §7.1 + §7.2). The composer
+  gains a paperclip button and drag-drop zone for attaching images
+  (PNG, JPEG, WebP, GIF; 10 MB per file). Frontend reads via the
+  browser File API + FileReader, base64-encodes, and forwards a new
+  `AttachmentInput[]` arg to `Chat` / `StreamChat` / `StreamAgent`.
+  `pkg/margo` gains a `Part` type
+  (`Kind: text|image|document`, `Text`, `MimeType`, `Data []byte`)
+  and `Message.Parts []Part`; providers prefer `Parts` when
+  non-empty, falling back to the legacy `Content string`. Anthropic
+  emits `NewImageBlockBase64`; OpenAI / OpenRouter use
+  `data:<mime>;base64,...` `image_url` parts. The agent path threads
+  attachments through a new `Adapter.WithFinalUserAttachments` that
+  stamps them onto the last user turn at request time (necessary
+  because eino's `schema.Message` doesn't carry our Parts shape).
+  Attachments are not persisted in chat history — they're sent once
+  and cleared (`Message.attachmentCount` records the count for the
+  user-bubble badge). Documents (`PartDocument`) are reserved but
+  not yet routed; deferred to §7.5. Cross-provider parity is
+  shipped at the wire layer; see the §7.3 entry above for the
+  multimodal-model gate that warns and disables send when the
+  active model is text-only. Coverage:
+  `adapter_test.go::TestAdapterFinalUserAttachments` plus
+  per-provider conversion paths. Design lives in `TODO.md` §7
+  (no separate design doc).
+- Agents (TODO §8.2). Personas with a tool allowlist; route through
+  `StreamAgent` (the ReAct loop) with the allowlist substituted for
+  "all available tools". New `Agent` interface +
+  `Settings.agents: Agent[]` carry a `BUILTIN_AGENTS` catalog
+  (Quarto Author → `quarto_render`; Time-aware assistant →
+  `current_time`) merged on every load alongside any custom agents.
+  `Chat.agentId?: string` carries the per-chat selection,
+  mutually exclusive with `personaId` (set-helpers clear the
+  opposite field). Role picker in the composer topbar grows an
+  Agents optgroup; entries show `Name [N]` and grey out via
+  `agentMissingTools` when their tool list isn't currently
+  registered (e.g. quarto isn't installed) with an inline
+  "needs X" hint. Settings → Agents grows an "Agents" section with
+  Edit / Duplicate / Delete actions + a tool-allowlist checkbox
+  group in the create/edit dialog. Validation: empty allowlist
+  rejected at save. Active agent's tool list surfaces under the
+  composer when an agent is picked. The legacy `agentMode`
+  checkbox is removed from the composer footer — selecting an
+  agent is the new way to enable tools. The persisted
+  `Settings.agentMode` flag still drives the route for backwards
+  compat on chats that had it set before this change. Design doc:
+  `docs/dev/personas_and_agents.md`.
+- Personas (TODO §8.1). Tool-less roles that swap the system prompt
+  on a per-chat basis. New `Persona` interface +
+  `Settings.personas: Persona[]` with a four-entry builtin catalog
+  (Editor, Code Reviewer, Researcher, Concise) merged into the
+  persisted list on every load — deleting a builtin by hand-editing
+  storage doesn't stick. `Chat.personaId?: string` carries the
+  per-chat selection (mutually exclusive with the future
+  `agentId`). Role picker is a native `<select>` in the topbar
+  showing **Default** plus a Personas optgroup; switching swaps the
+  system prompt that goes to `StreamChat` / `StreamAgent` on the
+  next request. Persona's `systemPrompt` fully *replaces*
+  `Settings.system` rather than prepending — the deliberate design
+  call documented in
+  `docs/dev/personas_and_agents.md` § "System-prompt resolution".
+  Settings → Agents grows a "Personas" section with Edit /
+  Duplicate / Delete actions (builtins are duplicate-only) and a
+  shared Melt UI dialog for create + edit. Builtin ids are stable
+  (`builtin-editor`, etc.) so chat references survive ship-version
+  updates. No Go-side changes — persona resolution is entirely
+  frontend. Design doc:
+  `docs/dev/personas_and_agents.md`.
+- Right pane is now tabbed and titled "Settings" instead of "Model
+  Parameters" — the panel had grown well beyond model knobs (output
+  directory, trusted tools, reset). Three Melt UI tabs split the
+  sections by what they affect: **Models** (Provider, Model,
+  Sampling, Thinking — model selection + parameters), **Agents**
+  (Trusted tools — agent / tool-related state) and **General**
+  (System Prompt, Appearance, Output, Reset — everything else).
+  Active-tab styling uses `data-state="active"` set by Melt's
+  createTabs builder.
 - Tool permission prompts. State-mutating agent tools (anything that
   isn't on the explicit `agent.ReadOnlyTools` allowlist) now require
   user approval before execution. New `agent.permissionMiddleware`

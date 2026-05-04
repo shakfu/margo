@@ -6,8 +6,8 @@ export function CancelStream(arg1) {
   return window['go']['main']['App']['CancelStream'](arg1);
 }
 
-export function Chat(arg1, arg2, arg3, arg4) {
-  return window['go']['main']['App']['Chat'](arg1, arg2, arg3, arg4);
+export function Chat(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['Chat'](arg1, arg2, arg3, arg4, arg5);
 }
 
 export function Greet(arg1) {
@@ -34,12 +34,12 @@ export function RespondPermission(arg1, arg2, arg3) {
   return window['go']['main']['App']['RespondPermission'](arg1, arg2, arg3);
 }
 
-export function StreamAgent(arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
-  return window['go']['main']['App']['StreamAgent'](arg1, arg2, arg3, arg4, arg5, arg6, arg7);
+export function StreamAgent(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8) {
+  return window['go']['main']['App']['StreamAgent'](arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
 }
 
-export function StreamChat(arg1, arg2, arg3, arg4, arg5) {
-  return window['go']['main']['App']['StreamChat'](arg1, arg2, arg3, arg4, arg5);
+export function StreamChat(arg1, arg2, arg3, arg4, arg5, arg6) {
+  return window['go']['main']['App']['StreamChat'](arg1, arg2, arg3, arg4, arg5, arg6);
 }
 
 export function Tools() {

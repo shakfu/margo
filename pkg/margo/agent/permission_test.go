@@ -73,6 +73,7 @@ func TestPermissionGateApprovesAndDenies(t *testing.T) {
 				margo.Request{Model: "test"},
 				[]tool.BaseTool{doer},
 				[]*schema.Message{{Role: schema.User, Content: "go"}},
+				nil,
 				gate,
 				func(StepEvent) {},
 			)
@@ -126,6 +127,7 @@ func TestPermissionGateSkipsReadOnlyTools(t *testing.T) {
 		margo.Request{Model: "test"},
 		[]tool.BaseTool{tt},
 		[]*schema.Message{{Role: schema.User, Content: "what time?"}},
+		nil,
 		gate,
 		func(StepEvent) {},
 	)
@@ -184,6 +186,7 @@ func TestPermissionGateRespectsContextCancellation(t *testing.T) {
 			margo.Request{Model: "test"},
 			[]tool.BaseTool{doer},
 			[]*schema.Message{{Role: schema.User, Content: "go"}},
+			nil,
 			gate,
 			func(StepEvent) {},
 		)

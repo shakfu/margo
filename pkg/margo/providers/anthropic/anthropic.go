@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"time"
@@ -112,11 +113,51 @@ func toAnthropicMessages(msgs []margo.Message) []sdk.MessageParam {
 			// System content belongs in MessageNewParams.System, not here.
 			i++
 		default:
-			out = append(out, sdk.NewUserMessage(sdk.NewTextBlock(m.Content)))
+			out = append(out, sdk.NewUserMessage(toAnthropicUserBlocks(m)...))
 			i++
 		}
 	}
 	return out
+}
+
+// toAnthropicUserBlocks expands a margo user message into one or more
+// Anthropic content blocks. Plain text-only messages produce a single
+// text block (matching the legacy path). Messages with Parts populated
+// emit each part as its own block; Anthropic requires content arrays
+// rather than concatenated strings for multimodal input.
+func toAnthropicUserBlocks(m margo.Message) []sdk.ContentBlockParamUnion {
+	if len(m.Parts) == 0 {
+		return []sdk.ContentBlockParamUnion{sdk.NewTextBlock(m.Content)}
+	}
+	blocks := make([]sdk.ContentBlockParamUnion, 0, len(m.Parts)+1)
+	for _, p := range m.Parts {
+		switch p.Kind {
+		case margo.PartText:
+			if p.Text != "" {
+				blocks = append(blocks, sdk.NewTextBlock(p.Text))
+			}
+		case margo.PartImage:
+			if len(p.Data) > 0 && p.MimeType != "" {
+				blocks = append(blocks, sdk.NewImageBlockBase64(p.MimeType, base64.StdEncoding.EncodeToString(p.Data)))
+			}
+		}
+	}
+	// Carry the legacy Content string too if Parts didn't include any
+	// text — preserves the user's actual prompt when only images were
+	// added via the structured path.
+	if m.Content != "" && !partsContainText(m.Parts) {
+		blocks = append(blocks, sdk.NewTextBlock(m.Content))
+	}
+	return blocks
+}
+
+func partsContainText(parts []margo.Part) bool {
+	for _, p := range parts {
+		if p.Kind == margo.PartText && p.Text != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func toAnthropicTool(t margo.ToolDef) sdk.ToolUnionParam {
