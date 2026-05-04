@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"os/exec"
+	goruntime "runtime"
 	"sync"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -309,10 +311,57 @@ func (a *App) Tools() []string {
 	return out
 }
 
-// builtinTools is the registry of tools the agent path can equip. Today this
-// is a single proof-of-life clock tool; expand here as new tools land.
-var builtinTools = map[string]func() tool.InvokableTool{
-	"current_time": agent.CurrentTimeTool,
+// builtinTools is the registry of tools the agent path can equip. Entries
+// guarded by an availability predicate (e.g. quarto_render) are only
+// registered when the underlying binary is on PATH at process start.
+var builtinTools = func() map[string]func() tool.InvokableTool {
+	m := map[string]func() tool.InvokableTool{
+		"current_time": agent.CurrentTimeTool,
+	}
+	if agent.QuartoAvailable() {
+		// Best-effort: if the home dir lookup fails for some reason
+		// (sandboxed env, etc.), fall back to a per-call temp dir
+		// rather than disabling the tool.
+		dir, _ := agent.DefaultOutputDir()
+		m["quarto_render"] = func() tool.InvokableTool {
+			return agent.QuartoRenderTool(dir)
+		}
+	}
+	return m
+}()
+
+// OpenPath asks the host OS to open the given local path in its default
+// application (e.g. .pptx → PowerPoint, .html → default browser, dir →
+// Finder/Explorer). Used for file:// links emitted by tools like
+// quarto_render — Wails' built-in BrowserOpenURL rejects any scheme other
+// than http(s)/mailto, so file paths need a separate path. exec.Command
+// does not invoke a shell, so the path is not subject to shell-injection.
+func (a *App) OpenPath(path string) error {
+	if path == "" {
+		return fmt.Errorf("empty path")
+	}
+	var cmd *exec.Cmd
+	switch goruntime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", path)
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", "", path)
+	default:
+		cmd = exec.Command("xdg-open", path)
+	}
+	return cmd.Start()
+}
+
+// OutputDir returns the absolute path to margo's stable output directory
+// (where create-and-render tools like quarto_render write generated
+// artifacts). Bound to the frontend so the settings panel can show the
+// path and offer an "open in Finder" affordance.
+func (a *App) OutputDir() string {
+	dir, err := agent.DefaultOutputDir()
+	if err != nil {
+		return ""
+	}
+	return dir
 }
 
 // AgentStepEvent is the payload for `margo:stream:<id>:chunk` events emitted

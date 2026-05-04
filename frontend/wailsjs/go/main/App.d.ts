@@ -10,6 +10,10 @@ export function Greet(arg1:string):Promise<string>;
 
 export function Models(arg1:string):Promise<Array<string>>;
 
+export function OpenPath(arg1:string):Promise<void>;
+
+export function OutputDir():Promise<string>;
+
 export function Providers():Promise<Array<string>>;
 
 export function StreamAgent(arg1:string,arg2:string,arg3:string,arg4:Array<main.ChatMessage>,arg5:main.ChatOptions,arg6:Array<string>):Promise<void>;

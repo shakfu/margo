@@ -9,6 +9,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `quarto_render` agent tool. Wraps the local `quarto` CLI to convert
+  `.qmd` / `.md` / `.ipynb` documents (or quarto project directories) to
+  html, pdf, docx, pptx, revealjs, beamer, latex, typst, and other
+  pandoc targets. Two modes: **render existing** (pass `input`) or
+  **create-and-render** (pass `content` — full Quarto source including
+  YAML frontmatter — which the tool writes to disk before invoking
+  quarto, since margo has no separate file-write tool). Create-and-
+  render outputs land in `~/Documents/Margo/outputs/` (margo's stable
+  per-user output directory, created on first use), with the filename
+  derived from the YAML `title:` (e.g. "How to Boil an Egg" →
+  `how-to-boil-an-egg.qmd` → `how-to-boil-an-egg.pptx`). Subsequent
+  renders of the same title get a `-2` / `-3` / … suffix instead of
+  silently overwriting the previous artifact. Format strings are
+  checked against an allowlist before reaching pandoc; the render runs
+  with a 10-minute deadline and honors ctx cancellation. The tool
+  result parses quarto's `Output created:` line, resolves it to an
+  absolute path, and appends a ready-to-paste markdown link (`[<basename>](file://<abs-path>)`)
+  with explicit instructions to the model that it must surface this
+  verbatim — bolding or relative-path links don't render as clickable
+  in the assistant bubble. The tool is registered conditionally —
+  `app.go` calls `agent.QuartoAvailable()` at process start and only
+  adds it to `builtinTools` when `quarto` is on `PATH`; margo does not
+  bundle the binary. New `App.OutputDir()` Wails binding lets the
+  frontend display the path and offers an **"Open in Finder"** action
+  in the right pane's new "Output" section (uses `BrowserOpenURL`
+  with a `file://` URL). Coverage: `TestQuartoRenderArgValidation`,
+  `TestSlugFromContent`, `TestQuartoRenderHTML`,
+  `TestQuartoRenderCreateAndRender`, `TestQuartoRenderTitleSlug` (now
+  also asserts the configured-dir path and the `-2` collision suffix);
+  live-render tests skip when quarto is unavailable.
+- App-level reset. New "Reset" section in the right pane (Melt UI
+  collapsible + alertdialog confirm) that cancels any in-flight
+  stream via `CancelStream`, removes `margo:chats:v1` and
+  `margo:settings:v1` from `localStorage`, and reloads the frontend.
+  The Wails Go process keeps running across the reload, so the
+  pre-reload cancel is load-bearing — without it the prior stream's
+  events would land in a freshly-initialised UI.
+- Dismiss button on the error banner. The banner now ships an inline
+  `×` that clears `error` state, so a sticky error from a failed
+  startup or stream no longer requires sending a fresh message to
+  dismiss.
+- `file://` URLs are now clickable in assistant markdown. DOMPurify's
+  `ALLOWED_URI_REGEXP` is overridden to permit `file:` alongside
+  `https?:` / `mailto:` (default sanitization stripped them).
+  Wails v2's `BrowserOpenURL` rejects non-http(s)/mailto schemes
+  outright ("Invalid URL scheme not allowed"), so a new Go-side
+  `App.OpenPath(path)` Wails binding handles file paths by shelling
+  out to the OS-native opener (`open` on macOS, `cmd /c start` on
+  Windows, `xdg-open` elsewhere). The capture-phase document click
+  handler in `App.svelte` strips the `file://` prefix, decodes the
+  URI, and routes to `OpenPath`; `http(s):` / `mailto:` continue
+  through `BrowserOpenURL` unchanged. The Settings panel's "Open in
+  Finder" button (Output section) uses `OpenPath` directly. Enables
+  agent tools that produce local artifacts (notably `quarto_render`)
+  to surface clickable links that open in the user's default app
+  (`.pptx` → PowerPoint, `.html` → default browser, dirs → Finder,
+  etc.).
+- Mid-loop text streaming for ReAct agent runs (TODO #6.1).
+  `pkg/margo/agent/stream.go` registers a
+  `utils/callbacks.ModelCallbackHandler.OnEndWithStreamOutput` that
+  drains each intermediate model turn synchronously, accumulates
+  `Message.Content`, and emits a single `StepText` event before the
+  same turn's tool callbacks fire — previously the model's reasoning
+  ("Let me check the time first.") was dropped because
+  `react.Agent.Stream` only forwards the final turn. Synchronous drain
+  guarantees text-then-tool ordering. Final-turn dedup is gated on
+  "this turn produced tool calls"; the gate's load-bearing assumption
+  is documented in `docs/dev/agents_and_tools.md` § "Mid-loop text
+  streaming". Coverage: `TestStreamReactMidLoopTextOrdering`.
+- Prompt cancellation for in-flight ReAct tool calls (TODO #6.2,
+  supersedes the original TODO #4). New `abortOnCtxCancel`
+  `compose.ToolMiddleware` on the ReAct ToolsNode races each invokable
+  tool against `ctx.Done()` and returns `ctx.Err()` immediately on
+  cancel, unblocking the React loop without waiting for misbehaving
+  tools that ignore ctx. Investigated Eino's interrupt machinery
+  (`compose.WithInterruptBeforeNodes`, `core.InterruptSignal`) and
+  confirmed it is for human-in-the-loop checkpoint/resume, not
+  cancellation — middleware was the correct path. UI: composer flips
+  a `cancelling` flag on click, relabels the button "cancelling…" and
+  disables it until the run unwinds via `:done`/`:error`. Coverage:
+  `TestStreamReactCancelMidTool` (5-second sleep tool, asserts return
+  within 2s of cancel). Docs:
+  `docs/dev/agents_and_tools.md` § "Cancellation".
+- Streaming markdown render throttle (TODO #1).
+  `renderMarkdownStreaming(text, streaming)` in
+  `frontend/src/lib/markdown.ts` caps the parse rate to once per 50ms
+  while the in-flight assistant message is updating, returning a
+  single-slot cached HTML for intra-throttle calls. When `streaming`
+  flips to false the cache is cleared and a fresh clean parse runs on
+  the trailing edge (driven by Svelte's reactive re-eval when `busy`
+  changes). Eliminates visible jank on long responses with multiple
+  code blocks. (MathJax is already debounced 250ms in
+  `frontend/src/lib/mathjax.ts`, so it doesn't compound the cost.)
 - Eino orchestration layer (`pkg/margo/agent`) bridging margo's chat
   clients to the CloudWeGo Eino framework. `Adapter` exposes any
   `margo.Client` as `model.ToolCallingChatModel` (Generate + Stream +
@@ -192,6 +285,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Markdown links opened inside the Wails webview, replacing the app
+  shell with the destination page (TODO #2). DOMPurify's
+  `afterSanitizeAttributes` hook now injects `target="_blank"` and
+  `rel="noopener noreferrer"` on anchors with `http(s):` / `mailto:`
+  hrefs; a capture-phase document click handler in `App.svelte`
+  intercepts those anchors, prevents default navigation, and routes
+  the URL through Wails' `BrowserOpenURL` so it opens in the user's
+  default system browser. Internal `#fragment` and relative links are
+  left untouched.
+- ReAct loop ended after the first model turn whenever the model
+  emitted preamble text before its tool call (typical for Claude:
+  "Let me check the time first." → tool_use). Eino's default
+  `firstChunkStreamToolCallChecker` only inspects the first content
+  chunk, so it classified text-first turns as terminal and the tool
+  was never invoked. Replaced with a custom `streamHasToolCall`
+  checker that scans the entire stream for any `ToolCalls` entry.
 - Math rendering: backslash-eating bug where `marked` consumed `\[`, `\\`,
   `\times`, `\neq` etc. before MathJax could process them — now math is
   pre-extracted and reinjected post-parse.

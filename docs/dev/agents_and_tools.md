@@ -142,7 +142,8 @@ running a subprocess), implement `tool.StreamableTool` instead. Use
 `tool/utils.InferStreamTool` (analogous to `InferTool`). The agent's
 `ToolsNode` will pump chunks back into the conversation. UI rendering of
 streaming tool output is not yet implemented in `App.svelte` — see TODO
-#5 for the related mid-loop text streaming work.
+#6.4 for the streaming-tool work (mid-loop text streaming, TODO #6.1, is
+already done).
 
 ### 5. Multi-modal results
 
@@ -232,7 +233,7 @@ The contract between agent code and the UI is the `StepEvent` /
 
 | StepKind         | UI rendering                                    | Emitted by              |
 | ---------------- | ----------------------------------------------- | ----------------------- |
-| `StepText`       | Streaming text deltas in the assistant bubble.  | Agent's final-answer stream. |
+| `StepText`       | Streaming text deltas in the assistant bubble.  | Agent's final-answer stream (final turn) **or** `ModelCallbackHandler.OnEndWithStreamOutput` for intermediate turns that also produced tool calls. See "Mid-loop text streaming" below. |
 | `StepToolCall`   | New monospace card: `→ name(args)`.              | `ToolCallbackHandler.OnStart`. |
 | `StepToolResult` | Pairs with last open call by name; appends `← result` (or red `← error` if `IsError`). | `ToolCallbackHandler.OnEnd / OnError`. |
 | `StepError`      | Red error banner; ends the run.                 | Stream-read errors.     |
@@ -252,6 +253,63 @@ Backwards compatibility: the frontend handler dispatches on
 `payload.kind` and falls through to text-append on unknown values, so
 new kinds added on the backend won't crash older frontends — they just
 won't render specially.
+
+## Mid-loop text streaming
+
+Intermediate ReAct turns that emit both text ("Let me check the time first.")
+and tool calls would otherwise drop the text — eino's
+`react.Agent.Stream` only forwards the final turn. `StreamReact` registers a
+`utils/callbacks.ModelCallbackHandler.OnEndWithStreamOutput` handler that
+drains each model turn's output stream synchronously, accumulates
+`Message.Content`, and emits a single `StepText` event **only when the same
+turn also produced tool calls**. Synchronous draining guarantees the
+`StepText` lands before the same turn's `StepToolCall` events from the
+downstream tool node.
+
+The "tool calls present?" gate is also the dedup mechanism for the final
+turn: if a turn has no tool calls, the model handler stays silent and the
+outer agent stream delivers the text. **This breaks if a future model emits
+both text and tool calls in the *final* turn**: the model handler would
+emit the text, and (depending on whether eino decides to surface that turn
+through the agent stream) the outer reader could emit it again. Today's
+ReAct loop does not surface final-turn-with-tool-calls text through the
+outer stream so the gate is correct in practice, but the assumption is
+load-bearing — flag this if you change the ReAct loop, the
+`StreamToolCallChecker`, or move to a different agent topology.
+
+A custom `StreamToolCallChecker` (`streamHasToolCall` in `stream.go`)
+replaces eino's default `firstChunkStreamToolCallChecker`, which only
+inspects the first content chunk and so misclassifies "text-first, then
+tool call" turns (typical for Claude) as terminal. The custom checker
+scans the entire stream for any `ToolCalls` entry. Without it, the React
+loop ends after the first model turn whenever the model emits a preamble
+before its tool call — silently breaking both mid-loop streaming and tool
+invocation in production.
+
+## Cancellation
+
+`StreamReact` honours its parent `context.Context`. Two layers cooperate:
+
+1. **Model side.** The adapter forwards `ctx` to `margo.Client.Stream`,
+   which threads it into the provider's HTTP client. Cancelling the
+   context aborts the in-flight HTTP read; the provider closes its chunk
+   channel and the adapter's stream reader returns EOF.
+2. **Tool side.** `abortOnCtxCancel` (in `stream.go`) is registered as a
+   `compose.ToolMiddleware` on the ReAct ToolsNode. Each invokable tool
+   call is run in a goroutine that races against `ctx.Done()`. On
+   cancel, the middleware returns `ctx.Err()` immediately and the React
+   loop unwinds — the underlying tool goroutine keeps running until the
+   tool itself observes ctx (worst case: one leaked goroutine per
+   abandoned call). Without this middleware, a slow tool that ignores
+   ctx would block the entire React loop until the tool completes.
+
+UI feedback: `App.svelte` flips a `cancelling` flag the moment the user
+clicks cancel and disables the button + relabels it "cancelling…" until
+the run's `:done` or `:error` event arrives. The flag is cleared on every
+new stream start so it doesn't bleed between runs. Coverage:
+`TestStreamReactCancelMidTool` uses a 5-second sleep tool that ignores
+ctx and asserts that `StreamReact` returns within 2 seconds of cancel
+with `context.Canceled`.
 
 ## Provider parity
 
@@ -305,8 +363,9 @@ settings panel.
 ## Related TODOs
 
 * TODO #4 — agent run cancellation race (ctx-aware tool wrappers).
-* TODO #5 — mid-loop text streaming via
-  `ModelCallbackHandler.OnEndWithStreamOutput`.
+* TODO #5 / #6.1 — mid-loop text streaming via
+  `ModelCallbackHandler.OnEndWithStreamOutput`. **Done.** See "Mid-loop
+  text streaming" above.
 
 Both block making more tool-rich agent experiences feel polished;
 worth picking up before adding many new tools that do real work.

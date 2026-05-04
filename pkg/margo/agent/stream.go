@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/eino/callbacks"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	flowagent "github.com/cloudwego/eino/flow/agent"
@@ -50,10 +52,72 @@ type StepEvent struct {
 	Usage     *margo.Usage
 }
 
+// abortOnCtxCancel races each tool invocation against ctx.Done(). When the
+// caller cancels (e.g. user hits the cancel button while a slow tool is
+// running), the React loop returns ctx.Err() immediately rather than waiting
+// for the in-flight tool to finish. The tool's own goroutine keeps running
+// until it observes ctx itself; this leaks at most one goroutine per
+// abandoned call but unblocks the agent run promptly.
+var abortOnCtxCancel = compose.ToolMiddleware{
+	Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+		return func(ctx context.Context, in *compose.ToolInput) (*compose.ToolOutput, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			type result struct {
+				out *compose.ToolOutput
+				err error
+			}
+			done := make(chan result, 1)
+			go func() {
+				out, err := next(ctx, in)
+				done <- result{out, err}
+			}()
+			select {
+			case r := <-done:
+				return r.out, r.err
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	},
+	Streamable: func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
+		return func(ctx context.Context, in *compose.ToolInput) (*compose.StreamToolOutput, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return next(ctx, in)
+		}
+	},
+}
+
+// streamHasToolCall scans the entire model output stream for a tool call
+// rather than only the first content chunk. Replaces eino's default
+// firstChunkStreamToolCallChecker, which classifies "text first, then tool
+// call" turns (common with Claude when the model emits a brief preamble
+// before invoking a tool) as terminal and ends the ReAct loop prematurely.
+func streamHasToolCall(_ context.Context, sr *schema.StreamReader[*schema.Message]) (bool, error) {
+	defer sr.Close()
+	for {
+		msg, err := sr.Recv()
+		if errors.Is(err, io.EOF) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if msg != nil && len(msg.ToolCalls) > 0 {
+			return true, nil
+		}
+	}
+}
+
 // StreamReact runs a ReAct agent loop and emits step-by-step progress through
-// `emit`. Each model turn's tool calls trigger StepToolCall + StepToolResult
-// pairs (in execution order), and the final assistant answer streams as
-// StepText deltas. A final StepDone event closes the run.
+// `emit`. Each intermediate model turn's text content is emitted as a single
+// StepText event (before its tool calls), each tool invocation triggers a
+// StepToolCall + StepToolResult pair (in execution order), and the final
+// assistant answer streams as StepText deltas. A final StepDone event closes
+// the run.
 //
 // The `emit` callback runs synchronously on event-producing goroutines —
 // it must not block.
@@ -72,10 +136,63 @@ func StreamReact(
 	adapter := NewAdapter(c, defaults)
 	a, err := react.NewAgent(ctx, &react.AgentConfig{
 		ToolCallingModel: adapter,
-		ToolsConfig:      compose.ToolsNodeConfig{Tools: tools},
+		ToolsConfig: compose.ToolsNodeConfig{
+			Tools:               tools,
+			ToolCallMiddlewares: []compose.ToolMiddleware{abortOnCtxCancel},
+		},
+		StreamToolCallChecker: streamHasToolCall,
 	})
 	if err != nil {
 		return err
+	}
+
+	started := time.Now()
+	var firstToken time.Time
+	emitText := func(text string) {
+		if text == "" {
+			return
+		}
+		if firstToken.IsZero() {
+			firstToken = time.Now()
+		}
+		emit(StepEvent{Kind: StepText, Text: text})
+	}
+
+	// Mid-loop model turns (those that produce tool calls) stream their text
+	// through here so users see the model's reasoning before the tool cards.
+	// The final turn's text is delivered through the outer agent stream below;
+	// we suppress this handler's emission for it to avoid duplication.
+	//
+	// Drains synchronously so the StepText event is emitted before the
+	// downstream tool node fires its StepToolCall callbacks.
+	modelHandler := &cbtmpl.ModelCallbackHandler{
+		OnEndWithStreamOutput: func(ctx context.Context, info *callbacks.RunInfo, out *schema.StreamReader[*model.CallbackOutput]) context.Context {
+			defer out.Close()
+			var content strings.Builder
+			hasToolCalls := false
+			for {
+				chunk, rerr := out.Recv()
+				if errors.Is(rerr, io.EOF) {
+					break
+				}
+				if rerr != nil {
+					return ctx
+				}
+				if chunk == nil || chunk.Message == nil {
+					continue
+				}
+				if chunk.Message.Content != "" {
+					content.WriteString(chunk.Message.Content)
+				}
+				if len(chunk.Message.ToolCalls) > 0 {
+					hasToolCalls = true
+				}
+			}
+			if hasToolCalls {
+				emitText(content.String())
+			}
+			return ctx
+		},
 	}
 
 	toolHandler := &cbtmpl.ToolCallbackHandler{
@@ -104,10 +221,8 @@ func StreamReact(
 			return ctx
 		},
 	}
-	cb := react.BuildAgentCallback(nil, toolHandler)
+	cb := react.BuildAgentCallback(modelHandler, toolHandler)
 
-	started := time.Now()
-	var firstToken time.Time
 	usage := margo.Usage{}
 
 	reader, err := a.Stream(ctx, input, flowagent.WithComposeOptions(compose.WithCallbacks(cb)))
@@ -128,10 +243,7 @@ func StreamReact(
 			continue
 		}
 		if chunk.Content != "" {
-			if firstToken.IsZero() {
-				firstToken = time.Now()
-			}
-			emit(StepEvent{Kind: StepText, Text: chunk.Content})
+			emitText(chunk.Content)
 		}
 		if chunk.ResponseMeta != nil && chunk.ResponseMeta.Usage != nil {
 			u := chunk.ResponseMeta.Usage

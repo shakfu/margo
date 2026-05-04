@@ -18,6 +18,14 @@ export function Models(arg1) {
   return window['go']['main']['App']['Models'](arg1);
 }
 
+export function OpenPath(arg1) {
+  return window['go']['main']['App']['OpenPath'](arg1);
+}
+
+export function OutputDir() {
+  return window['go']['main']['App']['OutputDir']();
+}
+
 export function Providers() {
   return window['go']['main']['App']['Providers']();
 }

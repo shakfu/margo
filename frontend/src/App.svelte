@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { Providers, Models, Chat, StreamChat, StreamAgent, CancelStream, Tools } from '../wailsjs/go/main/App.js';
-  import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js';
+  import { Providers, Models, Chat, StreamChat, StreamAgent, CancelStream, Tools, OutputDir, OpenPath } from '../wailsjs/go/main/App.js';
+  import { EventsOn, EventsOff, BrowserOpenURL } from '../wailsjs/runtime/runtime.js';
   import { mathjax } from './lib/mathjax';
-  import { renderMarkdown, setHighlightTheme } from './lib/markdown';
+  import { renderMarkdownStreaming, setHighlightTheme } from './lib/markdown';
   import {
     chats,
     activeChat,
@@ -26,10 +26,12 @@
   let providers: string[] = [];
   let models: string[] = [];
   let availableTools: string[] = [];
+  let outputDir = '';
   let input = '';
   let busy = false;
   let error = '';
   let activeStreamId = '';
+  let cancelling = false;
   let messagesEl: HTMLElement;
 
   $: messages = $activeChat?.messages ?? [];
@@ -62,6 +64,7 @@
         error = 'No providers configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY in .env and restart.';
       }
       availableTools = await Tools();
+      outputDir = await OutputDir();
     } catch (e) {
       error = String(e);
     }
@@ -69,7 +72,30 @@
     if ($chats.length > 0 && !$activeChatId) {
       activeChatId.set($chats[0].id);
     }
+
+    document.addEventListener('click', handleExternalLinkClick, true);
   });
+
+  function handleExternalLinkClick(ev: MouseEvent) {
+    const target = ev.target;
+    if (!(target instanceof Element)) return;
+    const a = target.closest('a');
+    if (!a) return;
+    const href = a.getAttribute('href') ?? '';
+    if (/^file:/i.test(href)) {
+      // Wails BrowserOpenURL rejects non-http schemes ("Invalid URL scheme
+      // not allowed"), so route file:// through a Go-side OpenPath that
+      // shells out to the OS-native opener.
+      ev.preventDefault();
+      const path = decodeURI(href.replace(/^file:\/\//i, ''));
+      OpenPath(path);
+      return;
+    }
+    if (/^(https?:|mailto:)/i.test(href)) {
+      ev.preventDefault();
+      BrowserOpenURL(href);
+    }
+  }
 
   function newStreamId(): string {
     const c = (window as any).crypto;
@@ -136,6 +162,7 @@
     appendMessage(chat.id, { role: 'assistant', content: '' });
     const id = newStreamId();
     activeStreamId = id;
+    cancelling = false;
     const base = `margo:stream:${id}`;
     const targetChatId = chat.id;
 
@@ -170,12 +197,14 @@
       error = msg;
       busy = false;
       activeStreamId = '';
+      cancelling = false;
       EventsOff(`${base}:chunk`, `${base}:error`, `${base}:done`);
     });
     EventsOn(`${base}:done`, (payload: { usage: Usage | null }) => {
       if (payload?.usage) setLastUsage(targetChatId, payload.usage);
       busy = false;
       activeStreamId = '';
+      cancelling = false;
       EventsOff(`${base}:chunk`, `${base}:error`, `${base}:done`);
       scrollToBottom();
     });
@@ -190,13 +219,29 @@
       error = String(e);
       busy = false;
       activeStreamId = '';
+      cancelling = false;
       EventsOff(`${base}:chunk`, `${base}:error`, `${base}:done`);
     }
   }
 
   async function cancel() {
-    if (!activeStreamId) return;
+    if (!activeStreamId || cancelling) return;
+    cancelling = true;
     try { await CancelStream(activeStreamId); } catch (_) {}
+  }
+
+  // Full reset: cancel any in-flight stream so the Go-side goroutine exits,
+  // wipe persisted chats + settings from localStorage, then reload the
+  // frontend. The Wails Go process keeps running across the reload — only
+  // the webview reinitialises — so we must cancel first or the prior
+  // stream's events would land in a fresh, surprised UI.
+  async function resetApp() {
+    if (activeStreamId) {
+      try { await CancelStream(activeStreamId); } catch (_) {}
+    }
+    try { localStorage.removeItem('margo:chats:v1'); } catch (_) {}
+    try { localStorage.removeItem('margo:settings:v1'); } catch (_) {}
+    location.reload();
   }
 
   function onKey(e: KeyboardEvent) {
@@ -287,7 +332,7 @@
             {#if m.role === 'user'}
               <div class="md whitespace-pre-wrap">{m.content}</div>
             {:else}
-              <div class="md" use:mathjax={m.content}>{@html renderMarkdown(m.content)}</div>
+              <div class="md" use:mathjax={m.content}>{@html renderMarkdownStreaming(m.content, busy && i === messages.length - 1)}</div>
             {/if}
             {#if busy && i === messages.length - 1 && m.role === 'assistant'}<span class="cursor opacity-60">_</span>{/if}
           </div>
@@ -312,7 +357,14 @@
     </section>
 
     {#if error}
-      <div class="bg-error-bg text-error-fg border border-error-border px-3 py-2 rounded mx-5 mb-2 text-[0.85rem]">{error}</div>
+      <div class="bg-error-bg text-error-fg border border-error-border px-3 py-2 rounded mx-5 mb-2 text-[0.85rem] flex items-start gap-2">
+        <span class="flex-1 break-words">{error}</span>
+        <button
+          class="text-error-fg/70 hover:text-error-fg cursor-pointer leading-none"
+          aria-label="dismiss error"
+          on:click={() => error = ''}
+        >×</button>
+      </div>
     {/if}
 
     <footer class="flex flex-col gap-2 px-5 pt-3.5 pb-4 border-t border-border max-w-[820px] w-full mx-auto box-border">
@@ -351,7 +403,11 @@
           <span>{ctxPct}%</span>
         </div>
         {#if busy && activeStreamId}
-          <button class="composer-btn cancel-btn" on:click={cancel}>cancel</button>
+          <button
+            class="composer-btn cancel-btn"
+            on:click={cancel}
+            disabled={cancelling}
+          >{cancelling ? 'cancelling…' : 'cancel'}</button>
         {:else}
           <button
             class="composer-btn send-btn"
@@ -366,7 +422,7 @@
 
   {#if $settings.showRight}
     <aside class="overflow-hidden min-w-0">
-      <SettingsPanel {providers} {models} {busy} />
+      <SettingsPanel {providers} {models} {busy} {outputDir} onReset={resetApp} />
     </aside>
   {/if}
 </div>
