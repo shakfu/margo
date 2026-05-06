@@ -26,12 +26,20 @@ export function OutputDir() {
   return window['go']['main']['App']['OutputDir']();
 }
 
+export function PickWorkspaceDir() {
+  return window['go']['main']['App']['PickWorkspaceDir']();
+}
+
 export function Providers() {
   return window['go']['main']['App']['Providers']();
 }
 
 export function RespondPermission(arg1, arg2, arg3) {
   return window['go']['main']['App']['RespondPermission'](arg1, arg2, arg3);
+}
+
+export function StartupWorkspaceDir() {
+  return window['go']['main']['App']['StartupWorkspaceDir']();
 }
 
 export function StreamAgent(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8) {

@@ -14,9 +14,13 @@ export function OpenPath(arg1:string):Promise<void>;
 
 export function OutputDir():Promise<string>;
 
+export function PickWorkspaceDir():Promise<string>;
+
 export function Providers():Promise<Array<string>>;
 
 export function RespondPermission(arg1:string,arg2:boolean,arg3:boolean):Promise<void>;
+
+export function StartupWorkspaceDir():Promise<string>;
 
 export function StreamAgent(arg1:string,arg2:string,arg3:string,arg4:Array<main.ChatMessage>,arg5:main.ChatOptions,arg6:Array<string>,arg7:Array<string>,arg8:Array<main.AttachmentInput>):Promise<void>;
 

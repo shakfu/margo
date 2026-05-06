@@ -9,6 +9,7 @@ require (
 	github.com/cloudwego/eino v0.8.13
 	github.com/joho/godotenv v1.5.1
 	github.com/openai/openai-go/v3 v3.33.0
+	github.com/philippgille/chromem-go v0.7.0
 	github.com/wailsapp/wails/v2 v2.11.0
 )
 

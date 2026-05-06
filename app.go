@@ -35,6 +35,11 @@ type App struct {
 	mu          sync.Mutex
 	cancels     map[string]context.CancelFunc
 	permissions sync.Map // map[string]chan permissionDecision
+
+	// startupWorkspaceDir is set by main() from the -workspace CLI flag
+	// (7.1.e). Read once on the frontend's first paint via the
+	// StartupWorkspaceDir Wails binding; not consumed Go-side.
+	startupWorkspaceDir string
 }
 
 func NewApp() *App {
@@ -426,6 +431,39 @@ func (a *App) OpenPath(path string) error {
 		cmd = exec.Command("xdg-open", path)
 	}
 	return cmd.Start()
+}
+
+// openSettings is the callback for the Margo › Settings… menu item.
+// Emits an event the frontend listens for to open the settings dialog.
+// Lower-case (unexported) on purpose — this is invoked by Wails' menu
+// runtime, not by the JS bindings.
+func (a *App) openSettings() {
+	if a.ctx == nil {
+		return
+	}
+	runtime.EventsEmit(a.ctx, "margo:menu:settings")
+}
+
+// StartupWorkspaceDir returns the workspace directory the frontend
+// should attach to on first paint, populated from the -workspace CLI
+// flag in main(). Empty string means "no startup workspace requested".
+// Read once at boot; subsequent calls return the same value (we don't
+// clear it — re-reads are harmless and the frontend gates with a flag).
+// (7.1.e)
+func (a *App) StartupWorkspaceDir() string {
+	return a.startupWorkspaceDir
+}
+
+// PickWorkspaceDir opens the OS native directory picker and returns the
+// selected absolute path. Returns the empty string when the user cancels
+// (Wails returns "" for OpenDirectoryDialog cancellation rather than an
+// error). Used by the workspace manager (left pane) to attach a folder
+// to a workspace; the path is stored client-side and not consumed by Go
+// in 7.1.a — later slices (RAG, file context) will plug into it.
+func (a *App) PickWorkspaceDir() (string, error) {
+	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Choose workspace directory",
+	})
 }
 
 // OutputDir returns the absolute path to margo's stable output directory

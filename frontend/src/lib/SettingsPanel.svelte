@@ -1,9 +1,12 @@
 <script lang="ts">
   import {
     settings,
+    effectiveSettings,
+    setEffectiveOverride,
     upsertPersona, deletePersona, duplicatePersona,
     upsertAgent, deleteAgent, duplicateAgent, agentMissingTools,
-    type Persona, type Agent,
+    DEFAULT_WORKSPACE_ID, activeWorkspace,
+    type Persona, type Agent, type Workspace, type WorkspaceOverrides,
   } from './store';
   import { setHighlightTheme } from './markdown';
   import { createSelect, createCollapsible, createDialog, createTabs, melt } from '@melt-ui/svelte';
@@ -16,63 +19,106 @@
   export let outputDir: string = '';
   export let availableTools: string[] = [];
   export let onReset: () => void = () => {};
+  // mode controls which scope this panel reads/writes:
+  //   - 'workspace' (right sidebar): inputs read from effectiveSettings
+  //     and write via setEffectiveOverride, which routes by active
+  //     workspace — Default → in-memory sessionOverrides (transient);
+  //     non-Default → workspace.overrides (sticky).
+  //   - 'global' (Cmd+, dialog): inputs read/write the raw global
+  //     `settings` store. These are the defaults that seed new
+  //     workspaces and the Default workspace's baseline.
+  // Sections are also gated by mode (Personas/Agents only in workspace;
+  // Trusted tools / Theme / Output / Reset only in global).
+  export let mode: 'workspace' | 'global' = 'global';
+
+  // Reactive view of the values controls should display. In workspace
+  // mode, this resolves overrides on top of globals. In global mode,
+  // it's the raw global store.
+  $: display = mode === 'workspace' ? $effectiveSettings : $settings;
+
+  // writeKey routes a write to the appropriate scope based on mode.
+  // Used by every input that previously did `bind:value={$settings.X}`.
+  function writeKey<K extends keyof WorkspaceOverrides>(key: K, value: WorkspaceOverrides[K]) {
+    if (mode === 'workspace') {
+      setEffectiveOverride(key, value);
+    } else {
+      settings.update(s => ({ ...s, [key]: value }));
+    }
+  }
 
   function openOutputDir() {
     if (outputDir) OpenPath(outputDir);
   }
 
-  // Provider select
+  // Provider select. Reads / writes route through `display` /
+  // writeKey so the same component works in both modes.
+  const initialProvider = mode === 'workspace' ? get(effectiveSettings).provider : get(settings).provider;
   const {
     elements: { trigger: provSelTrig, menu: provSelMenu, option: provSelOpt },
     states: { selectedLabel: provLabel, open: provOpen, selected: provSelected },
     helpers: { isSelected: isProvSelected }
   } = createSelect<string>({
     positioning: { placement: 'bottom', sameWidth: true },
-    defaultSelected: $settings.provider
-      ? { value: $settings.provider, label: $settings.provider }
+    defaultSelected: initialProvider
+      ? { value: initialProvider, label: initialProvider }
       : undefined
   });
 
+  // User picks a provider -> propagate to the right scope. Changing
+  // provider also invalidates model, since model lists are
+  // per-provider; we clear it and let the model auto-pick reset
+  // pick a fresh default.
   provSelected.subscribe(s => {
-    if (s && s.value !== get(settings).provider) {
-      settings.update(v => ({ ...v, provider: s.value, model: '' }));
-    }
+    if (!s) return;
+    const cur = mode === 'workspace' ? get(effectiveSettings).provider : get(settings).provider;
+    if (s.value === cur) return;
+    writeKey('provider', s.value);
+    writeKey('model', '');
   });
-  settings.subscribe(s => {
+  // Inverse sync: external changes (e.g. workspace switch in
+  // workspace mode, or programmatic update in global mode) update
+  // the picker label.
+  const provSource = mode === 'workspace' ? effectiveSettings : settings;
+  provSource.subscribe(s => {
     const cur = get(provSelected);
     if (s.provider && (!cur || cur.value !== s.provider)) {
       provSelected.set({ value: s.provider, label: s.provider });
     }
   });
 
-  // Model select
+  // Model select. Same dual-mode pattern as Provider.
+  const initialModel = mode === 'workspace' ? get(effectiveSettings).model : get(settings).model;
   const {
     elements: { trigger: modSelTrig, menu: modSelMenu, option: modSelOpt },
     states: { selectedLabel: modLabel, open: modOpen, selected: modSelected },
     helpers: { isSelected: isModSelected }
   } = createSelect<string>({
     positioning: { placement: 'bottom', sameWidth: true },
-    defaultSelected: $settings.model
-      ? { value: $settings.model, label: $settings.model }
+    defaultSelected: initialModel
+      ? { value: initialModel, label: initialModel }
       : undefined
   });
 
   modSelected.subscribe(s => {
-    if (s && s.value !== get(settings).model) {
-      settings.update(v => ({ ...v, model: s.value }));
-    }
+    if (!s) return;
+    const cur = mode === 'workspace' ? get(effectiveSettings).model : get(settings).model;
+    if (s.value === cur) return;
+    writeKey('model', s.value);
   });
-  settings.subscribe(s => {
+  const modSource = mode === 'workspace' ? effectiveSettings : settings;
+  modSource.subscribe(s => {
     const cur = get(modSelected);
     if (s.model && (!cur || cur.value !== s.model)) {
       modSelected.set({ value: s.model, label: s.model });
     }
   });
 
-  // When models prop arrives, ensure the persisted model is still in the
-  // allowlist; otherwise reset to the provider's default (first entry).
-  $: if (models.length > 0 && !models.includes($settings.model)) {
-    settings.update(s => ({ ...s, model: models[0] }));
+  // When models prop arrives, ensure the effective model is still in
+  // the allowlist; otherwise reset to the provider's default (first
+  // entry). Routes via writeKey so the auto-reset writes to the right
+  // scope.
+  $: if (models.length > 0 && display && !models.includes(display.model)) {
+    writeKey('model', models[0]);
   }
 
   // Sections
@@ -133,6 +179,26 @@
     settings.update(s => ({ ...s, autoApproveTools: [] }));
   }
 
+  function onPersonaScopeChange(ev: Event) {
+    if (!editing) return;
+    const v = (ev.currentTarget as HTMLSelectElement).value;
+    editing = { ...editing, workspaceId: v || undefined };
+  }
+  function onAgentScopeChange(ev: Event) {
+    if (!editingAgent) return;
+    const v = (ev.currentTarget as HTMLSelectElement).value;
+    editingAgent = { ...editingAgent, workspaceId: v || undefined };
+  }
+
+  // scopeLabel renders the human name of a persona/agent's workspace
+  // scope ("Global" for unscoped). Used in the list and the editor's
+  // Scope selector. (7.1.b)
+  function scopeLabel(workspaceId: string | undefined, workspaces: Workspace[]): string {
+    if (!workspaceId) return 'Global';
+    const ws = workspaces.find(w => w.id === workspaceId);
+    return ws?.name ?? `(missing: ${workspaceId})`;
+  }
+
   // Persona management
   const {
     elements: { root: persRoot, trigger: persTrig, content: persContent },
@@ -156,6 +222,11 @@
       description: '',
       systemPrompt: '',
       builtin: false,
+      // Default new entries to the active workspace. If the user is in
+      // "Default" they probably want a global persona; offer both via
+      // the Scope selector. Picking "current workspace" is the more
+      // useful default once the user has a non-Default workspace.
+      workspaceId: $settings.activeWorkspaceId,
     };
     persDlgOpen.set(true);
   }
@@ -206,6 +277,7 @@
       systemPrompt: '',
       tools: [],
       builtin: false,
+      workspaceId: $settings.activeWorkspaceId,
     };
     agtDlgOpen.set(true);
   }
@@ -266,15 +338,20 @@
     setHighlightTheme(next);
   }
 
-  // Stop sequences edited as comma-separated text
-  let stopText = $settings.stopSequences.join(', ');
-  $: $settings.stopSequences, (stopText = $settings.stopSequences.join(', '));
+  // Stop sequences edited as comma-separated text. Reads from the
+  // effective scope so the field reflects workspace overrides; writes
+  // route via writeKey. Initialised empty so this top-level `let`
+  // doesn't reference `display` (which is `$:`-bound and undefined
+  // until the first reactive run); the reactive block below seeds
+  // the actual value before first paint.
+  let stopText = '';
+  $: stopText = (display?.stopSequences ?? []).join(', ');
   function commitStopSequences() {
     const arr = stopText
       .split(',')
       .map(s => s.trim())
       .filter(s => s.length > 0);
-    settings.update(s => ({ ...s, stopSequences: arr }));
+    writeKey('stopSequences', arr);
   }
 </script>
 
@@ -283,7 +360,13 @@
   <div use:melt={$tabsList} class="flex border-b border-border px-2 gap-0.5" aria-label="Settings tabs">
     <button class="tab-trigger" use:melt={$tabsTrigger('models')}>Models</button>
     <button class="tab-trigger" use:melt={$tabsTrigger('agents')}>Agents</button>
-    <button class="tab-trigger" use:melt={$tabsTrigger('general')}>General</button>
+    {#if mode === 'global'}
+      <!-- General tab carries Appearance / Output / Reset, all
+           global-only. Hidden in workspace mode (right sidebar)
+           since the system prompt moved to the Models tab and
+           nothing else workspace-scoped lives here. -->
+      <button class="tab-trigger" use:melt={$tabsTrigger('general')}>General</button>
+    {/if}
   </div>
 
   <!-- Models tab -->
@@ -314,10 +397,15 @@
           {/each}
         </div>
       {/if}
-      <label class="flex flex-row items-center gap-2 text-[0.8rem] text-fg-muted">
-        <input type="checkbox" bind:checked={$settings.streaming} disabled={busy} class="m-0" />
-        <span>Stream tokens</span>
-      </label>
+      {#if mode === 'global'}
+        <!-- "streaming" isn't a workspace-overridable key (it's a
+             global runtime preference), so the toggle only appears
+             in the global Settings dialog. -->
+        <label class="flex flex-row items-center gap-2 text-[0.8rem] text-fg-muted">
+          <input type="checkbox" bind:checked={$settings.streaming} disabled={busy} class="m-0" />
+          <span>Stream tokens</span>
+        </label>
+      {/if}
     </div>
   </section>
 
@@ -349,6 +437,26 @@
     </div>
   </section>
 
+  <!-- System Prompt — sits under Model so the model + its system
+       prompt are configured together. Applies to every message in
+       chats using this scope. -->
+  <section class="border-b border-border" use:melt={$sysRoot}>
+    <button class="section-head" use:melt={$sysTrig}>
+      <span class="caret">{$sysOpen ? '▾' : '▸'}</span>
+      <span>System Prompt</span>
+    </button>
+    <div use:melt={$sysContent} class="section-body">
+      <textarea
+        class="text-input"
+        value={display.system}
+        on:input={(e) => writeKey('system', e.currentTarget.value)}
+        disabled={busy}
+        rows="6"
+        placeholder="Optional system prompt. Applies to all messages in the active chat."
+      ></textarea>
+    </div>
+  </section>
+
   <!-- Sampling -->
   <section class="border-b border-border" use:melt={$sampRoot}>
     <button class="section-head" use:melt={$sampTrig}>
@@ -359,20 +467,20 @@
       <label class="field">
         <div class="flex justify-between">
           <span>Temperature</span>
-          <span class="text-fg-faint">{$settings.temperature ?? 'default'}</span>
+          <span class="text-fg-faint">{display.temperature ?? 'default'}</span>
         </div>
         <div class="flex items-center gap-2">
           <input
             type="range"
             min="0" max="2" step="0.05"
-            value={$settings.temperature ?? 1}
-            on:input={(e) => settings.update(s => ({ ...s, temperature: parseFloat(e.currentTarget.value) }))}
+            value={display.temperature ?? 1}
+            on:input={(e) => writeKey('temperature', parseFloat(e.currentTarget.value))}
             disabled={busy}
             class="flex-1"
           />
           <button
             class="mini-btn"
-            on:click={() => settings.update(s => ({ ...s, temperature: null }))}
+            on:click={() => writeKey('temperature', null)}
             disabled={busy}
             title="Use provider default"
           >reset</button>
@@ -382,20 +490,20 @@
       <label class="field">
         <div class="flex justify-between">
           <span>Top-p</span>
-          <span class="text-fg-faint">{$settings.topP ?? 'default'}</span>
+          <span class="text-fg-faint">{display.topP ?? 'default'}</span>
         </div>
         <div class="flex items-center gap-2">
           <input
             type="range"
             min="0" max="1" step="0.01"
-            value={$settings.topP ?? 1}
-            on:input={(e) => settings.update(s => ({ ...s, topP: parseFloat(e.currentTarget.value) }))}
+            value={display.topP ?? 1}
+            on:input={(e) => writeKey('topP', parseFloat(e.currentTarget.value))}
             disabled={busy}
             class="flex-1"
           />
           <button
             class="mini-btn"
-            on:click={() => settings.update(s => ({ ...s, topP: null }))}
+            on:click={() => writeKey('topP', null)}
             disabled={busy}
           >reset</button>
         </div>
@@ -407,7 +515,8 @@
           type="number"
           class="text-input"
           min="1" step="1"
-          bind:value={$settings.maxTokens}
+          value={display.maxTokens}
+          on:input={(e) => writeKey('maxTokens', parseInt(e.currentTarget.value, 10) || 0)}
           disabled={busy}
         />
       </label>
@@ -430,13 +539,19 @@
     <button class="section-head" use:melt={$thinkTrig}>
       <span class="caret">{$thinkSectOpen ? '▾' : '▸'}</span>
       <span>Thinking</span>
-      {#if $settings.thinkEnabled}
+      {#if display.thinkEnabled}
         <span class="ml-auto text-[0.65rem] text-fg-faint uppercase tracking-wider">on</span>
       {/if}
     </button>
     <div use:melt={$thinkContent} class="section-body">
       <label class="flex flex-row items-center gap-2 text-[0.8rem] text-fg-muted">
-        <input type="checkbox" bind:checked={$settings.thinkEnabled} disabled={busy} class="m-0" />
+        <input
+          type="checkbox"
+          checked={display.thinkEnabled}
+          on:change={(e) => writeKey('thinkEnabled', e.currentTarget.checked)}
+          disabled={busy}
+          class="m-0"
+        />
         <span>Enable extended thinking (Anthropic)</span>
       </label>
       <label class="field">
@@ -445,8 +560,9 @@
           type="number"
           class="text-input"
           min="1024" step="256"
-          bind:value={$settings.thinkBudget}
-          disabled={busy || !$settings.thinkEnabled}
+          value={display.thinkBudget}
+          on:input={(e) => writeKey('thinkBudget', parseInt(e.currentTarget.value, 10) || 1024)}
+          disabled={busy || !display.thinkEnabled}
         />
       </label>
       <p class="text-[0.7rem] text-fg-faint leading-snug">
@@ -460,7 +576,10 @@
   <!-- Agents tab -->
   <div use:melt={$tabsContent('agents')}>
 
-  <!-- Personas -->
+  {#if mode === 'workspace'}
+  <!-- Personas (workspace-scoped via Persona.workspaceId; Settings
+       lists merge globals + active workspace's). Hidden in the global
+       Settings dialog because they're per-workspace state. -->
   <section class="border-b border-border" use:melt={$persRoot}>
     <button class="section-head" use:melt={$persTrig}>
       <span class="caret">{$persOpen ? '▾' : '▸'}</span>
@@ -478,6 +597,7 @@
               <div class="font-semibold text-fg flex items-center gap-1">
                 <span>{p.name}</span>
                 {#if p.builtin}<span class="text-fg-faint text-[0.65rem] uppercase tracking-wider">builtin</span>{/if}
+                <span class="text-fg-faint text-[0.65rem] uppercase tracking-wider">{scopeLabel(p.workspaceId, $settings.workspaces)}</span>
               </div>
               {#if p.description}
                 <div class="text-fg-faint text-[0.7rem] leading-snug mt-0.5">{p.description}</div>
@@ -498,7 +618,7 @@
     </div>
   </section>
 
-  <!-- Agents -->
+  <!-- Agents (workspace-scoped; same gating as Personas). -->
   <section class="border-b border-border" use:melt={$agtsRoot}>
     <button class="section-head" use:melt={$agtsTrig}>
       <span class="caret">{$agtsOpen ? '▾' : '▸'}</span>
@@ -518,6 +638,7 @@
                 <span>{a.name}</span>
                 <span class="text-fg-faint text-[0.65rem] font-[family-name:var(--font-mono)]">[{a.tools.length}]</span>
                 {#if a.builtin}<span class="text-fg-faint text-[0.65rem] uppercase tracking-wider">builtin</span>{/if}
+                <span class="text-fg-faint text-[0.65rem] uppercase tracking-wider">{scopeLabel(a.workspaceId, $settings.workspaces)}</span>
                 {#if missing.length > 0}
                   <span class="text-error-fg text-[0.65rem] uppercase tracking-wider">needs {missing.join(', ')}</span>
                 {/if}
@@ -546,8 +667,11 @@
       {/if}
     </div>
   </section>
+  {/if}
 
-  <!-- Trusted tools -->
+  {#if mode === 'global'}
+  <!-- Trusted tools — global user-trust state; not per-workspace.
+       Lives in the global Settings dialog only. -->
   <section class="border-b border-border" use:melt={$trustRoot}>
     <button class="section-head" use:melt={$trustTrig}>
       <span class="caret">{$trustOpen ? '▾' : '▸'}</span>
@@ -579,30 +703,19 @@
       {/if}
     </div>
   </section>
+  {/if}
 
   </div>
 
-  <!-- General tab -->
+  <!-- General tab — only meaningful in global mode. The
+       conditional wrapping the trigger above already prevents the
+       tab from being selectable in workspace mode; this gate keeps
+       the content out of the DOM for symmetry. -->
+  {#if mode === 'global'}
   <div use:melt={$tabsContent('general')}>
 
-  <!-- System Prompt -->
-  <section class="border-b border-border" use:melt={$sysRoot}>
-    <button class="section-head" use:melt={$sysTrig}>
-      <span class="caret">{$sysOpen ? '▾' : '▸'}</span>
-      <span>System Prompt</span>
-    </button>
-    <div use:melt={$sysContent} class="section-body">
-      <textarea
-        class="text-input"
-        bind:value={$settings.system}
-        disabled={busy}
-        rows="6"
-        placeholder="Optional system prompt. Applies to all messages in the active chat."
-      ></textarea>
-    </div>
-  </section>
-
-  <!-- Appearance -->
+  <!-- Appearance / Output / Reset — global user prefs, not
+       workspace state. Live in the global Settings dialog only. -->
   <section class="border-b border-border" use:melt={$apprRoot}>
     <button class="section-head" use:melt={$apprTrig}>
       <span class="caret">{$apprOpen ? '▾' : '▸'}</span>
@@ -657,6 +770,7 @@
   </section>
 
   </div>
+  {/if}
 </div>
 
 <div use:melt={$persDlgPortalled}>
@@ -696,6 +810,19 @@
             bind:value={editing.systemPrompt}
             placeholder="What this role does. The text here replaces the global system prompt when this persona is active."
           ></textarea>
+        </label>
+        <label class="flex flex-col gap-1 text-[0.78rem] text-fg-muted">
+          <span>Scope</span>
+          <select
+            class="text-input"
+            value={editing.workspaceId ?? ''}
+            on:change={onPersonaScopeChange}
+          >
+            <option value="">Global (visible in all workspaces)</option>
+            {#each $settings.workspaces as w (w.id)}
+              <option value={w.id}>{w.name}</option>
+            {/each}
+          </select>
         </label>
       </div>
       <div class="mt-4 flex justify-end gap-2">
@@ -758,6 +885,19 @@
             </div>
           {/if}
         </div>
+        <label class="flex flex-col gap-1 text-[0.78rem] text-fg-muted">
+          <span>Scope</span>
+          <select
+            class="text-input"
+            value={editingAgent.workspaceId ?? ''}
+            on:change={onAgentScopeChange}
+          >
+            <option value="">Global (visible in all workspaces)</option>
+            {#each $settings.workspaces as w (w.id)}
+              <option value={w.id}>{w.name}</option>
+            {/each}
+          </select>
+        </label>
       </div>
       <div class="mt-4 flex justify-end gap-2">
         <button

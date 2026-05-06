@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { Providers, Models, Chat, StreamChat, StreamAgent, CancelStream, Tools, OutputDir, OpenPath, RespondPermission } from '../wailsjs/go/main/App.js';
+  import { createDialog, melt } from '@melt-ui/svelte';
+  import { Providers, Models, Chat, StreamChat, StreamAgent, CancelStream, Tools, OutputDir, OpenPath, RespondPermission, StartupWorkspaceDir } from '../wailsjs/go/main/App.js';
   import { EventsOn, EventsOff, BrowserOpenURL } from '../wailsjs/runtime/runtime.js';
   import { mathjax } from './lib/mathjax';
   import { renderMarkdownStreaming, setHighlightTheme } from './lib/markdown';
@@ -9,6 +10,7 @@
     activeChat,
     activeChatId,
     settings,
+    effectiveSettings,
     contextWindowFor,
     newChat,
     appendMessage,
@@ -22,7 +24,11 @@
     setChatAgent,
     findPersona,
     findAgent,
+    visiblePersonas,
+    visibleAgents,
     agentMissingTools,
+    addWorkspace,
+    setActiveWorkspace,
     isMultimodal,
     type Usage,
     type AgentStep
@@ -36,6 +42,21 @@
   let outputDir = '';
   let input = '';
   let busy = false;
+
+  // Settings dialog opened from the Margo › Settings… menu (Cmd+,).
+  // Renders a second instance of SettingsPanel; the right-pane stays
+  // available. Independent collapsible state per instance, but both
+  // bind to the same global $settings store.
+  const {
+    elements: {
+      overlay: settingsDlgOverlay,
+      content: settingsDlgContent,
+      title: settingsDlgTitle,
+      close: settingsDlgClose,
+      portalled: settingsDlgPortalled,
+    },
+    states: { open: settingsDlgOpen },
+  } = createDialog({ role: 'dialog' });
 
   // Pending image attachments for the next message. Each entry carries
   // already-base64-encoded bytes so the Wails IPC sees a clean string.
@@ -68,17 +89,21 @@
     !$settings.showLeft && $settings.showRight ? 'grid-cols-[0_1fr_320px]' :
     'grid-cols-[0_1fr_0]';
 
-  // Refresh model list when provider changes.
-  $: if ($settings.provider) {
-    Models($settings.provider).then(m => { models = m; });
+  // Refresh model list when the *effective* provider changes — the
+  // active workspace may override it. The Models picker in
+  // SettingsPanel still binds to the global provider; this fetch is
+  // about the list shown for outbound chat.
+  $: if ($effectiveSettings.provider) {
+    Models($effectiveSettings.provider).then(m => { models = m; });
   }
 
-  // Context usage for the active chat.
-  $: ctxWindow = contextWindowFor($settings.model);
+  // Context usage for the active chat. Uses the *effective* model so a
+  // workspace override of the model picks the right context window.
+  $: ctxWindow = contextWindowFor($effectiveSettings.model);
   $: ctxUsed = ($activeChat?.tokensIn ?? 0) + ($activeChat?.tokensOut ?? 0);
-  // Gate: attachments are pending but the active model isn't on the
-  // multimodal allowlist. Disables send + surfaces an inline warning.
-  $: attachmentsBlocked = attachments.length > 0 && !!$settings.model && !isMultimodal($settings.model);
+  // Gate: attachments are pending but the *effective* model isn't on
+  // the multimodal allowlist. Disables send + surfaces an inline warning.
+  $: attachmentsBlocked = attachments.length > 0 && !!$effectiveSettings.model && !isMultimodal($effectiveSettings.model);
   $: ctxPct = ctxWindow > 0 ? Math.min(100, Math.round((ctxUsed / ctxWindow) * 100)) : 0;
 
   onMount(async () => {
@@ -102,8 +127,38 @@
       activeChatId.set($chats[0].id);
     }
 
+    // 7.1.e: honour the -workspace CLI flag. If main.go captured a
+    // directory, find a workspace that already binds to it (case-
+    // insensitive match on macOS-style paths is intentionally skipped
+    // — paths from filepath.Abs are canonicalised) or create one whose
+    // name is the directory's basename.
+    try {
+      const startupDir = await StartupWorkspaceDir();
+      if (startupDir) applyStartupWorkspace(startupDir);
+    } catch (_) {}
+
     document.addEventListener('click', handleExternalLinkClick, true);
+
+    // Listen for the Margo › Settings… menu item (Cmd+,). Wails fires
+    // the event from app.go::openSettings.
+    EventsOn('margo:menu:settings', () => {
+      settingsDlgOpen.set(true);
+    });
   });
+
+  function applyStartupWorkspace(dir: string) {
+    const existing = $settings.workspaces.find(w => w.dir === dir);
+    if (existing) {
+      if (existing.id !== $settings.activeWorkspaceId) setActiveWorkspace(existing.id);
+      return;
+    }
+    // Derive a sensible name from the directory's basename; fall back
+    // to the literal path if the path is bare (e.g. "/").
+    const parts = dir.split(/[\\/]/).filter(Boolean);
+    const name = parts.length > 0 ? parts[parts.length - 1] : dir;
+    const id = addWorkspace(name, dir);
+    setActiveWorkspace(id);
+  }
 
   function handleExternalLinkClick(ev: MouseEvent) {
     const target = ev.target;
@@ -217,7 +272,9 @@
   }
 
   function buildOptions() {
-    const s = $settings;
+    // Read all sampling/model state from effective settings so workspace
+    // overrides (model, temperature, thinking, etc.) apply at send time.
+    const s = $effectiveSettings;
     return {
       model: s.model,
       maxTokens: s.maxTokens,
@@ -231,9 +288,9 @@
 
   async function send() {
     const text = input.trim();
-    if ((!text && attachments.length === 0) || busy || !$settings.provider) return;
+    if ((!text && attachments.length === 0) || busy || !$effectiveSettings.provider) return;
     if (attachmentsBlocked) {
-      error = `${$settings.model} doesn't accept images. Switch to a vision-capable model or remove the attachments.`;
+      error = `${$effectiveSettings.model} doesn't accept images. Switch to a vision-capable model or remove the attachments.`;
       return;
     }
 
@@ -268,7 +325,7 @@
       ? agent.systemPrompt
       : persona
         ? persona.systemPrompt
-        : $settings.system;
+        : $effectiveSettings.system;
     const useAgentRoute = !!agent || ($settings.agentMode && !persona && availableTools.length > 0);
     const agentTools = agent
       ? agent.tools.filter(t => availableTools.includes(t))
@@ -282,7 +339,7 @@
 
     if (!$settings.streaming) {
       try {
-        const resp = await Chat($settings.provider, systemPrompt, history, buildOptions(), sendAttachments);
+        const resp = await Chat($effectiveSettings.provider, systemPrompt, history, buildOptions(), sendAttachments);
         appendMessage(chat.id, {
           role: 'assistant',
           content: resp.text,
@@ -360,9 +417,9 @@
 
     try {
       if (useAgentRoute) {
-        await StreamAgent(id, $settings.provider, systemPrompt, history, buildOptions(), agentTools, $settings.autoApproveTools, sendAttachments);
+        await StreamAgent(id, $effectiveSettings.provider, systemPrompt, history, buildOptions(), agentTools, $settings.autoApproveTools, sendAttachments);
       } else {
-        await StreamChat(id, $settings.provider, systemPrompt, history, buildOptions(), sendAttachments);
+        await StreamChat(id, $effectiveSettings.provider, systemPrompt, history, buildOptions(), sendAttachments);
       }
     } catch (e) {
       error = String(e);
@@ -426,8 +483,18 @@
     if (activeStreamId) {
       try { await CancelStream(activeStreamId); } catch (_) {}
     }
-    try { localStorage.removeItem('margo:chats:v1'); } catch (_) {}
-    try { localStorage.removeItem('margo:settings:v1'); } catch (_) {}
+    // Wipe all margo:* keys. Pre-7.1.a there were two ('margo:chats:v1'
+    // + 'margo:settings:v1'); 7.1.a introduced per-workspace chat keys
+    // ('margo:chats:<workspaceId>:v1') so we iterate to catch them all
+    // without having to enumerate the workspaces we're about to discard.
+    try {
+      const toRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith('margo:')) toRemove.push(k);
+      }
+      for (const k of toRemove) localStorage.removeItem(k);
+    } catch (_) {}
     location.reload();
   }
 
@@ -465,12 +532,12 @@
         title={$settings.showLeft ? 'Hide chats' : 'Show chats'}
       >{$settings.showLeft ? '⟨' : '⟩'}</button>
       <div class="flex-1 text-center text-[0.9rem] font-medium text-fg-muted overflow-hidden text-ellipsis whitespace-nowrap">
-        {$activeChat?.title ?? 'margo'}
+        {$activeChat?.title ?? ''}
       </div>
       <div class="flex items-center gap-2">
-        <span class="badge">{$settings.provider || 'no provider'}</span>
-        {#if $settings.model}<span class="badge">{$settings.model}</span>{/if}
-        {#if $settings.thinkEnabled}<span class="badge badge-active">thinking</span>{/if}
+        <span class="badge">{$effectiveSettings.provider || 'no provider'}</span>
+        {#if $effectiveSettings.model}<span class="badge">{$effectiveSettings.model}</span>{/if}
+        {#if $effectiveSettings.thinkEnabled}<span class="badge badge-active">thinking</span>{/if}
         {#if $activeChat}
           <select
             class="role-picker"
@@ -480,15 +547,15 @@
           >
             <option value="">Default</option>
             <optgroup label="Personas">
-              {#each $settings.personas as p (p.id)}
-                <option value={`persona:${p.id}`}>{p.name}</option>
+              {#each visiblePersonas($settings.personas, $settings.activeWorkspaceId) as p (p.id)}
+                <option value={`persona:${p.id}`}>{p.name}{p.workspaceId ? ' ◦' : ''}</option>
               {/each}
             </optgroup>
             <optgroup label="Agents">
-              {#each $settings.agents as a (a.id)}
+              {#each visibleAgents($settings.agents, $settings.activeWorkspaceId) as a (a.id)}
                 {@const missing = agentMissingTools(a, availableTools)}
                 <option value={`agent:${a.id}`} disabled={missing.length > 0}>
-                  {a.name} [{a.tools.length}]{missing.length > 0 ? ` — needs ${missing.join(', ')}` : ''}
+                  {a.name} [{a.tools.length}]{a.workspaceId ? ' ◦' : ''}{missing.length > 0 ? ` — needs ${missing.join(', ')}` : ''}
                 </option>
               {/each}
             </optgroup>
@@ -634,7 +701,7 @@
       {/if}
       {#if attachmentsBlocked}
         <div class="text-[0.74rem] text-error-fg">
-          <strong>{$settings.model}</strong> doesn't accept images. Switch to a vision-capable model (e.g. claude-sonnet-4-6, gpt-5.4) or remove the attachments to send.
+          <strong>{$effectiveSettings.model}</strong> doesn't accept images. Switch to a vision-capable model (e.g. claude-sonnet-4-6, gpt-5.4) or remove the attachments to send.
         </div>
       {/if}
       <input
@@ -650,15 +717,15 @@
         class="topbar-btn h-9 w-9 flex items-center justify-center"
         on:click={onPaperclip}
         title="Attach image"
-        disabled={busy || !$settings.provider}
+        disabled={busy || !$effectiveSettings.provider}
         aria-label="attach image"
       >📎</button>
       <textarea
         class="flex-1 bg-input-bg text-fg border border-border rounded-md px-3 py-2.5 font-[inherit] text-[0.9rem] resize-none outline-none focus:border-border-strong disabled:opacity-50 disabled:cursor-not-allowed"
-        placeholder={$settings.provider ? "Send a message... (Enter to send, Shift+Enter for newline)" : "Configure a provider in the settings panel..."}
+        placeholder={$effectiveSettings.provider ? "Send a message... (Enter to send, Shift+Enter for newline)" : "Configure a provider in the settings panel..."}
         bind:value={input}
         on:keydown={onKey}
-        disabled={busy || !$settings.provider}
+        disabled={busy || !$effectiveSettings.provider}
         rows="2"
       ></textarea>
       <div class="flex flex-col items-center gap-1">
@@ -679,7 +746,7 @@
           <button
             class="composer-btn send-btn"
             on:click={send}
-            disabled={busy || !$settings.provider || attachmentsBlocked || (!input.trim() && attachments.length === 0)}
+            disabled={busy || !$effectiveSettings.provider || attachmentsBlocked || (!input.trim() && attachments.length === 0)}
           >{busy ? '...' : 'send'}</button>
         {/if}
       </div>
@@ -689,8 +756,36 @@
 
   {#if $settings.showRight}
     <aside class="overflow-hidden min-w-0">
-      <SettingsPanel {providers} {models} {busy} {outputDir} {availableTools} onReset={resetApp} />
+      <SettingsPanel mode="workspace" {providers} {models} {busy} {outputDir} {availableTools} onReset={resetApp} />
     </aside>
+  {/if}
+</div>
+
+<!--
+  Settings dialog — opened by the Margo › Settings… menu (Cmd+,).
+  Renders a second SettingsPanel instance; both write to the same
+  global $settings store, so changes propagate between the right-pane
+  and the dialog instantly.
+-->
+<div use:melt={$settingsDlgPortalled}>
+  {#if $settingsDlgOpen}
+    <div use:melt={$settingsDlgOverlay} class="fixed inset-0 z-40 bg-black/40"></div>
+    <div
+      use:melt={$settingsDlgContent}
+      class="fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 w-[min(40rem,92vw)] max-h-[85vh] flex flex-col rounded-md border border-border bg-bg shadow-xl overflow-hidden"
+    >
+      <div class="flex items-center justify-between px-4 py-2.5 border-b border-border">
+        <h2 use:melt={$settingsDlgTitle} class="text-[0.95rem] font-semibold text-fg">Settings</h2>
+        <button
+          use:melt={$settingsDlgClose}
+          class="text-fg-muted hover:text-fg cursor-pointer leading-none text-lg"
+          aria-label="close settings"
+        >×</button>
+      </div>
+      <div class="flex-1 overflow-y-auto">
+        <SettingsPanel mode="global" {providers} {models} {busy} {outputDir} {availableTools} onReset={resetApp} />
+      </div>
+    </div>
   {/if}
 </div>
 

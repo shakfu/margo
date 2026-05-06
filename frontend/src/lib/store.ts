@@ -65,6 +65,10 @@ export interface Persona {
   description?: string;
   systemPrompt: string;
   builtin?: boolean;
+  // Workspace scope (7.1.b). Undefined = global (visible in every
+  // workspace). A workspace id = visible only in that workspace.
+  // Builtins are always global; the UI refuses to scope them.
+  workspaceId?: string;
 }
 
 // Agent is a persona that also carries a tool allowlist. Routes through
@@ -83,7 +87,77 @@ export interface Agent {
   // Future (8.3): child agent ids for pipeline / host-and-specialists
   // composition. Reserved; not used yet.
   composedOf?: string[];
+  // Workspace scope (7.1.b). Same semantics as Persona.workspaceId.
+  workspaceId?: string;
 }
+
+// Workspace is a named, optionally directory-bound container for chats.
+// Each workspace's chats persist under a dedicated localStorage key so
+// switching workspaces swaps the chat list. The `dir` field is reserved
+// for later slices (per-workspace RAG); 7.1.b adds scoped personas/
+// agents; 7.1.c adds `overrides` for per-workspace settings.
+// See REVIEW.md §7.1.
+export interface Workspace {
+  id: string;
+  name: string;
+  dir?: string;
+  createdAt: number;
+  updatedAt: number;
+  // Settings the active workspace overrides. Only keys listed in
+  // OVERRIDABLE_KEYS are honoured by effectiveSettings; everything
+  // else falls through to global Settings. (7.1.c)
+  overrides?: WorkspaceOverrides;
+}
+
+// WorkspaceOverrides is the subset of Settings a workspace may shadow.
+// Kept narrow on purpose: theme, panel toggles, persona/agent libraries,
+// and the workspaces table itself are user-scoped state, not workspace-
+// scoped. Sampling pointer fields stay nullable to mirror Settings.
+export interface WorkspaceOverrides {
+  provider?: string;
+  model?: string;
+  system?: string;
+  maxTokens?: number;
+  temperature?: number | null;
+  topP?: number | null;
+  stopSequences?: string[];
+  thinkEnabled?: boolean;
+  thinkBudget?: number;
+}
+
+// OVERRIDABLE_KEYS is the runtime mirror of WorkspaceOverrides' keys,
+// used by effectiveSettings to project overrides onto the global
+// settings record. Kept manually in sync (TS doesn't expose interface
+// keys at runtime).
+export const OVERRIDABLE_KEYS = [
+  'provider', 'model', 'system',
+  'maxTokens', 'temperature', 'topP', 'stopSequences',
+  'thinkEnabled', 'thinkBudget',
+] as const satisfies ReadonlyArray<keyof WorkspaceOverrides>;
+
+// WorkspaceTemplate is a starter pack: a name + description, optional
+// scoped personas/agents to install into the new workspace, and
+// optional overrides. Picking a template at workspace creation time is
+// equivalent to "create a workspace, then install these extras." (7.1.f)
+//
+// Personas and agents in `personas` / `agents` are written workspace-
+// scoped (their `workspaceId` is set to the new workspace's id during
+// install). They get fresh ids on install so re-using the same
+// template produces independent copies. `id` and `builtin` on the
+// template entries are ignored — they're factories, not records.
+export interface WorkspaceTemplate {
+  id: string;          // stable template id; used by the picker and analytics
+  name: string;        // human-readable template name (also default workspace name)
+  description: string;
+  personas?: Omit<Persona, 'id' | 'builtin' | 'workspaceId'>[];
+  agents?: Omit<Agent, 'id' | 'builtin' | 'workspaceId'>[];
+  overrides?: WorkspaceOverrides;
+}
+
+// Stable id for the seeded default workspace. Chats migrated from the
+// legacy `margo:chats:v1` key land here; this id is a deletion-blocked
+// fixed point so migration logic doesn't need to invent one.
+export const DEFAULT_WORKSPACE_ID = 'default';
 
 export interface Settings {
   provider: string;
@@ -110,6 +184,11 @@ export interface Settings {
   personas: Persona[];
   // User's agent library: same persistence semantics as personas.
   agents: Agent[];
+  // Workspaces (7.1.a). Always non-empty: the seeded "Default"
+  // workspace is re-asserted on every load so users can't end up
+  // with zero workspaces and no chats key to write to.
+  workspaces: Workspace[];
+  activeWorkspaceId: string;
 }
 
 // BUILTIN_PERSONAS is the ship-in catalog. Ids are stable across
@@ -178,6 +257,68 @@ export const BUILTIN_AGENTS: Agent[] = [
   },
 ];
 
+// WORKSPACE_TEMPLATES is the ship-in catalog (7.1.f). Each entry is a
+// recipe: pick one in the workspace manage dialog and the new
+// workspace is pre-populated. Templates are deliberately conservative
+// — they don't reach for tools that may not be installed (quarto), and
+// avoid overriding the global model/provider since those depend on
+// what the user has configured. Add per-template overrides only when
+// they're load-bearing for the use case.
+//
+// "Empty" is omitted: the manage dialog renders "Empty workspace" as
+// the no-template option directly.
+export const WORKSPACE_TEMPLATES: WorkspaceTemplate[] = [
+  {
+    id: 'tmpl-writing',
+    name: 'Writing & editing',
+    description: 'Long-form prose work. Pre-tunes the system prompt for clarity and adds a draft-revision persona.',
+    personas: [
+      {
+        name: 'Draft Reviser',
+        description: 'Proposes specific line-level revisions with reasons.',
+        systemPrompt:
+          "You are a careful prose reviser. For each piece of text the user submits, return: (1) the revised text, (2) a numbered list of substantive changes you made and why. Preserve voice and intent. Flag (don't silently fix) any factual claim you can't verify.",
+      },
+    ],
+    overrides: {
+      system: 'Default to clear, concrete prose. Avoid filler phrases ("it is important to note", "in summary"). Mirror the user\'s register; don\'t formalise casual writing.',
+    },
+  },
+  {
+    id: 'tmpl-code-review',
+    name: 'Code review',
+    description: 'Pull-request reviews. Pairs the builtin Code Reviewer with a stricter system prompt and thinking enabled.',
+    personas: [
+      {
+        name: 'PR Reviewer',
+        description: 'Reviews diffs with a focus on correctness, then readability.',
+        systemPrompt:
+          "You are reviewing a code change. Walk through the diff in this order: (1) correctness bugs, (2) security, (3) regressions in adjacent code, (4) readability. Cite line numbers. Don't rewrite the code — describe each change. If the diff is fine, say so plainly.",
+      },
+    ],
+    overrides: {
+      thinkEnabled: true,
+      thinkBudget: 4096,
+    },
+  },
+  {
+    id: 'tmpl-research',
+    name: 'Research',
+    description: 'Open-ended investigation. Tunes for skeptical answers with citations and clarifying questions.',
+    personas: [
+      {
+        name: 'Skeptical Researcher',
+        description: 'Cites sources, marks inferences, and presents alternatives.',
+        systemPrompt:
+          "You are a careful researcher. Before answering substantive questions, ask one clarifying question if the request is ambiguous. Cite sources or note when a claim is your inference. Always present at least one alternative framing. Prefer 'I don't know' over speculation.",
+      },
+    ],
+    overrides: {
+      temperature: 0.3,
+    },
+  },
+];
+
 // Approximate context window per model. Used by the context-usage ring.
 // Numbers are conservative; intent is "is this conversation about to overflow",
 // not exact accounting.
@@ -220,8 +361,15 @@ export function isMultimodal(model: string): boolean {
   return MULTIMODAL_MODELS.has(model);
 }
 
-const CHATS_KEY = 'margo:chats:v1';
+const LEGACY_CHATS_KEY = 'margo:chats:v1';
 const SETTINGS_KEY = 'margo:settings:v1';
+
+// chatsKey returns the localStorage key holding chats for `workspaceId`.
+// Format chosen so the legacy single-workspace key (`margo:chats:v1`)
+// can be unambiguously distinguished from per-workspace keys.
+export function chatsKey(workspaceId: string): string {
+  return `margo:chats:${workspaceId}:v1`;
+}
 
 function uuid(): string {
   const c = (window as any).crypto;
@@ -229,9 +377,27 @@ function uuid(): string {
   return `id-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function loadChats(): Chat[] {
+// migrateLegacyChats moves chats from the pre-7.1.a single key into the
+// Default workspace's key the first time we see them. Idempotent: if the
+// new key already exists, the legacy key is left alone (the user has
+// already been migrated and the workspaces feature has run at least
+// once). Removes the legacy key on success so subsequent loads skip the
+// branch entirely.
+function migrateLegacyChats(): void {
   try {
-    const raw = localStorage.getItem(CHATS_KEY);
+    const legacy = localStorage.getItem(LEGACY_CHATS_KEY);
+    if (!legacy) return;
+    const targetKey = chatsKey(DEFAULT_WORKSPACE_ID);
+    if (!localStorage.getItem(targetKey)) {
+      localStorage.setItem(targetKey, legacy);
+    }
+    localStorage.removeItem(LEGACY_CHATS_KEY);
+  } catch (_) {}
+}
+
+function loadChatsForWorkspace(workspaceId: string): Chat[] {
+  try {
+    const raw = localStorage.getItem(chatsKey(workspaceId));
     if (raw) {
       const parsed = JSON.parse(raw) as Chat[];
       // backfill new fields for chats persisted before tokens tracking
@@ -263,6 +429,13 @@ const defaults: Settings = {
   autoApproveTools: [],
   personas: BUILTIN_PERSONAS,
   agents: BUILTIN_AGENTS,
+  workspaces: [{
+    id: DEFAULT_WORKSPACE_ID,
+    name: 'Default',
+    createdAt: 0,
+    updatedAt: 0,
+  }],
+  activeWorkspaceId: DEFAULT_WORKSPACE_ID,
 };
 
 function loadSettings(): Settings {
@@ -284,15 +457,55 @@ function loadSettings(): Settings {
       const builtinAgentIds = new Set(BUILTIN_AGENTS.map(a => a.id));
       const customAgents = userAgents.filter(a => !builtinAgentIds.has(a.id));
       merged.agents = [...BUILTIN_AGENTS, ...customAgents];
+      // Workspace invariants: at least one workspace; Default always present;
+      // activeWorkspaceId points at a real entry. Re-asserting Default on
+      // load makes "user deleted Default by editing storage" non-fatal.
+      const userWorkspaces: Workspace[] = Array.isArray(merged.workspaces) ? merged.workspaces : [];
+      const hasDefault = userWorkspaces.some(w => w.id === DEFAULT_WORKSPACE_ID);
+      const workspaces = hasDefault
+        ? userWorkspaces
+        : [defaults.workspaces[0], ...userWorkspaces];
+      merged.workspaces = workspaces;
+      if (!workspaces.some(w => w.id === merged.activeWorkspaceId)) {
+        merged.activeWorkspaceId = DEFAULT_WORKSPACE_ID;
+      }
       return merged;
     }
   } catch (_) {}
   return { ...defaults };
 }
 
-export const chats = writable<Chat[]>(loadChats());
+// Settings is loaded first so the chats store can scope to the active
+// workspace. Legacy single-workspace chats migrate into the Default
+// workspace's key on first run.
+migrateLegacyChats();
+const initialSettings = loadSettings();
+
+export const settings = writable<Settings>(initialSettings);
+
+// Module-scoped mirror of the active workspace id so the chats
+// subscription writes to the correct key without `get(settings)` calls.
+// Updated by the settings subscription below.
+let currentActiveWorkspaceId = initialSettings.activeWorkspaceId;
+
+// Suppression flag for chats writes during a workspace swap: when
+// setActiveWorkspace replaces the chats store contents wholesale, the
+// subscription would otherwise overwrite the *new* workspace's stored
+// chats with the freshly-loaded list (a no-op write but conceptually
+// wrong) — and worse, if the swap raced with a pending update, could
+// stomp the wrong key. Set true around the swap; chats subscription
+// returns early.
+let suppressChatsWrite = false;
+
+export const chats = writable<Chat[]>(loadChatsForWorkspace(currentActiveWorkspaceId));
 chats.subscribe(cs => {
-  try { localStorage.setItem(CHATS_KEY, JSON.stringify(cs)); } catch (_) {}
+  if (suppressChatsWrite) return;
+  try { localStorage.setItem(chatsKey(currentActiveWorkspaceId), JSON.stringify(cs)); } catch (_) {}
+});
+
+settings.subscribe(s => {
+  currentActiveWorkspaceId = s.activeWorkspaceId;
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch (_) {}
 });
 
 export const activeChatId = writable<string>('');
@@ -302,10 +515,70 @@ export const activeChat = derived(
   ([$chats, $id]) => $chats.find(c => c.id === $id) ?? null
 );
 
-export const settings = writable<Settings>(loadSettings());
-settings.subscribe(s => {
-  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch (_) {}
-});
+export const activeWorkspace = derived(
+  settings,
+  $s => $s.workspaces.find(w => w.id === $s.activeWorkspaceId) ?? $s.workspaces[0],
+);
+
+// sessionOverrides is the in-memory override layer used while the
+// Default workspace is active. Edits made to settings inputs in the
+// right sidebar (Provider/Model/System/Sampling/Thinking) write here
+// instead of mutating global Settings. Cleared on app reload — that
+// "transient" property is the user-visible signal that you're in
+// experiment mode. Non-Default workspaces ignore this layer entirely
+// and use Workspace.overrides on disk. (Workspace UX flip.)
+export const sessionOverrides = writable<WorkspaceOverrides>({});
+
+// effectiveSettings projects per-scope overrides onto the global
+// Settings record:
+//   - Default workspace active  → global + sessionOverrides (transient)
+//   - Other workspace active    → global + workspace.overrides   (sticky)
+// Components that should respect overrides (App.svelte's send(),
+// topbar badges, the workspace-mode SettingsPanel) read from this
+// store. The Cmd+, dialog (mode='global') keeps reading raw `settings`
+// to edit the true global defaults.
+export const effectiveSettings = derived(
+  [settings, activeWorkspace, sessionOverrides],
+  ([$s, $ws, $sess]) => {
+    const o: WorkspaceOverrides | undefined =
+      $ws?.id === DEFAULT_WORKSPACE_ID ? $sess : $ws?.overrides;
+    if (!o || Object.keys(o).length === 0) return $s;
+    const out: Settings = { ...$s };
+    for (const k of OVERRIDABLE_KEYS) {
+      // hasOwnProperty is the right test: an override that is
+      // explicitly null/0/'' is still an override (clears the global).
+      // Missing key = no override.
+      if (Object.prototype.hasOwnProperty.call(o, k)) {
+        // TS can't narrow k against Settings union here without a
+        // per-key switch; the cast is safe because OVERRIDABLE_KEYS
+        // is statically typed as keyof WorkspaceOverrides ⊂ keyof Settings.
+        (out as any)[k] = (o as any)[k];
+      }
+    }
+    return out;
+  },
+);
+
+// setEffectiveOverride routes a write to the right scope: Default
+// workspace → sessionOverrides (transient); other workspace →
+// Workspace.overrides on disk. Pass undefined to clear (parity with
+// setWorkspaceOverride). Used by the workspace-mode SettingsPanel.
+export function setEffectiveOverride<K extends keyof WorkspaceOverrides>(
+  key: K,
+  value: WorkspaceOverrides[K] | undefined,
+) {
+  const wsId = currentActiveWorkspaceId;
+  if (wsId === DEFAULT_WORKSPACE_ID) {
+    sessionOverrides.update(o => {
+      const next = { ...o };
+      if (value === undefined) delete next[key];
+      else next[key] = value;
+      return next;
+    });
+    return;
+  }
+  setWorkspaceOverride(wsId, key, value);
+}
 
 export function newChat(): string {
   const id = uuid();
@@ -349,6 +622,18 @@ export function setChatPersona(id: string, personaId: string | undefined) {
   chats.update(cs =>
     cs.map(c => (c.id === id ? { ...c, personaId, agentId: undefined, updatedAt: Date.now() } : c))
   );
+}
+
+// visiblePersonas filters the persona library down to those that should
+// appear in the picker for the given active workspace: anything global
+// (workspaceId undefined) plus anything scoped to the active workspace.
+// Builtins are global by construction. (7.1.b)
+export function visiblePersonas(personas: Persona[], activeWorkspaceId: string): Persona[] {
+  return personas.filter(p => !p.workspaceId || p.workspaceId === activeWorkspaceId);
+}
+
+export function visibleAgents(agents: Agent[], activeWorkspaceId: string): Agent[] {
+  return agents.filter(a => !a.workspaceId || a.workspaceId === activeWorkspaceId);
 }
 
 export function findPersona(personas: Persona[], id: string | undefined): Persona | undefined {
@@ -395,6 +680,10 @@ export function duplicatePersona(id: string): string | undefined {
       description: src.description,
       systemPrompt: src.systemPrompt,
       builtin: false,
+      // Inherit source's workspace scope. Duplicating a builtin (always
+      // global) yields a global custom persona; the user can re-scope
+      // via the Scope selector in the editor that opens immediately.
+      workspaceId: src.workspaceId,
     };
     return { ...s, personas: [...s.personas, copy] };
   });
@@ -461,6 +750,7 @@ export function duplicateAgent(id: string): string | undefined {
       systemPrompt: src.systemPrompt,
       tools: [...src.tools],
       builtin: false,
+      workspaceId: src.workspaceId,
     };
     return { ...s, agents: [...s.agents, copy] };
   });
@@ -592,4 +882,182 @@ export function setLastUsage(id: string, usage: Usage) {
       };
     })
   );
+}
+
+
+// ---- Workspace CRUD (7.1.a) ----
+
+// addWorkspace creates and returns the new workspace id. Does not
+// switch to it; callers decide whether to setActiveWorkspace afterwards.
+export function addWorkspace(name: string, dir?: string): string {
+  const id = uuid();
+  const now = Date.now();
+  const ws: Workspace = { id, name: name.trim() || "Untitled", dir, createdAt: now, updatedAt: now };
+  settings.update(s => ({ ...s, workspaces: [...s.workspaces, ws] }));
+  return id;
+}
+
+// createWorkspaceFromTemplate builds a workspace pre-populated from
+// `template`: scoped personas/agents installed, overrides applied,
+// optional dir attached. Returns the new workspace id. (7.1.f)
+//
+// `name` overrides the template's default name when non-empty. All
+// inserted personas/agents get fresh ids so re-using the same
+// template across workspaces produces independent copies.
+export function createWorkspaceFromTemplate(
+  template: WorkspaceTemplate,
+  name?: string,
+  dir?: string,
+): string {
+  const wsId = uuid();
+  const now = Date.now();
+  const ws: Workspace = {
+    id: wsId,
+    name: (name ?? '').trim() || template.name,
+    dir,
+    createdAt: now,
+    updatedAt: now,
+    overrides: template.overrides ? { ...template.overrides } : undefined,
+  };
+
+  const newPersonas: Persona[] = (template.personas ?? []).map(p => ({
+    ...p,
+    id: uuid(),
+    builtin: false,
+    workspaceId: wsId,
+  }));
+  const newAgents: Agent[] = (template.agents ?? []).map(a => ({
+    ...a,
+    id: uuid(),
+    builtin: false,
+    workspaceId: wsId,
+    tools: [...a.tools],
+  }));
+
+  settings.update(s => ({
+    ...s,
+    workspaces: [...s.workspaces, ws],
+    personas: [...s.personas, ...newPersonas],
+    agents: [...s.agents, ...newAgents],
+  }));
+  return wsId;
+}
+
+export function renameWorkspace(id: string, name: string) {
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  settings.update(s => ({
+    ...s,
+    workspaces: s.workspaces.map(w => w.id === id ? { ...w, name: trimmed, updatedAt: Date.now() } : w),
+  }));
+}
+
+// setWorkspaceDir attaches (or clears, with undefined) a directory path
+// to a workspace. The path is stored but not consumed in 7.1.a — later
+// slices (RAG, file context) read it.
+export function setWorkspaceDir(id: string, dir: string | undefined) {
+  settings.update(s => ({
+    ...s,
+    workspaces: s.workspaces.map(w => w.id === id ? { ...w, dir: dir || undefined, updatedAt: Date.now() } : w),
+  }));
+}
+
+// deleteWorkspace removes a workspace and its persisted chats. Refuses
+// to delete the Default workspace (id-pinned to keep migration logic
+// simple). If the deleted workspace was active, swaps to Default.
+export function deleteWorkspace(id: string) {
+  if (id === DEFAULT_WORKSPACE_ID) return;
+  let wasActive = false;
+  // Cascade: a workspace owns its scoped personas/agents. Globals
+  // (workspaceId undefined) and builtins are untouched. Any chat in
+  // the deleted workspace would also be wiped, but those live in a
+  // separate localStorage key removed below.
+  settings.update(s => {
+    wasActive = s.activeWorkspaceId === id;
+    return {
+      ...s,
+      workspaces: s.workspaces.filter(w => w.id !== id),
+      personas: s.personas.filter(p => p.workspaceId !== id),
+      agents: s.agents.filter(a => a.workspaceId !== id),
+    };
+  });
+  try { localStorage.removeItem(chatsKey(id)); } catch (_) {}
+  if (wasActive) setActiveWorkspace(DEFAULT_WORKSPACE_ID);
+}
+
+// setWorkspaceOverride sets a single override key on the given workspace.
+// Pass undefined to clear that key (the inverse is clearWorkspaceOverride).
+// (7.1.c)
+export function setWorkspaceOverride<K extends keyof WorkspaceOverrides>(
+  workspaceId: string,
+  key: K,
+  value: WorkspaceOverrides[K] | undefined,
+) {
+  settings.update(s => ({
+    ...s,
+    workspaces: s.workspaces.map(w => {
+      if (w.id !== workspaceId) return w;
+      const overrides: WorkspaceOverrides = { ...(w.overrides ?? {}) };
+      if (value === undefined) {
+        delete overrides[key];
+      } else {
+        overrides[key] = value;
+      }
+      const next: Workspace = { ...w, updatedAt: Date.now() };
+      // Drop the overrides field entirely when empty so reads can
+      // short-circuit on falsy.
+      if (Object.keys(overrides).length === 0) {
+        delete next.overrides;
+      } else {
+        next.overrides = overrides;
+      }
+      return next;
+    }),
+  }));
+}
+
+export function clearWorkspaceOverride<K extends keyof WorkspaceOverrides>(
+  workspaceId: string,
+  key: K,
+) {
+  setWorkspaceOverride(workspaceId, key, undefined);
+}
+
+export function clearAllWorkspaceOverrides(workspaceId: string) {
+  settings.update(s => ({
+    ...s,
+    workspaces: s.workspaces.map(w => {
+      if (w.id !== workspaceId) return w;
+      const next: Workspace = { ...w, updatedAt: Date.now() };
+      delete next.overrides;
+      return next;
+    }),
+  }));
+}
+
+// setActiveWorkspace swaps the active workspace and reloads chats from
+// its dedicated key. No-op if the id is already active or unknown.
+// Clears activeChatId since chat ids do not span workspaces.
+export function setActiveWorkspace(id: string) {
+  if (id === currentActiveWorkspaceId) return;
+  // Validate against the persisted list before swapping. Also bump
+  // the activated workspace's updatedAt so the picker can sort by
+  // recency (7.1.e).
+  let valid = false;
+  const now = Date.now();
+  settings.update(s => {
+    if (!s.workspaces.some(w => w.id === id)) return s;
+    valid = true;
+    return {
+      ...s,
+      activeWorkspaceId: id,
+      workspaces: s.workspaces.map(w => w.id === id ? { ...w, updatedAt: now } : w),
+    };
+  });
+  if (!valid) return;
+  // settings subscription has already updated currentActiveWorkspaceId.
+  const next = loadChatsForWorkspace(id);
+  suppressChatsWrite = true;
+  try { chats.set(next); } finally { suppressChatsWrite = false; }
+  activeChatId.set(next[0]?.id ?? "");
 }
