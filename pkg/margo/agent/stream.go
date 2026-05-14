@@ -2,19 +2,10 @@ package agent
 
 import (
 	"context"
-	"errors"
-	"io"
-	"strings"
-	"time"
 
-	"github.com/cloudwego/eino/callbacks"
-	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
-	flowagent "github.com/cloudwego/eino/flow/agent"
-	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
-	cbtmpl "github.com/cloudwego/eino/utils/callbacks"
 
 	"github.com/shakfu/margo/pkg/margo"
 )
@@ -48,21 +39,21 @@ type RetrievalHit struct {
 //
 // Field semantics by Kind:
 //   - StepText:       Text holds the streamed content delta of the agent's
-//                     final answer.
+//     final answer.
 //   - StepToolCall:   Name is the tool's identifier, Arguments is the raw
-//                     JSON the model produced for the call.
+//     JSON the model produced for the call.
 //   - StepToolStream: Name is the tool's identifier, Text holds an incremental
-//                     chunk of the tool's streaming output. Emitted only for
-//                     StreamableTools; followed by a StepToolResult carrying
-//                     the concatenated output once the stream ends.
+//     chunk of the tool's streaming output. Emitted only for
+//     StreamableTools; followed by a StepToolResult carrying
+//     the concatenated output once the stream ends.
 //   - StepToolResult: Name is the tool's identifier, Result is the textual
-//                     output, IsError flags execution failures.
+//     output, IsError flags execution failures.
 //   - StepRetrieve:   Name is the retrieval tool's identifier, Hits is the
-//                     structured list of matches. Emitted in addition to
-//                     the eventual StepToolResult so the UI can render
-//                     hits as cards rather than parsing a text blob.
+//     structured list of matches. Emitted in addition to
+//     the eventual StepToolResult so the UI can render
+//     hits as cards rather than parsing a text blob.
 //   - StepError:      Text carries the error message; the run will not emit
-//                     further events.
+//     further events.
 //   - StepDone:       The run has finished successfully; Usage is set.
 type StepEvent struct {
 	Kind         StepKind
@@ -146,27 +137,6 @@ var abortOnCtxCancel = compose.ToolMiddleware{
 	},
 }
 
-// streamHasToolCall scans the entire model output stream for a tool call
-// rather than only the first content chunk. Replaces eino's default
-// firstChunkStreamToolCallChecker, which classifies "text first, then tool
-// call" turns (common with Claude when the model emits a brief preamble
-// before invoking a tool) as terminal and ends the ReAct loop prematurely.
-func streamHasToolCall(_ context.Context, sr *schema.StreamReader[*schema.Message]) (bool, error) {
-	defer sr.Close()
-	for {
-		msg, err := sr.Recv()
-		if errors.Is(err, io.EOF) {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		if msg != nil && len(msg.ToolCalls) > 0 {
-			return true, nil
-		}
-	}
-}
-
 // StreamReact runs a ReAct agent loop and emits step-by-step progress through
 // `emit`. Each intermediate model turn's text content is emitted as a single
 // StepText event (before its tool calls), each tool invocation triggers a
@@ -176,6 +146,14 @@ func streamHasToolCall(_ context.Context, sr *schema.StreamReader[*schema.Messag
 //
 // The `emit` callback runs synchronously on event-producing goroutines —
 // it must not block.
+//
+// As of §9.4b.3 this is a thin compatibility wrapper around
+// ReactRunner — the ReAct loop now runs on Eino's Agent Development
+// Kit (see adk_runner.go) instead of the legacy `flow/agent/react`
+// package. The function signature, event contract, and middleware
+// semantics are preserved verbatim, but the underlying
+// ChatModelAgent supersedes our hand-rolled callback handlers,
+// mid-loop streaming workaround, and custom StreamToolCallChecker.
 func StreamReact(
 	ctx context.Context,
 	c margo.Client,
@@ -186,174 +164,5 @@ func StreamReact(
 	gate PermissionGate,
 	emit func(StepEvent),
 ) error {
-	if emit == nil {
-		emit = func(StepEvent) {}
-	}
-	// Make the emitter reachable to tools that want to publish structured
-	// auxiliary events (e.g. search_knowledge's retrieval hits) on top of
-	// their normal text return.
-	ctx = WithStepEmitter(ctx, emit)
-
-	middlewares := []compose.ToolMiddleware{abortOnCtxCancel}
-	if gate != nil {
-		// Permission gate runs before the abort middleware so we don't
-		// race a cancellation against a pending user prompt — the gate's
-		// own ctx-aware select handles cancel correctly while waiting.
-		middlewares = append([]compose.ToolMiddleware{permissionMiddleware(gate)}, middlewares...)
-	}
-
-	adapter := NewAdapter(c, defaults).WithFinalUserAttachments(attachments)
-	a, err := react.NewAgent(ctx, &react.AgentConfig{
-		ToolCallingModel: adapter,
-		ToolsConfig: compose.ToolsNodeConfig{
-			Tools:               tools,
-			ToolCallMiddlewares: middlewares,
-		},
-		StreamToolCallChecker: streamHasToolCall,
-		MessageRewriter:       budgetRewriter(defaults.Model),
-	})
-	if err != nil {
-		return err
-	}
-
-	started := time.Now()
-	var firstToken time.Time
-	emitText := func(text string) {
-		if text == "" {
-			return
-		}
-		if firstToken.IsZero() {
-			firstToken = time.Now()
-		}
-		emit(StepEvent{Kind: StepText, Text: text})
-	}
-
-	// Mid-loop model turns (those that produce tool calls) stream their text
-	// through here so users see the model's reasoning before the tool cards.
-	// The final turn's text is delivered through the outer agent stream below;
-	// we suppress this handler's emission for it to avoid duplication.
-	//
-	// Drains synchronously so the StepText event is emitted before the
-	// downstream tool node fires its StepToolCall callbacks.
-	modelHandler := &cbtmpl.ModelCallbackHandler{
-		OnEndWithStreamOutput: func(ctx context.Context, info *callbacks.RunInfo, out *schema.StreamReader[*model.CallbackOutput]) context.Context {
-			defer out.Close()
-			var content strings.Builder
-			hasToolCalls := false
-			for {
-				chunk, rerr := out.Recv()
-				if errors.Is(rerr, io.EOF) {
-					break
-				}
-				if rerr != nil {
-					return ctx
-				}
-				if chunk == nil || chunk.Message == nil {
-					continue
-				}
-				if chunk.Message.Content != "" {
-					content.WriteString(chunk.Message.Content)
-				}
-				if len(chunk.Message.ToolCalls) > 0 {
-					hasToolCalls = true
-				}
-			}
-			if hasToolCalls {
-				emitText(content.String())
-			}
-			return ctx
-		},
-	}
-
-	toolHandler := &cbtmpl.ToolCallbackHandler{
-		OnStart: func(ctx context.Context, info *callbacks.RunInfo, in *tool.CallbackInput) context.Context {
-			args := ""
-			if in != nil {
-				args = in.ArgumentsInJSON
-			}
-			emit(StepEvent{Kind: StepToolCall, Name: info.Name, Arguments: args})
-			return ctx
-		},
-		OnEnd: func(ctx context.Context, info *callbacks.RunInfo, out *tool.CallbackOutput) context.Context {
-			result := ""
-			if out != nil {
-				result = out.Response
-			}
-			emit(StepEvent{Kind: StepToolResult, Name: info.Name, Result: result})
-			return ctx
-		},
-		// Streamable tools deliver their output as a stream of *tool.CallbackOutput
-		// chunks. Forward each chunk as a StepToolStream event for live UI
-		// rendering, then emit a single StepToolResult with the concatenated
-		// text so downstream merge logic (which pairs a tool_call with its
-		// final result) still functions identically to the non-streaming path.
-		OnEndWithStreamOutput: func(ctx context.Context, info *callbacks.RunInfo, out *schema.StreamReader[*tool.CallbackOutput]) context.Context {
-			defer out.Close()
-			var acc strings.Builder
-			for {
-				chunk, rerr := out.Recv()
-				if errors.Is(rerr, io.EOF) {
-					break
-				}
-				if rerr != nil {
-					emit(StepEvent{Kind: StepToolResult, Name: info.Name, Result: rerr.Error(), IsError: true})
-					return ctx
-				}
-				if chunk == nil || chunk.Response == "" {
-					continue
-				}
-				acc.WriteString(chunk.Response)
-				emit(StepEvent{Kind: StepToolStream, Name: info.Name, Text: chunk.Response})
-			}
-			emit(StepEvent{Kind: StepToolResult, Name: info.Name, Result: acc.String()})
-			return ctx
-		},
-		OnError: func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
-			msg := ""
-			if err != nil {
-				msg = err.Error()
-			}
-			emit(StepEvent{Kind: StepToolResult, Name: info.Name, Result: msg, IsError: true})
-			return ctx
-		},
-	}
-	cb := react.BuildAgentCallback(modelHandler, toolHandler)
-
-	usage := margo.Usage{}
-
-	reader, err := a.Stream(ctx, input, flowagent.WithComposeOptions(compose.WithCallbacks(cb)))
-	if err != nil {
-		return err
-	}
-	defer reader.Close()
-	for {
-		chunk, rerr := reader.Recv()
-		if errors.Is(rerr, io.EOF) {
-			break
-		}
-		if rerr != nil {
-			emit(StepEvent{Kind: StepError, Text: rerr.Error()})
-			return rerr
-		}
-		if chunk == nil {
-			continue
-		}
-		if chunk.Content != "" {
-			emitText(chunk.Content)
-		}
-		if chunk.ResponseMeta != nil && chunk.ResponseMeta.Usage != nil {
-			u := chunk.ResponseMeta.Usage
-			usage.InputTokens = u.PromptTokens
-			usage.OutputTokens = u.CompletionTokens
-		}
-	}
-
-	now := time.Now()
-	usage.TotalMs = now.Sub(started).Milliseconds()
-	if !firstToken.IsZero() {
-		usage.FirstTokenMs = firstToken.Sub(started).Milliseconds()
-	}
-	u := usage
-	emit(StepEvent{Kind: StepDone, Usage: &u})
-	return nil
+	return ReactRunner{}.Run(ctx, c, defaults, tools, input, attachments, gate, emit)
 }

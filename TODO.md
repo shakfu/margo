@@ -400,109 +400,244 @@ sending — keeps typos out of the model. Slash autocomplete combobox
 fires on the leading `/` (Melt UI combobox, same affordance as
 elsewhere in the app).
 
-### 9.1 Runner interface (Go)
+### 9.1 Runner interface (Go) — **done**
 
-Refactor `pkg/margo/agent` so `StreamReact` becomes one implementation
-of a new `Runner` interface:
+Shipped (see CHANGELOG). `pkg/margo/agent/runner.go` defines the
+`Runner` interface, `ReactRunner` (wraps `StreamReact` unchanged),
+and the registry (`RegisterRunner` / `LookupRunner` /
+`AvailableRunners` / `RunByType`). `app.go::StreamAgent` dispatches
+via `RunByType(ctx, RunnerReact, …)`. `StreamReact` stays as the
+canonical implementation so existing call sites and tests work
+unchanged. Future runners (§9.5 plan-execute, §9.6 workflow)
+register a factory at init() and become reachable by name.
 
-```go
-type Runner interface {
-    Run(ctx context.Context, c margo.Client, defaults margo.Request,
-        tools []tool.BaseTool, input []*schema.Message,
-        attachments []margo.Part, gate PermissionGate,
-        emit func(StepEvent)) error
-}
-```
+### 9.2 Slash parser + autocomplete (frontend) — **done**
 
-Existing `StreamReact` is renamed (or kept as a thin wrapper around)
-`ReactRunner`. `StreamAgent` in `app.go` dispatches by runner type
-("react" | "plan" | "workflow") to the appropriate Runner. The
-ctx-stashed step emitter from §6.6.A polish stays — no change to the
-event protocol.
+Shipped (see CHANGELOG). `frontend/src/lib/slash.ts` exposes
+`parseSlash`, `slugify`, and the `SLASH_COMMANDS` catalog;
+`App.svelte::send()` dispatches on the parse result; Wails
+`StreamAgent` carries `runnerType` through to `agent.RunByType`.
+A simple autocomplete dropdown above the composer renders
+matching `SLASH_COMMANDS` while the user is typing `/`.
 
-Coverage: rename existing `stream_test.go` cases to address the
-`Runner` interface; behavior unchanged for the ReAct path.
+Follow-ups when demand surfaces:
 
-### 9.2 Slash parser + autocomplete (frontend)
+- **Wire a frontend test runner.** Today's `slash.test.ts` is
+  hand-runnable via `npx tsx`; adding `vitest` to `frontend/`
+  (≈5 lines in `package.json`) would let it run as part of CI.
+  Deferred because it's a meta-decision affecting every future
+  frontend slice and worth choosing deliberately.
+- **Keyboard navigation in the autocomplete.** Arrow keys +
+  Tab/Enter to insert the focused suggestion. Today the
+  dropdown is click-to-insert only; the click target is large
+  but keyboard-only users have to type the full command.
+- **Argument suggestions for `/agent-<type>`.** Today only
+  `/persona` gets argument suggestions (persona slugs); the
+  runner-type completion for `/agent-` could list
+  `AvailableRunners()` from §9.1's Go registry via a new Wails
+  binding.
+- **Role-picker dropdown retirement.** Lives on alongside slash
+  commands today so users can discover roles by clicking.
+  Removal lands with §9.4 (Retire bundled Agent records) since
+  it's the same UI surface.
 
-Pure frontend slice. New `lib/slash.ts` exporting `parseSlash(input)`
-returning `{ command: string; args: string; task: string } | null`.
-`send()` calls it before submitting:
+### 9.3 Tools tab + per-workspace tool enablement — **done**
 
-- `/persona <slug>` → write `Chat.personaId`, do NOT send a turn.
-- `/persona` alone → clear `Chat.personaId`, do NOT send a turn.
-- `/agent[-type] <task>` → call `StreamAgent` with the resolved
-  runner type and the task as the user message.
-- Unknown command → inline error banner; do not send.
+Shipped (see CHANGELOG). New `App.ToolsMetadata` Wails method
+exposes name / description / read-only / streamable per tool;
+`Workspace.enabledTools?: string[]` carries the per-workspace
+filter (undefined = all enabled); `SettingsPanel` (workspace
+mode) grows a Tools section with toggles. `send()` applies a
+two-stage filter: `agent.tools ∩ availableTools`, then
+`∩ enabledTools` if defined.
 
-Slash autocomplete component: triggered when the composer's first
-character becomes `/`. Lists known commands + dynamic completions
-(persona slugs after `/persona `, agent runner types after `/agent`).
-Reuse the Melt UI combobox pattern from the role picker that this
-slice retires.
+Follow-ups when demand surfaces:
 
-Composer placeholder gains a hint: "Send a message… or `/` for
-commands."
+- **Registered-status greying.** The TODO entry asked for a
+  greyed "not on PATH" indicator (e.g. quarto_render when
+  `quarto` is missing). Today `builtinTools` only registers a
+  tool when its host binary is present, so unregistered tools
+  never appear in `ToolsMetadata` at all — the greying is
+  unnecessary. Reopen if a future tool registers conditionally
+  but should still surface as a discoverability hint.
+- **Bulk enable / disable.** A "Disable all" / "Enable all"
+  pair would be useful once workspaces routinely run a sub-set
+  of tools. Defer until users actually narrow the palette in
+  practice.
 
-Coverage: unit tests for `parseSlash` covering each command, the
-"recognised command word" disambiguation rule, and unknown-command
-handling.
+### 9.4 Retire bundled Agent records — **done** (Option A)
 
-### 9.3 Tools tab + per-workspace tool enablement
+Shipped (see CHANGELOG). Decision: **Option A — retire entirely**.
+Built-ins migrated to `BUILTIN_PERSONAS` with tool-pairing hints in
+their system prompts; user-created agents migrated to personas at
+load time (id preserved; tool allowlist surfaced as a hint).
+`Chat.agentId` rewritten to `Chat.personaId` per-chat. Role picker
+loses the Agents optgroup; Settings tab renamed to "Roles". Legacy
+type declarations (`Agent`, `Settings.agents`, `Chat.agentId`) kept
+declared so legacy localStorage deserialises cleanly; removal
+follow-up below.
 
-New Tools tab in the right sidebar. Read-only catalog of every
-registered tool with: name, description, read-only flag, streamable
-flag, registered-status (greyed if the host binary isn't on PATH).
-Each row gains an enable/disable toggle.
+Follow-ups when demand surfaces:
 
-New `Workspace.enabledTools: string[]` (default: every tool the host
-supports, so behaviour for existing users is unchanged on upgrade).
-`StreamAgent` resolves the tool palette as `enabledTools ∩
-App.Tools()` — the same intersection logic today's Agent record
-performs, just sourced from the workspace instead of an agent
-bundle.
+- **Type cleanup.** After the migration has flushed real-world data
+  (i.e. every active install has booted at least once on a
+  post-§9.4 build), the `Agent` interface, `Settings.agents` field,
+  `Chat.agentId` field, and unused store helpers (`setChatAgent`,
+  `findAgent`, `visibleAgents`, `agentMissingTools`,
+  `upsertAgent`, `deleteAgent`, `duplicateAgent`) can be deleted.
+  Holding them now buys deserialisation safety at the cost of a
+  bit of dead code.
+- **Presets (Option B), if requested.** If users miss the one-click
+  bundling, reintroduce as a UX-only shortcut: clicking a Preset
+  sets the chat's persona AND writes a workspace-level enabledTools
+  list. No runtime status, no new Wails surface — pure store
+  mutation. Deferred unless asked.
 
-Coverage: snapshot test for default enabled set; integration test
-that disabling a tool removes it from `StreamAgent`'s effective
-palette.
+### 9.4b Adopt Eino ADK as the runner substrate — **done**
 
-### 9.4 Retire bundled Agent records
+Shipped (see CHANGELOG). ReactRunner now runs on
+`adk.ChatModelAgent` + `adk.Runner`; `StreamReact` is a thin
+compat wrapper. Permission middleware plugged into
+`adk.ToolsConfig` unchanged (same `compose.ToolMiddleware` shape);
+budget rewriter migrated to `adk.AgentMiddleware.BeforeChatModel`.
+Legacy hand-rolled callback handlers, `streamHasToolCall`, and the
+mid-loop streaming workaround retired — ADK's `ChatModelAgent`
+handles them natively. Existing tests pass without modification
+on the new substrate.
 
-`Chat.agentId` and the `Settings.agents` library exist today because
-agents bundled persona + tool allowlist. With §9.1–9.3 the bundle is
-unnecessary — picking an agent is just picking a runner, which lives
-on the slash command. Built-in records ("Quarto Author",
-"Time-aware") need a migration path:
+Follow-up when demand surfaces:
 
-- **Option A: retire entirely.** Built-ins become **Personas** with
-  system prompts that mention which tools to enable
-  ("Quarto Author — use with `quarto_render` enabled."). Simpler;
-  trades one-click activation for two-step (pick persona + enable
-  tool). User-created Agents migrate similarly.
-- **Option B: reframe as Presets.** A new sidebar entry where one
-  click sets persona + enables a tool set. Preserves the bundling
-  value without giving it special runtime status.
+- **§9.4b.4 devops integration.** `eino-ext/devops.Init(ctx)`
+  exposes a Mermaid + step-debug UI for compiled agents. Pulls in
+  `chromedp` (heavy dep) — gate behind a build tag if adopted.
+  Useful once §9.5 / §9.6 / §8.3 land and you want to inspect
+  the runtime graph.
 
-Decision deferred until §9.1–9.3 ship and we can see whether the
-slash-command speed is enough compensation for the lost bundling.
-Whichever wins, `Chat.agentId` is retired; the legacy `agentMode`
-shim in `send()` goes with it.
+#### Original scoping notes
 
-### 9.5 Plan-execute runner
+Substrate migration before §9.5 / §9.6 / §8.3. Eino's Agent
+Development Kit (`cloudwego/eino/adk`) ships the exact agent shapes
+the rest of §9 needs as prebuilt components, plus several
+infrastructure features we've been hand-rolling (resume /
+checkpoint, scoped state, unified callback handlers, agent
+middleware). Adopting it *now* replaces a §9.5 / §9.6 / §8.3
+implementation budget of "build the loop from compose.Graph
+primitives" with "wire the prebuilt constructor to our slash
+command."
 
-Implement the `Runner` interface for plan-then-execute (collapses
-existing TODO #6.5). Planner node emits a structured task list,
-worker executes each step, reducer summarises. Wired through
-`/agent-plan <task>`. See `docs/dev/agents_and_tools.md` Pattern 2
-for the Eino `compose.Graph` scaffold.
+What ADK provides that we'd otherwise build:
 
-### 9.6 Workflow runner
+- **`adk.Agent` interface** — uniform abstraction with an
+  `AsyncIterator[*AgentEvent]` output stream. Replaces ad-hoc
+  step-event channels.
+- **`adk.ChatModelAgent`** — the kit-level ReAct equivalent.
+  Configured with name, description, instruction, model, tools.
+  Drop-in replacement for our current `react.NewAgent` usage.
+- **`adk.Runner`** — top-level executor with `Query` / `Run` /
+  `Resume` and a first-party `CheckPointStore` for pausing /
+  resuming runs (the substrate human-in-the-loop §6.4-style
+  flows want).
+- **Built-in compositions** — `NewSequentialAgent` (§9.6 in
+  one constructor), `NewLoopAgent`, `NewParallelAgent`,
+  `AgentWithDeterministicTransferTo` (deterministic sub-agent
+  routing).
+- **`prebuilt/planexecute`** — `planexecute.New(ctx,
+  &planexecute.Config{Planner, Executor, Replanner,
+  MaxIterations})`. §9.5 becomes a thin wrapper. The
+  `Replanner` slot gives the "execute → re-plan → execute"
+  loop that custom-built plan-execute wouldn't get for free.
+- **`prebuilt/supervisor`** — multi-agent host with **unified
+  tracing** (entire supervisor structure shares a single trace
+  root). §8.3's "host" composition flavor.
+- **`prebuilt/deep`** — deeper task orchestration with TODO
+  session keys; future option for richer workflows.
+- **`adk.AgentMiddleware`** — kit-level middleware analog to our
+  current `compose.ToolMiddleware`. Permission gate (§6.10)
+  migrates to this.
+- **`adk.HistoryRewriter`** — what `pkg/margo/agent/budget.go`
+  is, expressed at the kit interface. Budget code keeps its
+  algorithm; just registers via this hook instead of
+  `react.AgentConfig.MessageRewriter`.
+- **`SessionValue` / `RunLocalValue`** — scoped state without
+  hand-rolling context maps. Useful for the per-run
+  search_knowledge indexer plumbing (§6.6.A) and future
+  per-session state.
 
-Hand-authored sequential pipeline runner: each step is a model call
-(optionally with tools) whose output feeds the next. Useful for
-fixed multi-stage transforms ("draft → fact-check → tighten"). Wired
-through `/agent-workflow <task>`. Mostly collapses into §8.3's
-pipeline composition flavor.
+Non-trivial reframing this slice forces:
+
+- **Public Runner interface stays** (`agent.Runner` from §9.1)
+  as the margo-side facing type, but its `Run` body delegates
+  to `adk.Runner.Run` and bridges `AgentEvent` →
+  `StepEvent`. Shields callers from ADK API churn and leaves
+  room for non-ADK runners later.
+- **`StepEvent` stays** as the Wails-facing event shape — the
+  frontend already consumes it. The translation layer becomes:
+  `adk.AgentEvent` → `agent.StepEvent` → `app.AgentStepEvent`.
+- **`StreamReact` becomes a thin wrapper** around an
+  ADK-backed `ReactRunner`. Workarounds for eino-internal
+  quirks (custom `StreamToolCallChecker`, mid-loop text
+  streaming via `ModelCallbackHandler.OnEndWithStreamOutput`)
+  retire if ADK handles them natively; verify per-case during
+  the slice and only delete after the existing
+  `stream_test.go` cases pass through the new path.
+- **Permission middleware** (`agent/permission.go`) and the
+  permission-prompt UI surface stay, but the gate moves from
+  `compose.ToolMiddleware` to `adk.AgentMiddleware`.
+  Behavioural contract — prompts only for non-read-only tools,
+  Always-approve list persists — unchanged.
+
+#### 9.4b.1 Adapter + ChatModelAgent bridge
+
+Stand up an ADK-backed `ReactRunner` next to (not replacing)
+the existing one, behind a feature flag. Verify
+`agent.Adapter` plugs into `ChatModelAgent.Model` cleanly.
+Implement the `AgentEvent → StepEvent` translation. Run every
+existing `stream_test.go` case through both paths to confirm
+behavioural parity; especially the mid-loop streaming + claude-
+preamble-with-tool-call cases that today hinge on our custom
+hooks.
+
+#### 9.4b.2 Middleware migration
+
+Move the permission gate from `compose.ToolMiddleware` to
+`adk.AgentMiddleware`. Move budget rewriting from
+`react.AgentConfig.MessageRewriter` to `adk.HistoryRewriter`.
+Behavioural tests (`permission_test.go`, `budget_test.go`)
+should pass without modification — they exercise the algorithm,
+not the wiring.
+
+#### 9.4b.3 Swap default + clean up
+
+Flip the default `RunnerReact` factory to the ADK-backed
+implementation. Delete the now-unused custom callback handlers,
+custom `StreamToolCallChecker`, and any mid-loop streaming
+plumbing that ADK supersedes. Keep `StreamReact` exported as a
+thin wrapper so external callers (cmd/, tests) keep working.
+
+#### 9.4b.4 Devops integration (optional follow-up)
+
+`eino-ext/devops.Init(ctx)` starts an in-process HTTP server
+that exposes a visualisation + debug UI for compiled graphs.
+Pulls in `chromedp` (heavy dep) for the Mermaid renderer. Worth
+gating behind a build tag (`-tags=devops`) so the standard
+build stays lean; useful for development sessions on the
+plan-execute and supervisor agents that follow.
+
+### 9.5 Plan-execute runner — **done**
+
+Shipped (see CHANGELOG). `pkg/margo/agent/plan_runner.go` wraps
+`adk/prebuilt/planexecute.New` with planner / executor / replanner
+sub-agents sharing the margo Adapter. Registered as `RunnerPlan`;
+backs `/agent-plan <task>`. Collapses §6.5.
+
+### 9.6 Workflow runner — **done**
+
+Shipped (see CHANGELOG). `pkg/margo/agent/workflow_runner.go`
+wraps `adk.NewSequentialAgent` with a hard-coded drafter →
+critic → refiner pipeline. Registered as `RunnerWorkflow`;
+backs `/agent-workflow <task>`. §8.3 will re-point this at a
+user-configurable sub-agent chain without changing the
+runner's assembly shape.
 
 ### Sequenced rollout
 
@@ -514,8 +649,11 @@ pipeline composition flavor.
    legacy "all tools always available" assumption.
 4. **§9.4** — Retire bundled Agent records; decide A vs B. Drop the
    dropdown picker.
-5. **§9.5 / §9.6** — Add runners as they're needed; each is an
-   independent slice.
+5. **§9.4b** — Adopt ADK as the runner substrate. Behavioural
+   parity for the ReAct path; unlocks shrunk §9.5 / §9.6 /
+   §8.3 surfaces.
+6. **§9.5 / §9.6** — Add runners as prebuilt-constructor wrappers.
+   Each is an independent slice on top of the ADK substrate.
 
 ### Tradeoffs to revisit during 9.4
 
@@ -530,3 +668,32 @@ pipeline composition flavor.
   fits the rest of the workspace settings model and is the default.
   Per-chat is more granular but adds setup-per-chat friction; defer
   unless requested.
+
+### Tradeoffs to revisit during 9.4b
+
+- **ADK API stability.** TODO §6.13 originally flagged ADK as
+  "younger and may shift". The size of the prebuilt catalog
+  (`planexecute`, `supervisor`, `deep`) and the examples repo
+  suggest it has stabilised, but pin the eino version and
+  check the upstream CHANGELOG before committing. A breaking
+  change after we delete the hand-rolled scaffolding has
+  asymmetric cost.
+- **Cancellation semantics.** Our `abortOnCtxCancel`
+  middleware races slow tool calls against ctx.Done. ADK has
+  its own `compose.WithGraphInterrupt` + `InterruptCtx` flow.
+  Verify a `cancel()` from the UI mid-tool still returns
+  promptly under the new substrate — `TestStreamReactCancelMidTool`
+  is the existing guard; needs to pass through the ADK path
+  before §9.4b.3 flips the default.
+- **Event-shape contract.** `adk.AgentEvent` carries fields
+  ours doesn't (e.g. transfer events between sub-agents) and
+  vice versa. The translation layer must be exhaustive: any
+  AgentEvent type we don't translate becomes a silent drop.
+  Add a default branch in the translator that logs and surfaces
+  an explicit "unhandled event kind" rather than failing
+  quiet.
+- **Dep weight.** ADK is already pulled in via the
+  `eino@v0.8.13` dep (the import path is just a subdirectory).
+  Adoption doesn't grow the binary. The `eino-ext/devops`
+  optional add-on (chromedp) is the only new heavy dep — gate
+  it behind a build tag.

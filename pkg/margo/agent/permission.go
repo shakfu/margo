@@ -87,4 +87,3 @@ func permissionMiddleware(gate PermissionGate) compose.ToolMiddleware {
 		},
 	}
 }
-

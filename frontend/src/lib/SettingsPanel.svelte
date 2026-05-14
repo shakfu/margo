@@ -4,13 +4,13 @@
     effectiveSettings,
     setEffectiveOverride,
     upsertPersona, deletePersona, duplicatePersona,
-    upsertAgent, deleteAgent, duplicateAgent, agentMissingTools,
+    setWorkspaceToolEnabled, isToolEnabledForWorkspace,
     DEFAULT_WORKSPACE_ID, activeWorkspace,
-    type Persona, type Agent, type Workspace, type WorkspaceOverrides,
+    type Persona, type Workspace, type WorkspaceOverrides,
   } from './store';
   import { setHighlightTheme } from './markdown';
   import { createSelect, createCollapsible, createDialog, createTabs, melt } from '@melt-ui/svelte';
-  import { OpenPath, IndexPath, KnowledgeSources, DeleteKnowledgeSource, PickKnowledgePath } from '../../wailsjs/go/main/App.js';
+  import { OpenPath, IndexPath, KnowledgeSources, DeleteKnowledgeSource, PickKnowledgePath, ToolsMetadata } from '../../wailsjs/go/main/App.js';
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
 
@@ -18,7 +18,6 @@
   export let models: string[] = [];
   export let busy: boolean = false;
   export let outputDir: string = '';
-  export let availableTools: string[] = [];
   export let onReset: () => void = () => {};
   // mode controls which scope this panel reads/writes:
   //   - 'workspace' (right sidebar): inputs read from effectiveSettings
@@ -176,6 +175,34 @@
     states: { open: kbOpen }
   } = mkSection(false);
 
+  // Tools tab — per-workspace tool enablement (TODO §9.3).
+  const {
+    elements: { root: toolsRoot, trigger: toolsTrig, content: toolsContent },
+    states: { open: toolsOpen }
+  } = mkSection(false);
+
+  type ToolMeta = { name: string; description: string; isReadOnly: boolean; isStreamable: boolean };
+  let toolsCatalog: ToolMeta[] = [];
+  async function refreshToolsCatalog() {
+    if (mode !== 'workspace') return;
+    try {
+      toolsCatalog = (await ToolsMetadata()) as ToolMeta[];
+    } catch (_) {
+      toolsCatalog = [];
+    }
+  }
+  onMount(refreshToolsCatalog);
+
+  function onToolToggle(name: string, ev: Event) {
+    const checked = (ev.currentTarget as HTMLInputElement).checked;
+    setWorkspaceToolEnabled(
+      $settings.activeWorkspaceId,
+      name,
+      checked,
+      toolsCatalog.map(t => t.name),
+    );
+  }
+
   type KSource = { path: string; isDir: boolean; fileCount: number; chunkCount: number; indexedAt: string };
   let kbSources: KSource[] = [];
   let kbBusy = false;
@@ -253,12 +280,6 @@
     const v = (ev.currentTarget as HTMLSelectElement).value;
     editing = { ...editing, workspaceId: v || undefined };
   }
-  function onAgentScopeChange(ev: Event) {
-    if (!editingAgent) return;
-    const v = (ev.currentTarget as HTMLSelectElement).value;
-    editingAgent = { ...editingAgent, workspaceId: v || undefined };
-  }
-
   // scopeLabel renders the human name of a persona/agent's workspace
   // scope ("Global" for unscoped). Used in the list and the editor's
   // Scope selector. (7.1.b)
@@ -325,66 +346,10 @@
     persDlgOpen.set(false);
   }
 
-  // Agent management — same shape as personas but with a tool allowlist.
-  const {
-    elements: { root: agtsRoot, trigger: agtsTrig, content: agtsContent },
-    states: { open: agtsOpen }
-  } = mkSection(false);
-
-  const {
-    elements: { overlay: agtDlgOverlay, content: agtDlgContent, title: agtDlgTitle, close: agtDlgClose, portalled: agtDlgPortalled },
-    states: { open: agtDlgOpen },
-  } = createDialog({ role: 'dialog' });
-
-  let editingAgent: Agent | null = null;
-
-  function openCreateAgent() {
-    editingAgent = {
-      id: crypto.randomUUID(),
-      name: '',
-      description: '',
-      systemPrompt: '',
-      tools: [],
-      builtin: false,
-      workspaceId: $settings.activeWorkspaceId,
-    };
-    agtDlgOpen.set(true);
-  }
-  function openEditAgent(a: Agent) {
-    if (a.builtin) return;
-    editingAgent = { ...a, tools: [...a.tools] };
-    agtDlgOpen.set(true);
-  }
-  function openDuplicateAgent(a: Agent) {
-    const newId = duplicateAgent(a.id);
-    if (!newId) return;
-    const fresh = get(settings).agents.find(x => x.id === newId);
-    if (fresh) openEditAgent(fresh);
-  }
-  function toggleAgentTool(name: string) {
-    if (!editingAgent) return;
-    const has = editingAgent.tools.includes(name);
-    editingAgent = {
-      ...editingAgent,
-      tools: has ? editingAgent.tools.filter(t => t !== name) : [...editingAgent.tools, name],
-    };
-  }
-  function commitAgent() {
-    if (!editingAgent) return;
-    if (!editingAgent.name.trim() || !editingAgent.systemPrompt.trim() || editingAgent.tools.length === 0) return;
-    upsertAgent(editingAgent);
-    editingAgent = null;
-    agtDlgOpen.set(false);
-  }
-  function cancelAgent() {
-    editingAgent = null;
-    agtDlgOpen.set(false);
-  }
-
   // Top-level tabs grouping the sections by what they actually affect.
-  // "models"  — provider, model, sampling, thinking (model selection + params).
-  // "agents"  — agent / tool-related settings (trusted tools today).
-  // "general" — everything else: system prompt, appearance, output, reset.
+  // "models" — provider, model, sampling, thinking (model selection + params).
+  // "roles"  — personas, tools, knowledge sources, trusted tools.
+  // "general" — everything else: appearance, output, reset.
   const {
     elements: { root: tabsRoot, list: tabsList, trigger: tabsTrigger, content: tabsContent },
   } = createTabs({ defaultValue: 'models' });
@@ -428,7 +393,7 @@
   <div class="px-3.5 pt-3.5 pb-2 font-semibold text-[0.9rem]">Settings</div>
   <div use:melt={$tabsList} class="flex border-b border-border px-2 gap-0.5" aria-label="Settings tabs">
     <button class="tab-trigger" use:melt={$tabsTrigger('models')}>Models</button>
-    <button class="tab-trigger" use:melt={$tabsTrigger('agents')}>Agents</button>
+    <button class="tab-trigger" use:melt={$tabsTrigger('agents')}>Roles</button>
     {#if mode === 'global'}
       <!-- General tab carries Appearance / Output / Reset, all
            global-only. Hidden in workspace mode (right sidebar)
@@ -642,7 +607,7 @@
 
   </div>
 
-  <!-- Agents tab -->
+  <!-- Roles tab -->
   <div use:melt={$tabsContent('agents')}>
 
   {#if mode === 'workspace'}
@@ -687,55 +652,6 @@
     </div>
   </section>
 
-  <!-- Agents (workspace-scoped; same gating as Personas). -->
-  <section class="border-b border-border" use:melt={$agtsRoot}>
-    <button class="section-head" use:melt={$agtsTrig}>
-      <span class="caret">{$agtsOpen ? '▾' : '▸'}</span>
-      <span>Agents</span>
-      <span class="ml-1 text-fg-faint text-[0.72rem]">({$settings.agents.length})</span>
-    </button>
-    <div use:melt={$agtsContent} class="section-body">
-      <p class="text-[0.78rem] text-fg-muted leading-snug mb-2">
-        Personas with a tool allowlist. Picking one in the chat header runs the next message through the agent loop with only those tools available.
-      </p>
-      <ul class="flex flex-col gap-1 mb-2">
-        {#each $settings.agents as a (a.id)}
-          {@const missing = agentMissingTools(a, availableTools)}
-          <li class="flex items-start gap-2 text-[0.78rem] bg-input-bg border border-border rounded px-2 py-1.5">
-            <div class="flex-1 min-w-0">
-              <div class="font-semibold text-fg flex items-center gap-1 flex-wrap">
-                <span>{a.name}</span>
-                <span class="text-fg-faint text-[0.65rem] font-[family-name:var(--font-mono)]">[{a.tools.length}]</span>
-                {#if a.builtin}<span class="text-fg-faint text-[0.65rem] uppercase tracking-wider">builtin</span>{/if}
-                <span class="text-fg-faint text-[0.65rem] uppercase tracking-wider">{scopeLabel(a.workspaceId, $settings.workspaces)}</span>
-                {#if missing.length > 0}
-                  <span class="text-error-fg text-[0.65rem] uppercase tracking-wider">needs {missing.join(', ')}</span>
-                {/if}
-              </div>
-              {#if a.description}
-                <div class="text-fg-faint text-[0.7rem] leading-snug mt-0.5">{a.description}</div>
-              {/if}
-              <div class="text-fg-faint text-[0.7rem] font-[family-name:var(--font-mono)] mt-0.5">
-                tools: {a.tools.join(', ')}
-              </div>
-            </div>
-            <div class="flex flex-col gap-1 shrink-0">
-              {#if a.builtin}
-                <button class="mini-btn" on:click={() => openDuplicateAgent(a)}>Duplicate</button>
-              {:else}
-                <button class="mini-btn" on:click={() => openEditAgent(a)}>Edit</button>
-                <button class="mini-btn" on:click={() => deleteAgent(a.id)}>Delete</button>
-              {/if}
-            </div>
-          </li>
-        {/each}
-      </ul>
-      <button class="mini-btn" on:click={openCreateAgent} disabled={availableTools.length === 0}>+ New agent</button>
-      {#if availableTools.length === 0}
-        <div class="text-[0.7rem] text-fg-faint mt-1">No tools registered. New agents need at least one tool.</div>
-      {/if}
-    </div>
-  </section>
   {/if}
 
   {#if mode === 'workspace'}
@@ -780,6 +696,49 @@
       {#if kbBusy}<div class="text-[0.7rem] text-fg-faint mt-1 italic">indexing…</div>{/if}
       {#if kbStatus && !kbBusy}<div class="text-[0.7rem] text-fg-muted mt-1 break-words">{kbStatus}</div>{/if}
       {#if kbError}<div class="text-[0.7rem] text-error-fg mt-1 break-words">{kbError}</div>{/if}
+    </div>
+  </section>
+
+  <!-- Tools — read-only catalog + per-workspace enable toggles
+       (§9.3). The enabled set narrows which tools the agent runner
+       (ReAct today; plan/workflow in §9.5–§9.6) can call. -->
+  <section class="border-b border-border" use:melt={$toolsRoot}>
+    <button class="section-head" use:melt={$toolsTrig}>
+      <span class="caret">{$toolsOpen ? '▾' : '▸'}</span>
+      <span>Tools</span>
+      <span class="ml-1 text-fg-faint text-[0.72rem]">({toolsCatalog.length})</span>
+    </button>
+    <div use:melt={$toolsContent} class="section-body">
+      <p class="text-[0.78rem] text-fg-muted leading-snug mb-2">
+        Tools available to the agent runner in this workspace. Unchecking a tool removes it from the palette for new agent runs without unregistering it elsewhere.
+      </p>
+      {#if toolsCatalog.length === 0}
+        <div class="text-[0.78rem] text-fg-faint italic">No tools registered.</div>
+      {:else}
+        <ul class="flex flex-col gap-1">
+          {#each toolsCatalog as t (t.name)}
+            <li class="flex items-start gap-2 text-[0.78rem] bg-input-bg border border-border rounded px-2 py-1.5">
+              <input
+                type="checkbox"
+                class="mt-0.5"
+                checked={isToolEnabledForWorkspace($activeWorkspace, t.name)}
+                on:change={(ev) => onToolToggle(t.name, ev)}
+                aria-label={`Enable ${t.name}`}
+              />
+              <div class="flex-1 min-w-0">
+                <div class="font-[family-name:var(--font-mono)] text-fg flex items-center gap-1 flex-wrap">
+                  <span>{t.name}</span>
+                  {#if t.isReadOnly}<span class="text-fg-faint text-[0.62rem] uppercase tracking-wider">read-only</span>{/if}
+                  {#if t.isStreamable}<span class="text-fg-faint text-[0.62rem] uppercase tracking-wider">streamable</span>{/if}
+                </div>
+                {#if t.description}
+                  <div class="text-fg-faint text-[0.7rem] leading-snug mt-0.5">{t.description}</div>
+                {/if}
+              </div>
+            </li>
+          {/each}
+        </ul>
+      {/if}
     </div>
   </section>
   {/if}
@@ -950,80 +909,6 @@
           class="px-3 py-1.5 text-[0.85rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg font-semibold"
           on:click={commitEdit}
           disabled={!editing.name.trim() || !editing.systemPrompt.trim()}
-        >Save</button>
-      </div>
-    </div>
-  {/if}
-</div>
-
-<div use:melt={$agtDlgPortalled}>
-  {#if $agtDlgOpen && editingAgent}
-    <div use:melt={$agtDlgOverlay} class="fixed inset-0 z-40 bg-black/40"></div>
-    <div
-      use:melt={$agtDlgContent}
-      class="fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 w-[min(34rem,92vw)] max-h-[90vh] overflow-y-auto rounded-md border border-border bg-bg-elev p-4 shadow-xl"
-    >
-      <h2 use:melt={$agtDlgTitle} class="text-[0.95rem] font-semibold text-fg">
-        {$settings.agents.some(a => a.id === editingAgent?.id) ? 'Edit agent' : 'New agent'}
-      </h2>
-      <div class="mt-3 flex flex-col gap-2.5">
-        <label class="flex flex-col gap-1 text-[0.78rem] text-fg-muted">
-          <span>Name</span>
-          <input type="text" class="text-input" bind:value={editingAgent.name} placeholder="e.g. Quarto Author" />
-        </label>
-        <label class="flex flex-col gap-1 text-[0.78rem] text-fg-muted">
-          <span>Description (optional)</span>
-          <input type="text" class="text-input" bind:value={editingAgent.description} placeholder="Shown as the picker subtitle" />
-        </label>
-        <label class="flex flex-col gap-1 text-[0.78rem] text-fg-muted">
-          <span>System prompt</span>
-          <textarea class="text-input" rows="6" bind:value={editingAgent.systemPrompt}
-            placeholder="What this agent does. Mention the tools by name so the model knows when to call them."
-          ></textarea>
-        </label>
-        <div class="flex flex-col gap-1 text-[0.78rem] text-fg-muted">
-          <span>Tools (allowlist — at least one required)</span>
-          {#if availableTools.length === 0}
-            <div class="text-fg-faint italic">No tools available.</div>
-          {:else}
-            <div class="flex flex-col gap-1 bg-input-bg border border-border rounded px-2 py-1.5">
-              {#each availableTools as tool (tool)}
-                <label class="flex items-center gap-2 text-[0.78rem] text-fg cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={editingAgent.tools.includes(tool)}
-                    on:change={() => toggleAgentTool(tool)}
-                  />
-                  <span class="font-[family-name:var(--font-mono)]">{tool}</span>
-                </label>
-              {/each}
-            </div>
-          {/if}
-        </div>
-        <label class="flex flex-col gap-1 text-[0.78rem] text-fg-muted">
-          <span>Scope</span>
-          <select
-            class="text-input"
-            value={editingAgent.workspaceId ?? ''}
-            on:change={onAgentScopeChange}
-          >
-            <option value="">Global (visible in all workspaces)</option>
-            {#each $settings.workspaces as w (w.id)}
-              <option value={w.id}>{w.name}</option>
-            {/each}
-          </select>
-        </label>
-      </div>
-      <div class="mt-4 flex justify-end gap-2">
-        <button
-          use:melt={$agtDlgClose}
-          class="px-3 py-1.5 text-[0.85rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg"
-          on:click={cancelAgent}
-        >Cancel</button>
-        <button
-          class="px-3 py-1.5 text-[0.85rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg font-semibold"
-          on:click={commitAgent}
-          disabled={!editingAgent.name.trim() || !editingAgent.systemPrompt.trim() || editingAgent.tools.length === 0}
         >Save</button>
       </div>
     </div>

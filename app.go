@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -52,9 +53,9 @@ type App struct {
 	// frontend via SetActiveWorkspace so the search_knowledge tool — a
 	// zero-arg constructor at registration time — can resolve which
 	// collection to query at run time.
-	ragMu              sync.Mutex
-	ragIndexers        map[string]*rag.Indexer
-	activeWorkspaceID  string
+	ragMu             sync.Mutex
+	ragIndexers       map[string]*rag.Indexer
+	activeWorkspaceID string
 }
 
 func NewApp() *App {
@@ -434,6 +435,45 @@ func (a *App) Tools() []string {
 	for name := range builtinTools {
 		out = append(out, name)
 	}
+	return out
+}
+
+// ToolMetadata is the descriptive payload the frontend Tools tab
+// (TODO §9.3) reads to render the read-only tool catalog: the
+// model-facing description, the read-only flag that gates the
+// permission middleware, and whether the underlying type
+// implements tool.StreamableTool so the UI can render the chunk
+// stream when the tool is invoked.
+type ToolMetadata struct {
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	IsReadOnly   bool   `json:"isReadOnly"`
+	IsStreamable bool   `json:"isStreamable"`
+}
+
+// ToolsMetadata returns one ToolMetadata per registered tool, sorted by
+// name for deterministic UI rendering. Each tool is constructed once
+// to read its Info() and type-asserted for tool.StreamableTool; the
+// `*App` argument is whatever per-run state the constructor closes
+// over (the search_knowledge tool's indexer, for example), but we
+// don't invoke the tool — only inspect it.
+func (a *App) ToolsMetadata() []ToolMetadata {
+	out := make([]ToolMetadata, 0, len(builtinTools))
+	for name, ctor := range builtinTools {
+		t := ctor(a)
+		desc := ""
+		if info, err := t.Info(a.ctx); err == nil && info != nil {
+			desc = info.Desc
+		}
+		_, streamable := t.(tool.StreamableTool)
+		out = append(out, ToolMetadata{
+			Name:         name,
+			Description:  desc,
+			IsReadOnly:   agent.ReadOnlyTools[name],
+			IsStreamable: streamable,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
@@ -866,7 +906,12 @@ type permissionDecision struct {
 // `toolNames` selects which tools from Tools() the agent can call this run;
 // pass empty for plain chat (which is what StreamChat already does — prefer
 // that path when no tools are needed).
-func (a *App) StreamAgent(id, provider, system string, messages []ChatMessage, opts ChatOptions, toolNames []string, autoApprove []string, attachments []AttachmentInput) error {
+// runnerType is the slash-command runner identifier ("react", "plan",
+// "workflow", …) the frontend has picked for this turn. Empty string
+// defaults to ReAct — that's what the legacy role picker passes when no
+// slash command was used. See `agent.LookupRunner` for resolution
+// semantics and TODO §9.1 for the registry shape.
+func (a *App) StreamAgent(id, provider, system string, messages []ChatMessage, opts ChatOptions, toolNames []string, autoApprove []string, attachments []AttachmentInput, runnerType string) error {
 	c, err := a.clientFor(provider)
 	if err != nil {
 		return err
@@ -944,7 +989,11 @@ func (a *App) StreamAgent(id, provider, system string, messages []ChatMessage, o
 		req := toMargoRequest(system, nil, opts, nil)
 		parts := attachmentsToParts(attachments)
 
-		err := agent.StreamReact(ctx, c, req, tools, input, parts, gate, func(ev agent.StepEvent) {
+		// Route through the runner registry. The slash-command parser
+		// (TODO §9.2) supplies `runnerType`; an empty string defaults
+		// to ReAct inside agent.LookupRunner so the legacy role-picker
+		// path (which doesn't pass a runner type) continues to work.
+		err := agent.RunByType(ctx, runnerType, c, req, tools, input, parts, gate, func(ev agent.StepEvent) {
 			switch ev.Kind {
 			case agent.StepText:
 				runtime.EventsEmit(a.ctx, base+":chunk", AgentStepEvent{Kind: "text", Text: ev.Text})

@@ -23,13 +23,10 @@
     resolvePermissionStep,
     setLastUsage,
     setChatPersona,
-    setChatAgent,
     findPersona,
-    findAgent,
     visiblePersonas,
-    visibleAgents,
-    agentMissingTools,
     addWorkspace,
+    activeWorkspace,
     setActiveWorkspace,
     isMultimodal,
     type Usage,
@@ -38,6 +35,7 @@
   import ChatList from './lib/ChatList.svelte';
   import SettingsPanel from './lib/SettingsPanel.svelte';
   import AttachmentThumb from './lib/AttachmentThumb.svelte';
+  import { parseSlash, slugify, SLASH_COMMANDS } from './lib/slash';
 
   let providers: string[] = [];
   let models: string[] = [];
@@ -128,6 +126,38 @@
   $: hasImageAttachment = attachments.some(a => a.mimeType.startsWith('image/'));
   $: attachmentsBlocked = hasImageAttachment && !!$effectiveSettings.model && !isMultimodal($effectiveSettings.model);
   $: ctxPct = ctxWindow > 0 ? Math.min(100, Math.round((ctxUsed / ctxWindow) * 100)) : 0;
+
+  // Slash autocomplete (TODO §9.2). Suggestions populate from the
+  // SLASH_COMMANDS catalog while the user is still typing the
+  // command word; once they've moved past it ("/persona r…"), we
+  // switch to argument-specific suggestions (persona slugs).
+  type SlashSuggestion = { text: string; description: string };
+  function computeSlashSuggestions(s: string, personas: { name: string }[]): SlashSuggestion[] {
+    if (!s.startsWith('/')) return [];
+    const sp = s.indexOf(' ');
+    if (sp === -1) {
+      // Still typing the command word — filter known commands by prefix.
+      const pre = s.toLowerCase();
+      return SLASH_COMMANDS
+        .filter(c => c.command.startsWith(pre))
+        .map(c => ({ text: c.command + ' ', description: c.description }));
+    }
+    const cmd = s.slice(0, sp).toLowerCase();
+    const argPrefix = s.slice(sp + 1).toLowerCase();
+    if (cmd === '/persona') {
+      return personas
+        .map(p => ({ slug: slugify(p.name), name: p.name }))
+        .filter(p => p.slug.startsWith(argPrefix))
+        .map(p => ({ text: `/persona ${p.slug}`, description: p.name }));
+    }
+    return [];
+  }
+  $: slashSuggestions = computeSlashSuggestions(input, $settings.personas);
+  $: showSlashHint = input.startsWith('/') && slashSuggestions.length > 0;
+
+  function applySuggestion(text: string) {
+    input = text;
+  }
 
   onMount(async () => {
     document.documentElement.classList.toggle('dark', $settings.theme === 'dark');
@@ -312,11 +342,66 @@
   }
 
   async function send() {
-    const text = input.trim();
-    if ((!text && attachments.length === 0) || busy || !$effectiveSettings.provider) return;
+    const raw = input.trim();
+    if ((!raw && attachments.length === 0) || busy || !$effectiveSettings.provider) return;
     if (attachmentsBlocked) {
       error = `${$effectiveSettings.model} doesn't accept images. Switch to a vision-capable model or remove the attachments.`;
       return;
+    }
+
+    // Slash-command pre-processing (TODO §9.2). State commands
+    // (/persona, /clear) update the chat and return without sending a
+    // turn. /agent commands fall through with `forcedRunner` set so
+    // the StreamAgent path runs with the picked runner type and the
+    // task as the message body.
+    let messageText = raw;
+    let forcedRunner: string | undefined;
+    const slash = parseSlash(raw);
+    if (slash) {
+      if (slash.kind === 'unknown') {
+        const known = SLASH_COMMANDS.map(c => c.command).join(', ');
+        error = `Unknown command /${slash.word}. Try one of: ${known}.`;
+        return;
+      }
+      if (slash.kind === 'persona') {
+        if (!$activeChat) newChat();
+        const target = $activeChat;
+        if (!target) return;
+        if (slash.slug === '') {
+          setChatPersona(target.id, undefined);
+        } else {
+          const p = $settings.personas.find(p => slugify(p.name) === slash.slug.toLowerCase());
+          if (!p) {
+            error = `No persona named "${slash.slug}". Available: ${$settings.personas.map(p => slugify(p.name)).join(', ') || 'none'}.`;
+            return;
+          }
+          setChatPersona(target.id, p.id);
+        }
+        input = '';
+        error = '';
+        return;
+      }
+      if (slash.kind === 'clear') {
+        if ($activeChat) {
+          // setChatPersona(undefined) clears both personaId and
+          // agentId — same shape as the role picker's "Default".
+          setChatPersona($activeChat.id, undefined);
+        }
+        input = '';
+        error = '';
+        return;
+      }
+      // slash.kind === 'agent'
+      if (!slash.task && attachments.length === 0) {
+        error = `/${slash.runnerType === 'react' ? 'agent' : 'agent-' + slash.runnerType} needs a task. Try \`/agent <what you want done>\`.`;
+        return;
+      }
+      if (!$settings.streaming) {
+        error = `Agent runs require streaming. Enable Streaming in Settings → Sampling and try again.`;
+        return;
+      }
+      forcedRunner = slash.runnerType;
+      messageText = slash.task;
     }
 
     if (!$activeChat) newChat();
@@ -346,7 +431,7 @@
 
     appendMessage(chat.id, {
       role: 'user',
-      content: text,
+      content: messageText,
       attachments: stored.length > 0 ? stored : undefined,
     });
     const history = ($activeChat?.messages ?? []).map(m => ({
@@ -355,22 +440,18 @@
     }));
     scrollToBottom();
 
-    // Resolve the active role (persona OR agent — they're mutually
-    // exclusive on the chat). Personas just swap the system prompt;
-    // agents additionally narrow the tool list and force the agent
-    // (StreamAgent) route. When neither is set we fall back to the
-    // legacy agentMode toggle for backwards compat. See
-    // docs/dev/personas_and_agents.md § "Three modes".
+    // §9.4 retired bundled Agent records. The active role is now just
+    // a persona (voice) plus, optionally, a slash-command runner
+    // (behavior) — picked per-turn in the parseSlash step above.
     const persona = findPersona($settings.personas, chat.personaId);
-    const agent = findAgent($settings.agents, chat.agentId);
-    const systemPrompt = agent
-      ? agent.systemPrompt
-      : persona
-        ? persona.systemPrompt
-        : $effectiveSettings.system;
-    const useAgentRoute = !!agent || ($settings.agentMode && !persona && availableTools.length > 0);
-    const agentTools = agent
-      ? agent.tools.filter(t => availableTools.includes(t))
+    const systemPrompt = persona ? persona.systemPrompt : $effectiveSettings.system;
+    const useAgentRoute = !!forcedRunner;
+    // Workspace-scoped tool palette (§9.3): undefined enabledTools
+    // means "all available enabled" so existing workspaces behave
+    // like today until the user narrows the palette in the Tools tab.
+    const ws = $activeWorkspace;
+    const agentTools = (ws && ws.enabledTools !== undefined)
+      ? availableTools.filter(t => ws.enabledTools!.includes(t))
       : availableTools;
     // Snapshot pending attachments and clear immediately — re-using the
     // same array after a send would leak across messages.
@@ -465,7 +546,9 @@
 
     try {
       if (useAgentRoute) {
-        await StreamAgent(id, $effectiveSettings.provider, systemPrompt, history, buildOptions(), agentTools, $settings.autoApproveTools, sendAttachments);
+        // Empty runnerType defaults to ReAct on the Go side, so the
+        // legacy role-picker path stays unchanged.
+        await StreamAgent(id, $effectiveSettings.provider, systemPrompt, history, buildOptions(), agentTools, $settings.autoApproveTools, sendAttachments, forcedRunner ?? '');
       } else {
         await StreamChat(id, $effectiveSettings.provider, systemPrompt, history, buildOptions(), sendAttachments);
       }
@@ -478,8 +561,7 @@
     }
   }
 
-  function rolePickerValue(chat: { personaId?: string; agentId?: string }): string {
-    if (chat.agentId) return `agent:${chat.agentId}`;
+  function rolePickerValue(chat: { personaId?: string }): string {
     if (chat.personaId) return `persona:${chat.personaId}`;
     return '';
   }
@@ -489,10 +571,8 @@
     const value = (ev.target as HTMLSelectElement).value;
     if (value.startsWith('persona:')) {
       setChatPersona($activeChat.id, value.slice('persona:'.length));
-    } else if (value.startsWith('agent:')) {
-      setChatAgent($activeChat.id, value.slice('agent:'.length));
     } else {
-      // "Default" — clear both. setChatPersona(undefined) also clears agentId.
+      // "Default" — clear the persona.
       setChatPersona($activeChat.id, undefined);
     }
   }
@@ -594,19 +674,9 @@
             title="Pick a role for this chat"
           >
             <option value="">Default</option>
-            <optgroup label="Personas">
-              {#each visiblePersonas($settings.personas, $settings.activeWorkspaceId) as p (p.id)}
-                <option value={`persona:${p.id}`}>{p.name}{p.workspaceId ? ' ◦' : ''}</option>
-              {/each}
-            </optgroup>
-            <optgroup label="Agents">
-              {#each visibleAgents($settings.agents, $settings.activeWorkspaceId) as a (a.id)}
-                {@const missing = agentMissingTools(a, availableTools)}
-                <option value={`agent:${a.id}`} disabled={missing.length > 0}>
-                  {a.name} [{a.tools.length}]{a.workspaceId ? ' ◦' : ''}{missing.length > 0 ? ` — needs ${missing.join(', ')}` : ''}
-                </option>
-              {/each}
-            </optgroup>
+            {#each visiblePersonas($settings.personas, $settings.activeWorkspaceId) as p (p.id)}
+              <option value={`persona:${p.id}`}>{p.name}{p.workspaceId ? ' ◦' : ''}</option>
+            {/each}
           </select>
         {/if}
         <button
@@ -751,14 +821,6 @@
       on:dragleave={onComposerDragLeave}
       on:drop={onComposerDrop}
     >
-      {#if $activeChat}
-        {@const _activeAgent = findAgent($settings.agents, $activeChat.agentId)}
-        {#if _activeAgent}
-          <div class="text-[0.74rem] text-fg-faint">
-            agent: <span class="font-semibold text-fg-muted">{_activeAgent.name}</span> · tools: {_activeAgent.tools.join(', ')}
-          </div>
-        {/if}
-      {/if}
       {#if attachments.length > 0}
         <div class="flex flex-wrap gap-2">
           {#each attachments as a (a.id)}
@@ -801,6 +863,21 @@
         on:change={onFileInputChange}
         class="hidden"
       />
+      {#if showSlashHint}
+        <div class="border border-border rounded-md bg-bg-elev p-1 flex flex-col gap-0.5 text-[0.78rem]">
+          {#each slashSuggestions as s (s.text)}
+            <button
+              type="button"
+              class="text-left px-2 py-1 rounded hover:bg-hover-bg flex items-center gap-2"
+              on:click={() => applySuggestion(s.text)}
+              on:mousedown|preventDefault
+            >
+              <code class="font-[family-name:var(--font-mono)] text-fg">{s.text.trim()}</code>
+              <span class="text-fg-muted truncate">{s.description}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
       <div class="flex items-end gap-2">
       <button
         class="topbar-btn h-9 w-9 flex items-center justify-center"
@@ -811,7 +888,7 @@
       >📎</button>
       <textarea
         class="flex-1 bg-input-bg text-fg border border-border rounded-md px-3 py-2.5 font-[inherit] text-[0.9rem] resize-none outline-none focus:border-border-strong disabled:opacity-50 disabled:cursor-not-allowed"
-        placeholder={$effectiveSettings.provider ? "Send a message... (Enter to send, Shift+Enter for newline)" : "Configure a provider in the settings panel..."}
+        placeholder={$effectiveSettings.provider ? "Send a message, or type / for commands…" : "Configure a provider in the settings panel..."}
         bind:value={input}
         on:keydown={onKey}
         disabled={busy || !$effectiveSettings.provider}
@@ -845,7 +922,7 @@
 
   <aside class="overflow-hidden min-w-0" aria-hidden={!$settings.showRight}>
     {#if $settings.showRight}
-      <SettingsPanel mode="workspace" {providers} {models} {busy} {outputDir} {availableTools} onReset={resetApp} />
+      <SettingsPanel mode="workspace" {providers} {models} {busy} {outputDir} onReset={resetApp} />
     {/if}
   </aside>
 </div>
@@ -872,7 +949,7 @@
         >×</button>
       </div>
       <div class="flex-1 overflow-y-auto">
-        <SettingsPanel mode="global" {providers} {models} {busy} {outputDir} {availableTools} onReset={resetApp} />
+        <SettingsPanel mode="global" {providers} {models} {busy} {outputDir} onReset={resetApp} />
       </div>
     </div>
   {/if}

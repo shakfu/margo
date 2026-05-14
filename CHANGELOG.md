@@ -9,6 +9,191 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Sequential workflow runner (TODO §9.6). New
+  `pkg/margo/agent/workflow_runner.go` wraps
+  `adk.NewSequentialAgent` with a three-stage **drafter → critic
+  → refiner** pipeline. Each stage is a separate
+  `adk.ChatModelAgent` with its own system prompt, all sharing
+  the margo Adapter. Tool palette policy per stage: drafter gets
+  the workspace's full enabled set (research / retrieval is most
+  useful at the first pass), critic and refiner get no tools (the
+  prompts forbid tool calls and removing them prevents the model
+  from being tempted). AgentEvent → StepEvent translation reuses
+  `bridgeAgentEvent`, so tool calls from the drafter render in
+  the UI as standard `StepToolCall` / `StepToolResult` /
+  `StepToolStream` events. Registered as `RunnerWorkflow`
+  ("workflow"); backs `/agent-workflow <task>`. Sub-agent prompts
+  are domain-neutral; §8.3 will re-point this runner at a
+  user-configurable sub-agent chain without changing the
+  assembly shape. The slash-command catalog
+  (`SLASH_COMMANDS` in `frontend/src/lib/slash.ts`) loses its
+  "not yet available" hints on both `/agent-plan` and
+  `/agent-workflow` — both are now live. Coverage:
+  `workflow_runner_test.go` confirms three-sub-agent assembly +
+  prompt ctx cancel; `runner_test.go::TestLookupRunnerWorkflow`
+  guards the registry binding.
+- Plan-then-execute runner (TODO §9.5; collapses §6.5). New
+  `pkg/margo/agent/plan_runner.go` wraps Eino's
+  `adk/prebuilt/planexecute.New` with three sub-agents
+  constructed in-place (`NewPlanner` / `NewExecutor` /
+  `NewReplanner`), each pointed at the same `agent.Adapter` —
+  our adapter is a `model.ToolCallingChatModel`, so the kit
+  calls `WithTools` per-role to bind whichever tools that role
+  needs. The executor receives the workspace's enabled tool
+  palette plus the existing permission + abort-on-ctx-cancel
+  middlewares; the planner and replanner do not, since they
+  emit structured PlanTool / RespondTool calls only. The
+  AgentEvent → StepEvent bridge is shared with the React
+  runner (`bridgeAgentEvent`), so plan-execute runs surface
+  tool calls and results in the UI uniformly with ReAct.
+  Registered as `RunnerPlan` ("plan"); the slash parser routes
+  `/agent-plan <task>` to this runner. MaxIterations capped at
+  10 (matches the kit default; named explicitly at the call
+  site). Coverage: `plan_runner_test.go` confirms the
+  three-sub-agent assembly compiles and that ctx cancellation
+  propagates promptly; `runner_test.go::TestLookupRunnerPlan`
+  guards the registry binding. End-to-end behaviour against a
+  real model is manual verification — scripting a complete
+  planexecute protocol (PlanTool → ExecutedStep accumulation
+  → RespondTool termination) would duplicate the kit's own
+  prebuilt tests rather than testing our wrapper.
+- Adopt Eino ADK as the runner substrate (TODO §9.4b). The ReAct
+  loop now runs on `cloudwego/eino/adk` rather than the legacy
+  `flow/agent/react` package. New `pkg/margo/agent/adk_runner.go`
+  stands up an `adk.ChatModelAgent` wired to our existing
+  `agent.Adapter`, runs it via `adk.Runner` with streaming enabled,
+  and bridges `adk.AgentEvent` → `agent.StepEvent` so the Wails
+  surface and frontend continue consuming the same event contract.
+  The bridge handles both non-streaming (one fully-formed message
+  per event) and streaming (MessageStream of chunks) variants,
+  emitting `StepText` / `StepToolCall` for assistant messages and
+  `StepToolStream` / `StepToolResult` for tool messages. The
+  permission gate and abort-on-ctx-cancel middlewares plug into
+  `adk.ToolsConfig.ToolsNodeConfig.ToolCallMiddlewares` unchanged
+  (both are `compose.ToolMiddleware`s, which ADK accepts directly).
+  The §6.3 budget rewriter moved from
+  `react.AgentConfig.MessageRewriter` to an `adk.AgentMiddleware`
+  with a `BeforeChatModel` hook — algorithm in `RewriteForBudget`
+  unchanged; only the wiring point changed. `StreamReact` survives
+  as a thin compatibility wrapper (`return ReactRunner{}.Run(...)`)
+  so direct callers keep working. Deletions: custom
+  `StreamToolCallChecker` (`streamHasToolCall`), the
+  `ModelCallbackHandler.OnEndWithStreamOutput` mid-loop streaming
+  workaround, the `ToolCallbackHandler` callbacks, and the
+  `budgetRewriter` factory — all superseded by ADK's native
+  ChatModelAgent. Coverage: the existing `stream_test.go` cases
+  (mid-loop text ordering, cancel-mid-tool, streamable-tool stream
+  events) plus the `runner_test.go` smoke test all pass against
+  the new substrate without modification — the parity-verification
+  test file added during §9.4b.1 was retired once the swap landed
+  since it duplicated `stream_test.go` post-swap. Permission and
+  budget test suites pass unchanged. The optional §9.4b.4 devops
+  add-on (`eino-ext/devops` Mermaid + debug UI) is deferred.
+- Retire bundled Agent records (TODO §9.4, Option A). With slash
+  commands (§9.2) supplying the runner and the Tools tab (§9.3)
+  supplying the palette, the `Agent` record's job — bundling persona
+  + tool allowlist — no longer carries weight. Decision recorded
+  in `docs/concepts.md`: persona shapes voice, agent is a per-turn
+  runner picked via `/agent`, and tools are workspace-enabled. The
+  former built-in agents ("Quarto Author", "Time-aware assistant")
+  are **dropped entirely** — they were tool-directives wearing
+  persona costumes, not voice configurations, and don't earn a slot
+  in `BUILTIN_PERSONAS` under the concepts-doc definition.
+  Discoverability for the underlying tools lives on the Tools tab
+  ("`quarto_render`: drafts and renders Quarto documents"), where
+  users will already be when they enable tools.
+  `LEGACY_BUILTIN_AGENT_IDS` records the closed set of retired
+  builtin ids so `migrateAgentIdsToPersonaIds` can clear them
+  cleanly rather than leaving dangling `personaId` references; user-
+  created agents still migrate to personas (id preserved, name +
+  description + systemPrompt carried, tool allowlist surfaced as a
+  hint pointing at the Tools tab). `loadChatsForWorkspace` rewrites
+  every legacy `chat.agentId` it finds — either translating to
+  `personaId` (user agents) or clearing (builtins) — and drops the
+  legacy field. Both migrations are idempotent. UI surface changes:
+  the role picker dropdown's "Agents" optgroup is gone (Personas
+  only); the Settings → Roles tab loses its Agents section and the
+  per-agent Edit / Duplicate / Delete dialog; the composer footer
+  no longer shows the active-agent tool list; the legacy
+  `agentMode` shim in `send()` is retired. The `Agent` interface,
+  `Settings.agents` field, and `Chat.agentId` field stay declared
+  (and the helper functions stay exported) so legacy localStorage
+  payloads deserialise cleanly; they're scheduled for full removal
+  in a follow-up slice once the migration has flushed real-world
+  data. Settings tab renamed from "Agents" to "Roles" since it now
+  contains personas, knowledge sources, tools, and trusted tools
+  rather than the bundle records.
+- Tools tab + per-workspace tool enablement (TODO §9.3). New
+  Wails surface: `ToolMetadata` struct (`name`, `description`,
+  `isReadOnly`, `isStreamable`) plus `App.ToolsMetadata()` that
+  constructs each registered tool once to read its
+  `tool.BaseTool.Info(ctx)`, look up the read-only flag in
+  `agent.ReadOnlyTools`, and type-assert for
+  `tool.StreamableTool`. Sorted by name for deterministic UI.
+  `Workspace.enabledTools?: string[]` is the new per-workspace
+  filter the resolver runs after the existing
+  `agent.tools ∩ availableTools` intersection. Undefined
+  `enabledTools` means "all enabled" so existing chats and brand-
+  new workspaces behave exactly as before until the user narrows
+  the palette — no surprise on upgrade. `setWorkspaceToolEnabled`
+  seeds from the registered set on first toggle so unchecking one
+  tool never silently disables every other tool by side effect;
+  `isToolEnabledForWorkspace` is the single read path the
+  resolver and the UI share. New "Tools" collapsible section in
+  `SettingsPanel` (workspace mode only) renders the catalog with
+  per-row checkbox, description, and read-only / streamable
+  badges. Coverage: `tools_metadata_test.go::TestToolsMetadataShape`
+  (current_time read-only + invokable, web_fetch streamable +
+  network) and `TestToolsMetadataSortedByName` (deterministic
+  order).
+- Slash-command activation (TODO §9.2). New
+  `frontend/src/lib/slash.ts` exports `parseSlash(input)` which
+  recognises the four-command grammar from `docs/concepts.md`:
+  `/agent <task>`, `/agent-<type> <task>`, `/persona <slug>` (with
+  the bare form clearing the persona), and `/default` / `/clear`.
+  Disambiguation rule honoured: the first token must match
+  `^/[a-zA-Z][a-zA-Z0-9_-]*$`, so literal-slash text like
+  `/etc/passwd is sensitive` falls through as plain text, while
+  typos like `/agnet` surface as `{ kind: 'unknown' }` and become
+  an inline error rather than getting silently shipped to the
+  model. `send()` in `App.svelte` runs the parser first: `persona` /
+  `clear` results update the chat state and return without sending a
+  turn; `agent` results force the StreamAgent route with the picked
+  runner type and the chat's persona supplying voice (the bundled
+  `Chat.agentId`, if any, is intentionally ignored for that turn).
+  Wails `StreamAgent` gains a final `runnerType string` parameter
+  that flows through to `agent.RunByType` from §9.1; empty string
+  defaults to ReAct, so the legacy role-picker path stays
+  unchanged. Composer placeholder updates to "Send a message, or
+  type `/` for commands…"; a small dropdown above the textarea
+  surfaces matching `SLASH_COMMANDS` while the user types `/` (and
+  switches to persona-slug suggestions once they've typed
+  `/persona `). Coverage: hand-runnable
+  `frontend/src/lib/slash.test.ts` exercises every grammar branch
+  (bare commands, typed-runner variants, multi-line task,
+  case insensitivity, whitespace tolerance, literal-path
+  passthrough, misspelt → unknown, `slugify`); follow-up to wire
+  vitest noted under TODO §9.2.
+- Runner interface foundation (TODO §9.1). New
+  `pkg/margo/agent/runner.go` introduces the `Runner` interface that
+  every agent control loop must satisfy, a `ReactRunner` that wraps
+  the existing `StreamReact` unchanged, and a registry
+  (`RegisterRunner` / `LookupRunner` / `AvailableRunners` /
+  `RunByType`) keyed by `RunnerType` string. `app.go::StreamAgent`
+  now dispatches via `agent.RunByType(ctx, agent.RunnerReact, …)`
+  rather than calling `StreamReact` directly, so future slices
+  (§9.2's slash parser, §9.5's plan-execute runner, §9.6's workflow
+  runner) can swap runner types per turn without touching the
+  surrounding event plumbing or the Wails surface. Behaviour
+  unchanged for the ReAct path; existing tests and call sites
+  continue to use `StreamReact` directly. Coverage:
+  `pkg/margo/agent/runner_test.go` — known/unknown/empty name
+  resolution, default-to-react fallback, registry mutation
+  (RegisterRunner panics on empty name or nil factory), a smoke
+  test that `RunByType("react", …)` produces the same step
+  subsequence as `StreamReact`, and a compile-time guard
+  (`var _ Runner = ReactRunner{}`) so signature drift fails at
+  build time rather than at dispatch.
 - Document attachments (TODO §7.5). PDFs now ride the same attachment
   path as images: composer accepts `application/pdf` with a 25 MB cap;
   pending non-image attachments render as a filename badge instead of
@@ -526,6 +711,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Role picker still listed "Quarto Author" and "Time-aware
+  assistant" after §9.4's cleanup pass. Migration sediment: an
+  interim build of §9.4 briefly placed those two records in
+  `BUILTIN_PERSONAS`; users who booted on that build had them
+  written into `margo:settings:v1`. When the cleanup pass
+  removed them from `BUILTIN_PERSONAS`, the load-time filter
+  `userPersonas.filter(p => !builtinPersonaIds.has(p.id))`
+  preserved them as "custom" personas (their ids no longer
+  matched any builtin). `loadSettings` now additionally filters
+  through `LEGACY_BUILTIN_AGENT_IDS` so those ids are dropped
+  on load, and `migrateAgentIdsToPersonaIds` picks up a third
+  case — clearing any `chat.personaId` that still points at one
+  of the retired ids so the binding doesn't dangle. Both passes
+  are idempotent; data flushes on first boot under this build
+  and subsequent boots are no-ops.
 - Left sidebar collapse in `App.svelte` collapsed the main content
   area instead of the sidebar. The root grid declares three columns
   (`[280px_1fr_320px]` and zero-width variants), but the left/right

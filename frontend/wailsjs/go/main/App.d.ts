@@ -38,8 +38,10 @@ export function SetActiveWorkspace(arg1:string):Promise<void>;
 
 export function StartupWorkspaceDir():Promise<string>;
 
-export function StreamAgent(arg1:string,arg2:string,arg3:string,arg4:Array<main.ChatMessage>,arg5:main.ChatOptions,arg6:Array<string>,arg7:Array<string>,arg8:Array<main.AttachmentInput>):Promise<void>;
+export function StreamAgent(arg1:string,arg2:string,arg3:string,arg4:Array<main.ChatMessage>,arg5:main.ChatOptions,arg6:Array<string>,arg7:Array<string>,arg8:Array<main.AttachmentInput>,arg9:string):Promise<void>;
 
 export function StreamChat(arg1:string,arg2:string,arg3:string,arg4:Array<main.ChatMessage>,arg5:main.ChatOptions,arg6:Array<main.AttachmentInput>):Promise<void>;
 
 export function Tools():Promise<Array<string>>;
+
+export function ToolsMetadata():Promise<Array<main.ToolMetadata>>;

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	toolutils "github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/components/tool"
+	toolutils "github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/shakfu/margo/pkg/margo"

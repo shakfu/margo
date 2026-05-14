@@ -138,6 +138,15 @@ export interface Workspace {
   // OVERRIDABLE_KEYS are honoured by effectiveSettings; everything
   // else falls through to global Settings. (7.1.c)
   overrides?: WorkspaceOverrides;
+  // Names of agent tools enabled in this workspace's chats (§9.3).
+  // Undefined means "all available tools enabled" — the migration-safe
+  // default for workspaces created before §9.3 shipped, and the
+  // intended baseline for new workspaces unless the user opts to
+  // narrow the palette. The runtime filter is
+  //   resolvedTools = availableTools ∩ enabledTools (if set)
+  // so a tool unregistered at startup (e.g. quarto_render without
+  // the quarto CLI) drops out regardless of the toggle.
+  enabledTools?: string[];
 }
 
 // WorkspaceOverrides is the subset of Settings a workspace may shadow.
@@ -262,31 +271,31 @@ export const BUILTIN_PERSONAS: Persona[] = [
   },
 ];
 
-// BUILTIN_AGENTS is the ship-in agent catalog. Each agent's `tools`
-// list references tool names registered in app.go::builtinTools; if a
-// referenced tool is missing at runtime (e.g. quarto isn't installed)
-// the agent will be greyed out in the picker — see findInstalledAgent
-// resolution in App.svelte.
-export const BUILTIN_AGENTS: Agent[] = [
-  {
-    id: 'builtin-quarto-author',
-    name: 'Quarto Author',
-    description: 'Drafts and renders Quarto documents (html, pdf, pptx, docx).',
-    systemPrompt:
-      'You are a Quarto author. The user describes a document; you produce a complete .qmd source (YAML frontmatter + markdown body) and call `quarto_render` with `content` set to that source so the document renders to disk. Choose the output format from the user\'s ask (default html when unspecified). Pin format-specific options in the YAML rather than passing them as separate arguments. After rendering succeeds, surface the markdown link the tool returns verbatim — relative paths or bolded filenames will not be clickable.',
-    tools: ['quarto_render'],
-    builtin: true,
-  },
-  {
-    id: 'builtin-time-aware',
-    name: 'Time-aware assistant',
-    description: 'A general assistant that knows the current date and time.',
-    systemPrompt:
-      'You are a helpful assistant with access to the current wall-clock time via the `current_time` tool. Call it whenever the user asks about the current time / date or whenever recency matters for an answer (deadlines, "today", "this year"). Otherwise answer normally without invoking tools.',
-    tools: ['current_time'],
-    builtin: true,
-  },
-];
+// LEGACY_BUILTIN_AGENT_IDS is the closed set of ids from the pre-§9.4
+// BUILTIN_AGENTS catalog. These records bundled persona + tool
+// allowlist and were retired entirely in §9.4 — they are not
+// migrated into BUILTIN_PERSONAS because, per docs/concepts.md, a
+// persona shapes voice, not behavior; "Quarto Author" and "Time-
+// aware assistant" were tool-directives wearing persona costumes.
+// The chat migration uses this set to clear `chat.agentId` cleanly
+// when it points at one of these (rather than leaving a dangling
+// `personaId` reference). Any new pre-§9.4 builtin ids would go
+// here.
+const LEGACY_BUILTIN_AGENT_IDS = new Set<string>([
+  'builtin-quarto-author',
+  'builtin-time-aware',
+]);
+
+// BUILTIN_AGENTS is retained as an empty array after §9.4 retired the
+// bundled-Agent concept. The two former built-ins (Quarto Author,
+// Time-aware assistant) moved to BUILTIN_PERSONAS above; runners are
+// now picked per-turn via the slash-command grammar (`/agent`,
+// `/agent-plan`, …) and tool palettes are workspace-level enable
+// toggles in the Tools tab. The `Agent` type and `Settings.agents`
+// field stay declared so legacy localStorage payloads deserialise
+// cleanly during the load-time migration; they're scheduled for
+// removal in a follow-up slice.
+export const BUILTIN_AGENTS: Agent[] = [];
 
 // WORKSPACE_TEMPLATES is the ship-in catalog (7.1.f). Each entry is a
 // recipe: pick one in the workspace manage dialog and the new
@@ -426,17 +435,55 @@ function migrateLegacyChats(): void {
   } catch (_) {}
 }
 
+// migrateAgentIdsToPersonaIds rewrites chats with stale §9.4-era
+// bindings. Three cases:
+//   1. The agentId pointed at a legacy builtin agent ("Quarto Author"
+//      / "Time-aware assistant"). Those records were retired entirely
+//      — there is no corresponding persona — so the field is just
+//      cleared and the chat falls back to Default mode.
+//   2. The agentId pointed at a user-created agent. The loadSettings
+//      migration converts that agent into a persona of the same id,
+//      so a straight copy `personaId = agentId` preserves the
+//      binding.
+//   3. The personaId points at a now-retired interim builtin (the
+//      §9.4 interim builds added Quarto Author / Time-aware to
+//      BUILTIN_PERSONAS briefly; the cleanup removed them). The
+//      persona no longer exists, so the binding is cleared.
+// Idempotent: chats whose fields are already clean are returned
+// unchanged.
+function migrateAgentIdsToPersonaIds(chats: Chat[]): Chat[] {
+  let changed = false;
+  const out = chats.map(c => {
+    let next = c;
+    if (next.personaId && LEGACY_BUILTIN_AGENT_IDS.has(next.personaId)) {
+      next = { ...next, personaId: undefined };
+      changed = true;
+    }
+    if (next.agentId) {
+      changed = true;
+      if (LEGACY_BUILTIN_AGENT_IDS.has(next.agentId)) {
+        next = { ...next, agentId: undefined };
+      } else {
+        next = { ...next, personaId: next.personaId ?? next.agentId, agentId: undefined };
+      }
+    }
+    return next;
+  });
+  return changed ? out : chats;
+}
+
 function loadChatsForWorkspace(workspaceId: string): Chat[] {
   try {
     const raw = localStorage.getItem(chatsKey(workspaceId));
     if (raw) {
       const parsed = JSON.parse(raw) as Chat[];
       // backfill new fields for chats persisted before tokens tracking
-      return parsed.map(c => ({
+      const backfilled = parsed.map(c => ({
         ...c,
         tokensIn: c.tokensIn ?? 0,
         tokensOut: c.tokensOut ?? 0,
       }));
+      return migrateAgentIdsToPersonaIds(backfilled);
     }
   } catch (_) {}
   return [];
@@ -482,12 +529,45 @@ function loadSettings(): Settings {
       // in the UI — that produces a non-builtin entry with a fresh id.
       const userPersonas: Persona[] = Array.isArray(merged.personas) ? merged.personas : [];
       const builtinPersonaIds = new Set(BUILTIN_PERSONAS.map(p => p.id));
-      const customPersonas = userPersonas.filter(p => !builtinPersonaIds.has(p.id));
-      merged.personas = [...BUILTIN_PERSONAS, ...customPersonas];
+      let customPersonas = userPersonas
+        .filter(p => !builtinPersonaIds.has(p.id))
+        // §9.4 interim builds briefly placed "Quarto Author" and
+        // "Time-aware assistant" into BUILTIN_PERSONAS. Removing them
+        // from the catalog later left those ids in localStorage as
+        // "custom" personas (since they no longer matched a builtin
+        // id). Drop them on load — same idempotent migration logic as
+        // the LEGACY_BUILTIN_AGENT_IDS check below.
+        .filter(p => !LEGACY_BUILTIN_AGENT_IDS.has(p.id));
+
+      // §9.4 migration: user-created agents become personas. Built-in
+      // agent ids match the new built-in persona ids, so built-ins
+      // drop out via the builtin-id filter above; only non-builtin
+      // user agents need translation. We preserve the agent's id so
+      // any chat that referenced agentId can keep using the same id
+      // as personaId. The tool allowlist is surfaced as a hint
+      // appended to the system prompt — the new model is "enable
+      // tools in the Tools tab and use this persona."
       const userAgents: Agent[] = Array.isArray(merged.agents) ? merged.agents : [];
-      const builtinAgentIds = new Set(BUILTIN_AGENTS.map(a => a.id));
-      const customAgents = userAgents.filter(a => !builtinAgentIds.has(a.id));
-      merged.agents = [...BUILTIN_AGENTS, ...customAgents];
+      const personaIdsAlready = new Set<string>(customPersonas.map(p => p.id));
+      builtinPersonaIds.forEach(id => personaIdsAlready.add(id));
+      const migratedFromAgents: Persona[] = userAgents
+        .filter(a => !a.builtin)
+        .filter(a => !personaIdsAlready.has(a.id))
+        .map(a => ({
+          id: a.id,
+          name: a.name,
+          description: a.description,
+          systemPrompt: a.tools && a.tools.length > 0
+            ? `${a.systemPrompt}\n\n(This role pairs with the ${a.tools.map(t => '`' + t + '`').join(', ')} tool${a.tools.length === 1 ? '' : 's'} — make sure they\'re enabled in Settings → Tools, and invoke via \`/agent <task>\`.)`
+            : a.systemPrompt,
+          builtin: false,
+          workspaceId: a.workspaceId,
+        }));
+      customPersonas = [...customPersonas, ...migratedFromAgents];
+      merged.personas = [...BUILTIN_PERSONAS, ...customPersonas];
+      // Drain agents — the type still exists for legacy
+      // deserialisation but the array is always empty after migration.
+      merged.agents = BUILTIN_AGENTS;
       // Workspace invariants: at least one workspace; Default always present;
       // activeWorkspaceId points at a real entry. Re-asserting Default on
       // load makes "user deleted Default by editing storage" non-fatal.
@@ -1031,6 +1111,46 @@ export function renameWorkspace(id: string, name: string) {
     ...s,
     workspaces: s.workspaces.map(w => w.id === id ? { ...w, name: trimmed, updatedAt: Date.now() } : w),
   }));
+}
+
+// setWorkspaceToolEnabled flips a single tool in a workspace's
+// enabledTools list (§9.3). When a workspace has never had its
+// palette narrowed (enabledTools === undefined), the first call
+// seeds the list from `available` so toggling one tool off doesn't
+// implicitly turn everything else off. Subsequent calls add to or
+// remove from the explicit list.
+export function setWorkspaceToolEnabled(
+  workspaceId: string,
+  toolName: string,
+  enabled: boolean,
+  available: string[],
+) {
+  settings.update(s => ({
+    ...s,
+    workspaces: s.workspaces.map(w => {
+      if (w.id !== workspaceId) return w;
+      let current = w.enabledTools;
+      if (current === undefined) {
+        // Seed from the registered tools so an explicit toggle never
+        // silently disables every other tool by side-effect.
+        current = [...available];
+      }
+      const has = current.includes(toolName);
+      let next: string[];
+      if (enabled && !has) next = [...current, toolName];
+      else if (!enabled && has) next = current.filter(t => t !== toolName);
+      else next = current;
+      return { ...w, enabledTools: next, updatedAt: Date.now() };
+    }),
+  }));
+}
+
+// isToolEnabledForWorkspace is the single source of truth the §9.3
+// resolution (and the Tools tab UI) reads. Undefined enabledTools is
+// the migration-safe "all enabled" baseline.
+export function isToolEnabledForWorkspace(w: Workspace | undefined, toolName: string): boolean {
+  if (!w || w.enabledTools === undefined) return true;
+  return w.enabledTools.includes(toolName);
 }
 
 // setWorkspaceDir attaches (or clears, with undefined) a directory path

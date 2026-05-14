@@ -1,9 +1,6 @@
 package agent
 
 import (
-	"context"
-	"strings"
-
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/shakfu/margo/pkg/margo"
@@ -221,18 +218,4 @@ func groupTurnsMargo(msgs []margo.Message) [][]margo.Message {
 		}
 	}
 	return groups
-}
-
-// budgetRewriter returns a react.AgentConfig.MessageRewriter closure that
-// trims accumulated state.Messages to the model's budget on each iteration
-// of the ReAct loop. Bound to a model id at construction so we don't have
-// to re-resolve the budget per call.
-func budgetRewriter(model string) func(context.Context, []*schema.Message) []*schema.Message {
-	if strings.TrimSpace(model) == "" {
-		return nil
-	}
-	budget := BudgetForModel(model)
-	return func(_ context.Context, msgs []*schema.Message) []*schema.Message {
-		return RewriteForBudget(msgs, budget)
-	}
 }

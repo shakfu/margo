@@ -58,6 +58,8 @@ func TestAdapterNoAttachments(t *testing.T) {
 // adapter's request-construction logic without making real network calls.
 type nopClient struct{}
 
-func (nopClient) Name() string                                                          { return "nop" }
-func (nopClient) Complete(context.Context, margo.Request) (margo.Response, error)       { return margo.Response{}, nil }
-func (nopClient) Stream(context.Context, margo.Request) (<-chan margo.Chunk, error)     { return nil, nil }
+func (nopClient) Name() string { return "nop" }
+func (nopClient) Complete(context.Context, margo.Request) (margo.Response, error) {
+	return margo.Response{}, nil
+}
+func (nopClient) Stream(context.Context, margo.Request) (<-chan margo.Chunk, error) { return nil, nil }

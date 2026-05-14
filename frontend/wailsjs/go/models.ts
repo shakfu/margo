@@ -162,6 +162,25 @@ export namespace main {
 	        this.size = source["size"];
 	    }
 	}
+	
+	export class ToolMetadata {
+	    name: string;
+	    description: string;
+	    isReadOnly: boolean;
+	    isStreamable: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ToolMetadata(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.description = source["description"];
+	        this.isReadOnly = source["isReadOnly"];
+	        this.isStreamable = source["isStreamable"];
+	    }
+	}
 
 }
 
