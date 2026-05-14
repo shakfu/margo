@@ -1,23 +1,40 @@
 # Personas and Agents
 
-**Status: design doc, not yet implemented.** Tracks decisions made during
-the §8 design pass so the eventual implementation lands cleanly. Once the
-work ships, this doc converts to a behavior reference (mirroring the
-post-implementation tone of `agents_and_tools.md`).
+**Status: 8.1 and 8.2 shipped.** Personas and Agents are live as
+separate records on `Settings`, with a single role picker in the chat
+header that selects between Default / Persona / Agent. Composition
+(§8.3) and the orthogonal Persona-and-Agent combination noted below
+are still future work.
+
+For the user-facing conceptual model, see [`docs/concepts.md`](../concepts.md).
+This document is the implementation reference: how the split is
+encoded, how it persists, how runtime resolution works.
 
 ## The split
 
-A **Persona** is a tool-less role: a named, pre-packaged system prompt
-that shapes the model's voice, expertise, or output structure. Examples:
-"Editor", "Code Reviewer", "Researcher", "Concise". Persona-mode
+A **Persona** is a role that shapes *voice*: a named, pre-packaged
+system prompt (and, eventually, parameter overrides). Examples:
+"Editor", "Code Reviewer", "Researcher", "Concise". Persona-only
 conversations route through the existing `StreamChat` path — no
 multi-step loop, no tool callbacks, just a different system prompt.
 
-An **Agent** is a persona that also carries a tool allowlist: a named
-*capability* with a curated set of tools it can call. Examples: "Quarto
-Author" (tools: `quarto_render`), "Time-aware assistant" (tools:
-`current_time`). Agent-mode conversations route through `StreamAgent`
-(the ReAct loop) with the agent's tool allowlist as `toolNames`.
+An **Agent** is a role that shapes *behavior*: a tool allowlist plus
+a control loop (today always ReAct). Examples: "Quarto Author" (tools:
+`quarto_render`), "Time-aware assistant" (tools: `current_time`).
+Agent conversations route through `StreamAgent` with the agent's
+tool allowlist as `toolNames`.
+
+Persona and Agent are **sibling concepts, not parent/child**. They
+describe orthogonal axes — what the model sounds like vs. what the
+model can do — and either can be picked without the other.
+Conceptually a chat can run with both at once (a Researcher persona
+paired with a web-search agent yields a researcher who can browse).
+**Current implementation note:** the runtime treats the two as
+mutually exclusive — `setChatPersona` clears `agentId` and vice
+versa, and the role picker offers a single dropdown. Relaxing this
+to allow simultaneous Persona + Agent ("orthogonal mode", below)
+is a sensible future slice; the data model already supports it (both
+ids exist as independent optional fields on `Chat`).
 
 The two are kept as **distinct types**, not one type with an optional
 `tools` field, because:
@@ -31,10 +48,10 @@ The two are kept as **distinct types**, not one type with an optional
 3. The "persona with empty tool list" footgun is impossible to express,
    so it can't accidentally be created.
 
-A persona is *not* a parent class of an agent. Their system prompts read
-differently (personas are voice/perspective; agents are directive and
-name their tools), and an "Agent extends Persona" model encourages
-sharing a system prompt that fits neither role well.
+Their system prompts read differently (personas are voice/perspective;
+agents are directive and name their tools), and an "Agent extends
+Persona" model encourages sharing a system prompt that fits neither
+role well.
 
 ## Data model
 
@@ -101,16 +118,28 @@ agentId?: string;         // active agent for this chat — mutually exclusive w
   hand-picked ids (`builtin-editor`, `builtin-quarto-author`) so
   references survive ship-version updates.
 
-## Three modes
+## Modes
 
-The role picker in the composer collapses the existing `agentMode`
-checkbox into a single dropdown:
+The role picker in the composer header collapses the legacy
+`agentMode` checkbox into a single dropdown. The three modes shipped
+today:
 
 | Mode    | Active selection      | System prompt source              | Tools                      | Wails route   |
 |---------|-----------------------|-----------------------------------|----------------------------|---------------|
 | Default | none                  | `Settings.system` (free-form)     | none                       | `StreamChat`  |
 | Persona | `Chat.personaId`      | `Persona.systemPrompt` (replaces) | none                       | `StreamChat`  |
 | Agent   | `Chat.agentId`        | `Agent.systemPrompt` (replaces)   | `Agent.tools` allowlist    | `StreamAgent` |
+
+A fourth **Orthogonal** mode (persona-and-agent simultaneously
+active) is consistent with the conceptual model in `concepts.md`
+but not yet exposed. The data model already supports it (both
+`personaId` and `agentId` are independent optional fields on
+`Chat`); shipping it requires lifting the mutual-exclusion guard
+in `setChatPersona` / `setChatAgent`, deciding precedence for the
+system prompt (likely: persona's voice prepended to the agent's
+directive content), and growing the role picker into two
+independent selects. Treat this as a future slice rather than a
+current capability.
 
 Switching modes mid-chat is allowed; it changes the next request only.
 The transcript records a "role changed to X" marker so the user

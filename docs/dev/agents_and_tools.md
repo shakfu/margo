@@ -6,11 +6,21 @@ tool, and how to introduce a new agent type. The orchestration sits on top of
 adapter, the registry, and the UI surface, while Eino handles the graph
 execution and the ReAct loop.
 
+For the user-facing conceptual model — what an *agent* is in relation
+to personas, tools, workspaces, and chats — see
+[`docs/concepts.md`](../concepts.md). In this document "agent" refers
+specifically to the **control-loop** half of that model: the thing
+that picks tools, invokes them, and decides when the run is done. The
+companion document [`personas_and_agents.md`](personas_and_agents.md)
+covers the persona/agent record types and how the chat layer selects
+between them.
+
 ## Architecture overview
 
 ```
                                 +-------------------------+
-        UI (App.svelte)         |  agent mode toggle      |
+        UI (App.svelte)         |  role picker (Default / |
+              |                 |  Persona / Agent)       |
               |                 |  step rendering         |
               v                 +-------------------------+
    StreamAgent(id, ...)  -- Wails binding (app.go)
@@ -83,21 +93,32 @@ func ReadFileTool() tool.InvokableTool {
 }
 ```
 
-Then add it to the registry in `app.go`:
+Then add it to the registry in `app.go`. The registry value is a
+`toolCtor` (`func(*App) tool.BaseTool`) so tools can close over
+per-`App` state (e.g. the active workspace's RAG indexer for
+`search_knowledge`). Stateless tools accept the argument and ignore
+it:
 
 ```go
 // app.go
 
-var builtinTools = map[string]func() tool.InvokableTool{
-    "current_time": agent.CurrentTimeTool,
-    "read_file":    agent.ReadFileTool,
+type toolCtor func(*App) tool.BaseTool
+
+var builtinTools = map[string]toolCtor{
+    "current_time":     func(*App) tool.BaseTool { return agent.CurrentTimeTool() },
+    "web_fetch":        func(*App) tool.BaseTool { return agent.WebFetchTool() },
+    "search_knowledge": func(a *App) tool.BaseTool { return agent.SearchKnowledgeTool(a.activeIndexer()) },
+    "read_file":        func(*App) tool.BaseTool { return agent.ReadFileTool() },
 }
 ```
 
 That's it for the backend. `App.Tools()` already returns the registry's
 keys, and `App.StreamAgent` already resolves names against
-`builtinTools`. The frontend's `availableTools` will pick up the new
-name on next mount, and the agent-mode toggle will pass it through.
+`builtinTools`, calling each constructor with the `*App` so the tool
+can read whichever per-run state it needs. The frontend's
+`availableTools` will pick up the new name on next mount, and any
+agent whose allowlist includes it will be able to call it through
+the role picker.
 
 ### 2. Argument schema conventions
 

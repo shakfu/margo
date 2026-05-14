@@ -358,3 +358,175 @@ This is also where TODO #6.5 (custom graphs / plan-then-execute)
 lands naturally — a planner agent is one whose runner is a
 `compose.Graph` instead of a ReAct loop. Discriminator field
 (`composition: "pipeline" | "host"`) introduced in 8.3.
+
+## 9. Slash-command activation model
+
+Reshape the activation UX around four orthogonal concepts —
+**persona** (voice), **agent** (runner), **tools** (palette), **model**
+(provider + sampling) — as set out in `docs/concepts.md`. Today's
+`Chat.agentId` bundles persona + tool allowlist + runner into one
+record, which conflates these axes. The redesigned model:
+
+- An **agent** is a *runner* (ReAct, plan-execute, workflow, …),
+  invoked per turn via a slash command. There is no per-agent tool
+  allowlist — the runner operates over whichever tools the user has
+  enabled globally for the active workspace.
+- A **persona** stays a per-chat voice configuration, activated via
+  `/persona <name>` (or the sidebar Personas tab). Persistent for the
+  chat until cleared.
+- **Tools** become globally enable-able/disable-able per workspace
+  via a new Tools tab. Registration at app startup is unchanged; the
+  toggle is the user-controlled filter the runner sees.
+- The chat-header role dropdown goes away. Active persona shows as a
+  small chip in the header (clickable to clear); active agent appears
+  as a transient badge on the in-flight turn's bubble and disappears
+  when the turn ends.
+
+Slash grammar:
+
+| Command                  | Effect                                                         |
+|--------------------------|----------------------------------------------------------------|
+| `/agent <task>`          | Run the task one-shot through ReAct over enabled tools.        |
+| `/agent-plan <task>`     | Same, plan-execute runner.                                     |
+| `/agent-workflow <task>` | Same, workflow runner.                                         |
+| `/persona <slug>`        | Persistent: set `Chat.personaId`. No task arg expected.        |
+| `/persona`               | Clear the persona.                                             |
+| `/default` / `/clear`    | Clear persona (no-op on agent — agents are already one-shot).  |
+
+Parsing rule: only the first character matters AND it must be
+followed by a recognised command word. Unknown `/foo` errors inline
+("Unknown command. Did you mean `/agent`?") rather than silently
+sending — keeps typos out of the model. Slash autocomplete combobox
+fires on the leading `/` (Melt UI combobox, same affordance as
+elsewhere in the app).
+
+### 9.1 Runner interface (Go)
+
+Refactor `pkg/margo/agent` so `StreamReact` becomes one implementation
+of a new `Runner` interface:
+
+```go
+type Runner interface {
+    Run(ctx context.Context, c margo.Client, defaults margo.Request,
+        tools []tool.BaseTool, input []*schema.Message,
+        attachments []margo.Part, gate PermissionGate,
+        emit func(StepEvent)) error
+}
+```
+
+Existing `StreamReact` is renamed (or kept as a thin wrapper around)
+`ReactRunner`. `StreamAgent` in `app.go` dispatches by runner type
+("react" | "plan" | "workflow") to the appropriate Runner. The
+ctx-stashed step emitter from §6.6.A polish stays — no change to the
+event protocol.
+
+Coverage: rename existing `stream_test.go` cases to address the
+`Runner` interface; behavior unchanged for the ReAct path.
+
+### 9.2 Slash parser + autocomplete (frontend)
+
+Pure frontend slice. New `lib/slash.ts` exporting `parseSlash(input)`
+returning `{ command: string; args: string; task: string } | null`.
+`send()` calls it before submitting:
+
+- `/persona <slug>` → write `Chat.personaId`, do NOT send a turn.
+- `/persona` alone → clear `Chat.personaId`, do NOT send a turn.
+- `/agent[-type] <task>` → call `StreamAgent` with the resolved
+  runner type and the task as the user message.
+- Unknown command → inline error banner; do not send.
+
+Slash autocomplete component: triggered when the composer's first
+character becomes `/`. Lists known commands + dynamic completions
+(persona slugs after `/persona `, agent runner types after `/agent`).
+Reuse the Melt UI combobox pattern from the role picker that this
+slice retires.
+
+Composer placeholder gains a hint: "Send a message… or `/` for
+commands."
+
+Coverage: unit tests for `parseSlash` covering each command, the
+"recognised command word" disambiguation rule, and unknown-command
+handling.
+
+### 9.3 Tools tab + per-workspace tool enablement
+
+New Tools tab in the right sidebar. Read-only catalog of every
+registered tool with: name, description, read-only flag, streamable
+flag, registered-status (greyed if the host binary isn't on PATH).
+Each row gains an enable/disable toggle.
+
+New `Workspace.enabledTools: string[]` (default: every tool the host
+supports, so behaviour for existing users is unchanged on upgrade).
+`StreamAgent` resolves the tool palette as `enabledTools ∩
+App.Tools()` — the same intersection logic today's Agent record
+performs, just sourced from the workspace instead of an agent
+bundle.
+
+Coverage: snapshot test for default enabled set; integration test
+that disabling a tool removes it from `StreamAgent`'s effective
+palette.
+
+### 9.4 Retire bundled Agent records
+
+`Chat.agentId` and the `Settings.agents` library exist today because
+agents bundled persona + tool allowlist. With §9.1–9.3 the bundle is
+unnecessary — picking an agent is just picking a runner, which lives
+on the slash command. Built-in records ("Quarto Author",
+"Time-aware") need a migration path:
+
+- **Option A: retire entirely.** Built-ins become **Personas** with
+  system prompts that mention which tools to enable
+  ("Quarto Author — use with `quarto_render` enabled."). Simpler;
+  trades one-click activation for two-step (pick persona + enable
+  tool). User-created Agents migrate similarly.
+- **Option B: reframe as Presets.** A new sidebar entry where one
+  click sets persona + enables a tool set. Preserves the bundling
+  value without giving it special runtime status.
+
+Decision deferred until §9.1–9.3 ship and we can see whether the
+slash-command speed is enough compensation for the lost bundling.
+Whichever wins, `Chat.agentId` is retired; the legacy `agentMode`
+shim in `send()` goes with it.
+
+### 9.5 Plan-execute runner
+
+Implement the `Runner` interface for plan-then-execute (collapses
+existing TODO #6.5). Planner node emits a structured task list,
+worker executes each step, reducer summarises. Wired through
+`/agent-plan <task>`. See `docs/dev/agents_and_tools.md` Pattern 2
+for the Eino `compose.Graph` scaffold.
+
+### 9.6 Workflow runner
+
+Hand-authored sequential pipeline runner: each step is a model call
+(optionally with tools) whose output feeds the next. Useful for
+fixed multi-stage transforms ("draft → fact-check → tighten"). Wired
+through `/agent-workflow <task>`. Mostly collapses into §8.3's
+pipeline composition flavor.
+
+### Sequenced rollout
+
+1. **§9.1** — Runner interface refactor. ReAct path unchanged
+   behaviorally; surface for downstream slices.
+2. **§9.2** — Slash parser + autocomplete, dispatching `/agent` to
+   the ReAct runner. Coexists with the dropdown picker.
+3. **§9.3** — Tools tab + per-workspace enablement. Retire the
+   legacy "all tools always available" assumption.
+4. **§9.4** — Retire bundled Agent records; decide A vs B. Drop the
+   dropdown picker.
+5. **§9.5 / §9.6** — Add runners as they're needed; each is an
+   independent slice.
+
+### Tradeoffs to revisit during 9.4
+
+- **Setup friction.** Today's "click Quarto Author" becomes "pick
+  Quarto Author persona AND enable `quarto_render` tool". Two clicks
+  vs one. Slash-command speed for power users is the compensating
+  win; Presets (Option B) are the safety net if friction bites.
+- **Discoverability of slash commands.** Casual users won't know
+  they exist. Mitigation: the composer placeholder hint and the
+  always-visible sidebar tabs as the discovery surface.
+- **Workspace vs chat scope for tool enablement.** Per-workspace
+  fits the rest of the workspace settings model and is the default.
+  Per-chat is more granular but adds setup-per-chat friction; defer
+  unless requested.
