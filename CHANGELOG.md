@@ -9,6 +9,123 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Document attachments (TODO §7.5). PDFs now ride the same attachment
+  path as images: composer accepts `application/pdf` with a 25 MB cap;
+  pending non-image attachments render as a filename badge instead of
+  a thumbnail; the multimodal-model gate (§7.3) now only fires for
+  *image* attachments, since documents reach the model without
+  needing vision capability. Provider wiring: `margo.Part` gains a
+  `Name` field so the extracted-text wrapper can attribute content to
+  a specific attachment. Anthropic emits `NewDocumentBlock` with
+  `Base64PDFSourceParam` for `application/pdf` — native PDF support.
+  OpenAI and OpenRouter share a Go-side fallback: new
+  `pkg/margo/docs.go::ExtractTextFromDocument` decodes PDFs via
+  `github.com/ledongthuc/pdf` (and reads `text/*` as-is), trims to
+  `MaxExtractedDocChars` (~100 KB so a 500-page book doesn't blow a
+  context window), wraps the body in `<file name="...">` so the model
+  can distinguish multiple attachments, and inlines as a text content
+  part. Extraction failure surfaces as a clear marker inside the
+  wrapper rather than silently dropping the attachment. `app.go`'s
+  `attachmentsToParts` and `applyAttachments` route by MIME prefix
+  (`image/*` → `PartImage`; everything else → `PartDocument`).
+  Coverage: `pkg/margo/docs_test.go` (text-mime passthrough,
+  unsupported-mime error, empty-data error, oversized truncation,
+  malformed-PDF error); `attachments_test.go::TestAttachmentsToPartsRoutesByMime`
+  (wire-format routing).
+- Attachment persistence (TODO §7.4). Attachments now survive a chat
+  reload. New Wails methods on `*App`:
+  - `SaveAttachment(chatID, name, mimeType, dataB64) -> StoredAttachment`
+    decodes the base64 payload and writes it to
+    `os.UserConfigDir()/Margo/attachments/<chatID>/<stamp>-<rnd>-<safe-name>`.
+    The chat-id and filename are sanitised (alphanumerics + `-_` only on
+    the chat id; `filepath.Base` + separator strip on the name), so the
+    Wails surface cannot be coaxed into writing outside the attachments
+    root.
+  - `LoadAttachment(path) -> base64` reads bytes back for replay, with a
+    `filepath.Rel` guard that rejects any path outside the attachments
+    root — `LoadAttachment` is not a general-purpose file reader.
+  - `DeleteChatAttachments(chatID)` removes the per-chat subdir; called
+    from `ChatList.confirmDelete` when the user forgets a chat.
+  Frontend `Message` interface gains `attachments?: StoredAttachment[]`;
+  `attachmentCount` is retained as a legacy fallback for pre-§7.4
+  messages. `send()` calls `SaveAttachment` for each pending attachment
+  *before* persisting the message — a failed save aborts the send so
+  half-attached messages never reach the chat log. New
+  `AttachmentThumb.svelte` component lazily loads each stored
+  attachment via `LoadAttachment` and renders an inline `<img>` for
+  images or a clickable filename badge for documents (clicking either
+  opens the original via `OpenPath`). Coverage: `attachments_test.go`
+  (round-trip save/load, idempotent delete, path-traversal escape
+  rejection, chat-id validation).
+- RAG polish: structured retrieval events + mtime-aware re-index.
+  New `StepRetrieve` step kind (`agent.RetrievalHit` payload) carrying
+  per-hit path, doc, score, and a 240-char snippet. `StreamReact` now
+  stashes the emit callback on the run context via `WithStepEmitter` /
+  `PublishStep` so tools can surface auxiliary structured events
+  alongside their normal text return; `search_knowledge` publishes the
+  hit list before returning its model-facing text. Wails routes a
+  `tool_retrieve` chunk with a `hits[]` payload; frontend `AgentStep`
+  gains `hits?` plus a `setStepHits` helper, and the step card now
+  renders a clickable hit list (path · score · snippet) when present,
+  falling back to the raw result text otherwise. `rag.Indexer` learns
+  per-file mtime tracking: `SourceInfo.Files []IndexedFile{RelPath,
+  ModTime, ChunkIDs}` is persisted in the sidecar, and `IndexPath`
+  skips embedding for files whose mtime matches the prior run.
+  `IndexResult` reports `SkippedFiles` / `EmbeddedFiles` so the UI
+  can summarise the work; SettingsPanel grows a per-source "Refresh"
+  button and a one-line status ("indexed …: N embedded, M unchanged").
+  Coverage: `indexer_test.go::TestIndexerSkipsUnchangedFiles` (proves
+  the embedder receives strictly fewer items on re-index);
+  `tools_search_knowledge_test.go::TestSearchKnowledgePublishesHits`
+  +`TestSearchKnowledgeNoEmitterIsHarmless`.
+- Minimum-viable RAG (TODO §6.6.A end-to-end). New
+  `pkg/margo/rag/indexer.go` composes the existing loader, chunker,
+  embedder, and chromem-go store behind `Indexer.IndexPath`,
+  `Indexer.Search`, `Indexer.Sources`, and `Indexer.DeleteSource`. A
+  sidecar `sources.json` next to the chromem `.gob` tracks which
+  paths the user has indexed (with their chunk ids) so re-indexing
+  prunes stale chunks and DeleteSource cleans up by source rather
+  than by chunk. New built-in tool `agent.SearchKnowledgeTool` wired
+  into `builtinTools` as `search_knowledge(query, k=5)`; marked
+  read-only so it skips the permission prompt. The tool ctor takes a
+  `SearchProvider` interface (the narrow subset of `*rag.Indexer` it
+  needs) so it can be unit-tested without an embedder. `builtinTools`
+  now stores `func(*App) tool.BaseTool` constructors so tools can
+  close over per-run state (currently: the active workspace's
+  indexer). New Wails methods: `SetActiveWorkspace(id)` (pushed by
+  the frontend on workspace switch), `IndexPath(wsID, path)`,
+  `KnowledgeSources(wsID)`, `DeleteKnowledgeSource(wsID, path)`,
+  `PickKnowledgePath(dirOnly)`. Per-workspace indexers are
+  lazy-constructed and cached on the `*App`. Embedder is OpenAI
+  `text-embedding-3-small` (1536 dims); indexing requires
+  `OPENAI_API_KEY` and errors clearly otherwise. Frontend
+  `SettingsPanel` (workspace mode) grows a "Knowledge sources"
+  collapsible section listing indexed paths with per-entry Remove
+  and "+ Index file" / "+ Index folder" buttons. Coverage:
+  `indexer_test.go` (file + dir indexing, re-index replacement,
+  sidecar persistence across re-open, DeleteSource);
+  `tools_search_knowledge_test.go` (format, default k, nil provider,
+  empty results). The previously unused `chromem-go` dependency is
+  now a live dep.
+- Streaming tools (TODO §6.4). `pkg/margo/agent` now surfaces a new
+  `StepToolStream` step kind; `StreamReact` wires
+  `cbtmpl.ToolCallbackHandler.OnEndWithStreamOutput` to drain a
+  `tool.StreamableTool`'s output chunk-by-chunk, emitting each chunk as
+  `StepToolStream` and a final concatenated `StepToolResult` so the
+  existing UI merge logic still attaches a "final result" to the
+  matching tool_call. First streamable tool: `web_fetch(url,
+  max_bytes?)` — GETs an http(s) URL, rejects non-text content types
+  and >=400 responses, reduces HTML to readable text (script / style
+  blocks dropped, tags stripped, common entities decoded), caps the
+  body at 256 KB by default, and streams the result in 4 KB chunks.
+  Wails `AgentStepEvent` gains a `chunk` field; frontend `AgentStep`
+  gains a `stream?` buffer with a new `appendStepStream` helper, and
+  the step card grows a live monospace region that renders until the
+  paired `tool_result` arrives. Coverage:
+  `stream_test.go::TestStreamReactStreamableTool` exercises ordering
+  and concatenation; `tools_webfetch_test.go` covers HTML reduction,
+  multi-chunk plaintext streaming, truncation, and rejection of
+  binary / non-http / 4xx responses.
 - Multimodal-model gate (TODO §7.3). New `MULTIMODAL_MODELS` set +
   `isMultimodal(model)` helper in `store.ts` (alongside
   `CONTEXT_WINDOWS`) seeded with Anthropic Claude 4.x and OpenAI
@@ -409,6 +526,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Left sidebar collapse in `App.svelte` collapsed the main content
+  area instead of the sidebar. The root grid declares three columns
+  (`[280px_1fr_320px]` and zero-width variants), but the left/right
+  `<aside>`s were wrapped in `{#if showLeft}` / `{#if showRight}`,
+  so removing the left aside shifted `<main>` into the now-zero-width
+  first column. The asides are now always rendered (with the
+  `ChatList` / `SettingsPanel` contents gated by the `{#if}` and
+  `aria-hidden` reflecting the collapsed state), so DOM children
+  always match the grid template and the correct column collapses.
 - Markdown links opened inside the Wails webview, replacing the app
   shell with the destination page (TODO #2). DOMPurify's
   `afterSanitizeAttributes` hook now injects `target="_blank"` and

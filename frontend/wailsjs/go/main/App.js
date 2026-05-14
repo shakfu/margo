@@ -10,8 +10,28 @@ export function Chat(arg1, arg2, arg3, arg4, arg5) {
   return window['go']['main']['App']['Chat'](arg1, arg2, arg3, arg4, arg5);
 }
 
+export function DeleteChatAttachments(arg1) {
+  return window['go']['main']['App']['DeleteChatAttachments'](arg1);
+}
+
+export function DeleteKnowledgeSource(arg1, arg2) {
+  return window['go']['main']['App']['DeleteKnowledgeSource'](arg1, arg2);
+}
+
 export function Greet(arg1) {
   return window['go']['main']['App']['Greet'](arg1);
+}
+
+export function IndexPath(arg1, arg2) {
+  return window['go']['main']['App']['IndexPath'](arg1, arg2);
+}
+
+export function KnowledgeSources(arg1) {
+  return window['go']['main']['App']['KnowledgeSources'](arg1);
+}
+
+export function LoadAttachment(arg1) {
+  return window['go']['main']['App']['LoadAttachment'](arg1);
 }
 
 export function Models(arg1) {
@@ -26,6 +46,10 @@ export function OutputDir() {
   return window['go']['main']['App']['OutputDir']();
 }
 
+export function PickKnowledgePath(arg1) {
+  return window['go']['main']['App']['PickKnowledgePath'](arg1);
+}
+
 export function PickWorkspaceDir() {
   return window['go']['main']['App']['PickWorkspaceDir']();
 }
@@ -36,6 +60,14 @@ export function Providers() {
 
 export function RespondPermission(arg1, arg2, arg3) {
   return window['go']['main']['App']['RespondPermission'](arg1, arg2, arg3);
+}
+
+export function SaveAttachment(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['SaveAttachment'](arg1, arg2, arg3, arg4);
+}
+
+export function SetActiveWorkspace(arg1) {
+  return window['go']['main']['App']['SetActiveWorkspace'](arg1);
 }
 
 export function StartupWorkspaceDir() {

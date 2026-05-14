@@ -6,7 +6,17 @@ export function CancelStream(arg1:string):Promise<void>;
 
 export function Chat(arg1:string,arg2:string,arg3:Array<main.ChatMessage>,arg4:main.ChatOptions,arg5:Array<main.AttachmentInput>):Promise<main.ChatResponse>;
 
+export function DeleteChatAttachments(arg1:string):Promise<void>;
+
+export function DeleteKnowledgeSource(arg1:string,arg2:string):Promise<void>;
+
 export function Greet(arg1:string):Promise<string>;
+
+export function IndexPath(arg1:string,arg2:string):Promise<main.IndexResult>;
+
+export function KnowledgeSources(arg1:string):Promise<Array<main.KnowledgeSource>>;
+
+export function LoadAttachment(arg1:string):Promise<string>;
 
 export function Models(arg1:string):Promise<Array<string>>;
 
@@ -14,11 +24,17 @@ export function OpenPath(arg1:string):Promise<void>;
 
 export function OutputDir():Promise<string>;
 
+export function PickKnowledgePath(arg1:boolean):Promise<string>;
+
 export function PickWorkspaceDir():Promise<string>;
 
 export function Providers():Promise<Array<string>>;
 
 export function RespondPermission(arg1:string,arg2:boolean,arg3:boolean):Promise<void>;
+
+export function SaveAttachment(arg1:string,arg2:string,arg3:string,arg4:string):Promise<main.StoredAttachment>;
+
+export function SetActiveWorkspace(arg1:string):Promise<void>;
 
 export function StartupWorkspaceDir():Promise<string>;
 

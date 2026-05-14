@@ -10,7 +10,7 @@
     WORKSPACE_TEMPLATES,
     type Workspace,
   } from './store';
-  import { PickWorkspaceDir } from '../../wailsjs/go/main/App.js';
+  import { PickWorkspaceDir, DeleteChatAttachments } from '../../wailsjs/go/main/App.js';
 
   export let busy: boolean = false;
 
@@ -144,7 +144,14 @@
   }
 
   function confirmDelete() {
-    if (pendingDelete) deleteChat(pendingDelete.id);
+    if (pendingDelete) {
+      const id = pendingDelete.id;
+      // Drop the chat's on-disk attachments before removing it from
+      // the store. Best-effort: failure to clean up disk blobs must
+      // not block the user from forgetting a chat.
+      DeleteChatAttachments(id).catch(() => {});
+      deleteChat(id);
+    }
     pendingDelete = null;
     dlgOpen.set(false);
   }

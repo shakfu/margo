@@ -25,36 +25,22 @@ adapter pattern + the pre-built ReAct loop). To justify the dep weight,
 work through the items below in order. Each subitem is independently
 shippable; treat the ordering as a recommendation, not a hard chain.
 
-### 6.3 Context-window management via MessageRewriter — **done**
+### 6.3 Context-window management — follow-ups
 
-Drop-oldest variant shipped. `pkg/margo/agent/budget.go` provides
-`BudgetForModel(model)` (Go-side mirror of the frontend's
-`CONTEXT_WINDOWS` table), `RewriteForBudget(msgs, budget)` (operates
-on `[]*schema.Message` for the agent path), and
-`RewriteMargoForBudget(msgs, system, budget)` (operates on
-`[]margo.Message` for the plain-chat path). Both registered: the
-agent path via `react.AgentConfig.MessageRewriter` (so trimming runs
-between ReAct iterations as tool results accumulate); the plain-chat
-path via `toMargoRequest` in `app.go`. Algorithm trims oldest turns
-under a 25% output reserve, keeps system + final turn always, and
-groups Tool messages with their owning Assistant turn so tool_results
-are never orphaned. Token estimation is `len/4` chars-per-token —
-deliberately coarse, no tokenizer dep. Coverage:
-`budget_test.go::TestRewriteForBudget*` + `TestRewriteMargoForBudget`.
-Docs: `docs/dev/agents_and_tools.md` § "Context-window management".
+Drop-oldest variant shipped (see CHANGELOG). Deferred:
+summarisation-instead-of-drop (would preserve information but adds a
+model call per iteration); injecting ephemeral system reminders
+(waits on a per-chat preferences store that doesn't exist yet).
 
-Deferred from the original task: summarisation-instead-of-drop (would
-preserve information but adds a model call per iteration); injecting
-ephemeral system reminders (waits on a per-chat preferences store
-that doesn't exist yet).
+### 6.4 Streaming tools — **done**
 
-### 6.4 Streaming tools
-
-Implement a real `tool.StreamableTool` (e.g. `web_fetch`,
-`run_shell_command`, `tail_log`) and pipe its chunks back through the
-existing step-event channel as a new `StepKind` (`StepToolStream` or
-similar). UI: extend the step card in `App.svelte` to grow a streaming
-result region. Pre-req for any agent that does I/O slower than ~1s.
+Shipped (see CHANGELOG): `StepToolStream` event kind,
+`OnEndWithStreamOutput` wiring in `StreamReact`, `web_fetch` as the
+first streamable tool, and a live monospace region in the step card.
+Follow-ups when demand surfaces: additional streamable tools
+(`run_shell_command` would gate behind permissions; `tail_log` once
+file-reading tools land), and richer rendering (e.g. ANSI colour for
+shell output).
 
 ### 6.5 Custom graphs (`compose.Graph`)
 
@@ -126,29 +112,21 @@ If hybrid retrieval (keyword + vector) turns out to be needed,
 layer a small in-memory BM25 over chromem-go ourselves rather than
 swap backends — see the note at the bottom of 6.6.C.
 
-#### 6.6.A chromem-go — built-in embedded backend
+#### 6.6.A chromem-go — built-in embedded backend — **done**
 
-Pure Go, no CGo, in-process, persisted to the app's user-data
-directory. Sweet spot ~100k vectors — comfortable for "all my notes",
-"this codebase", "this PDF library" use cases.
+Minimum-viable RAG shipped (see CHANGELOG): `rag.Indexer` composes
+loader + chunker + OpenAI embedder + ChromemStore, with a sidecar
+`sources.json` tracking indexed paths; `search_knowledge` tool wired
+into `builtinTools`; per-workspace lazy-constructed indexers on
+`*App`; Wails methods for index / list / delete / path-pick;
+SettingsPanel knowledge-sources section.
 
-- **Dep.** `github.com/philippgille/chromem-go` (MIT, active).
-- **Persistence path.** Use `os.UserConfigDir()` →
-  `Margo/vectors/<collection>.gob`. One collection per knowledge source.
-- **Implementation.** Wrap `chromem.Collection` to satisfy
-  `rag.VectorStore`. The chromem-go embedder slot accepts a
-  `func(ctx, text) ([]float32, error)` — adapt our `Embedder`
-  interface in.
-- **Lifecycle.** Load collection on first query (lazy), persist
-  asynchronously after writes. Don't block the chat thread on disk
-  flushes.
-- **Limits.** chromem-go loads the full index into RAM on open
-  (HNSW + brute-force hybrid). Beyond ~100k vectors, switch the user
-  to Qdrant. Surface this in the UI as a soft warning when a
-  collection grows past, say, 50k entries.
-- **Why pure Go matters here.** sqlite-vec would force CGo into
-  universal macOS Wails builds and break the current
-  zero-CGo-dependency property. chromem-go preserves it.
+Follow-ups for this backend:
+
+- **50k-vector soft warning.** chromem-go loads the full HNSW index
+  into RAM on open. Surface a soft warning in the panel when a
+  workspace's chunk count crosses ~50k so the user can choose to
+  switch to Qdrant (6.6.B) before performance degrades.
 
 #### 6.6.B Qdrant — remote/distributed backend
 
@@ -241,17 +219,9 @@ variables (user name, project context, role).
 typed pathway instead. Tiny cleanup; do as part of any other
 adapter work, not standalone.
 
-### 6.10 Tool middleware — **partially done** (permission prompts shipped)
+### 6.10 Tool middleware — remaining slices
 
-Permission-prompt slice landed:
-`pkg/margo/agent/permission.go::permissionMiddleware` gates each
-non-read-only invocation behind a user prompt; read-only tools
-auto-approve via the `agent.ReadOnlyTools` allowlist. UI surfaces
-prompts as a step card with Approve / Always / Deny buttons; the
-Always list persists in `Settings.autoApproveTools`. Coverage:
-`permission_test.go`. Docs: `docs/dev/agents_and_tools.md` § "Tool
-permission prompts".
-
+Permission prompts + trusted-tools UI shipped (see CHANGELOG).
 Remaining cross-cutting middleware uses (not yet built; pursue when
 demand surfaces):
 
@@ -260,11 +230,6 @@ demand surfaces):
   production.
 - **Rate limiting**: per-tool or per-key rate limits. Relevant once
   we have network-bound tools.
-- ~~**Trusted-tools management UI**: a Settings panel section showing
-  the persisted `autoApproveTools` list with per-entry remove
-  buttons.~~ Done — collapsible "Trusted tools" section in
-  `SettingsPanel.svelte` with per-entry Revoke buttons + a Revoke-all
-  shortcut.
 
 ### 6.11 ToolReturnDirectly
 
@@ -296,86 +261,55 @@ Wails surface, frontend composer, persistence, token accounting), so the
 work is sliced below in dependency order. Each slice is independently
 shippable; ship in order.
 
-### 7.1 Provider multipart message shape — **done**
+### 7.1–7.3 — done
 
-`pkg/margo/client.go` gains a `Part` type
-(`Kind: "text"|"image"|"document"`, `Text string`, `MimeType string`,
-`Data []byte`) and `Message.Parts []Part`. The legacy `Content
-string` remains the text-only convenience; providers prefer `Parts`
-when non-empty. Anthropic's `toAnthropicUserBlocks` emits
-`NewImageBlockBase64` per image part. OpenAI / OpenRouter share the
-same `data:<mime>;base64,...` URL approach via `ImageContentPart`.
-Documents (`PartDocument`) are reserved but not yet wired —
-deferred to §7.5.
+Provider multipart shape, image attachments end-to-end, and the
+multimodal cross-provider gate all shipped (see CHANGELOG). Manual
+verification of the OpenAI / OpenRouter vision paths against real
+models is still worth doing.
 
-### 7.2 Image attachments end-to-end — **done**
+### 7.4 Persistence + replay — **done**
 
-Frontend reads attachments via the browser File API (no Wails-side
-file dialog needed), base64-encodes via FileReader, and forwards a
-new `AttachmentInput[]` arg to `Chat` / `StreamChat` /
-`StreamAgent`. Plain-chat path glues parts onto the final user
-message via `applyAttachments` inside `toMargoRequest`. Agent path
-threads parts through a new `Adapter.WithFinalUserAttachments`
-that stamps them onto the last user turn during `request()` —
-necessary because schema.Message doesn't carry our Parts shape.
-Composer grows a paperclip button (hidden `<input type=file>`),
-drag-drop zone over the footer with bg highlight on hover, and a
-thumbnail strip with × per attachment. Per-file caps:
-PNG/JPEG/WebP/GIF, 10 MB. User bubble shows `📎 N attachments`
-underneath the prompt for messages that had attachments at send
-time. Attachments are not persisted (clear after send;
-`Message.attachmentCount` carries only the count). Coverage:
-`adapter_test.go::TestAdapterFinalUserAttachments`. Cross-provider
-parity (§7.3) is implicitly done since all three providers got
-multipart support in §7.1, but exercising the OpenAI / OpenRouter
-paths against real models is a manual verification step.
+Option B shipped (see CHANGELOG): attachments live under
+`os.UserConfigDir()/Margo/attachments/<chatID>/`, the message records
+only a `StoredAttachment` (path + name + mime + size), and the
+thumbnail component reads bytes back on demand via `LoadAttachment`.
+A future re-send path (not built yet — there's no UI for editing a
+prior turn) would call `LoadAttachment` for each stored attachment
+and feed it through the existing `AttachmentInput` plumbing
+unchanged.
 
-### 7.3 Cross-provider parity — **done**
+Follow-ups when demand surfaces:
 
-Multimodal allowlist (`MULTIMODAL_MODELS` + `isMultimodal()`) lives in
-`frontend/src/lib/store.ts` next to `CONTEXT_WINDOWS`. Composer
-computes a reactive `attachmentsBlocked` when attachments are pending
-AND the active model isn't on the allowlist; in that state the send
-button disables, an inline error-styled banner names the model and
-suggests switching to a vision-capable one, and the `send()` guard
-short-circuits with a matching error message. Allowlist seeded with
-the Anthropic Claude 4.x family and OpenAI GPT-5.x family;
-maintained alongside the model menus in `app.go`. Manual
-verification against real OpenAI / OpenRouter vision endpoints is
-still worth doing; the Anthropic path is exercised end-to-end.
+- **In-memory thumbnail cache.** Today every render of a long chat
+  re-reads each attachment from disk on mount. A small Map keyed by
+  path inside the AttachmentThumb component (or hoisted to a store)
+  would amortise re-renders. Cheap fix; defer until a chat with
+  20+ attachments is in steady use.
+- **Orphaned-blob GC.** If a chat is deleted while its
+  `DeleteChatAttachments` call fails, the directory survives but the
+  chat doesn't. A startup sweep that diffs on-disk chat dirs against
+  the persisted chat list would clean those up.
 
-### 7.4 Persistence + replay
+### 7.5 Document (PDF / text) attachments — **done**
 
-Today's `localStorage`-backed `Chat.messages` only stores text. After
-#7.2/#7.3, attached images are sent once and forgotten. Decide:
+Shipped (see CHANGELOG): Anthropic native PDF blocks via
+`NewDocumentBlock` + `Base64PDFSourceParam`; OpenAI / OpenRouter
+text-extraction fallback in `pkg/margo/docs.go::ExtractTextFromDocument`
+using `github.com/ledongthuc/pdf` for PDFs and passthrough for
+`text/*`; composer accepts `application/pdf` at a 25 MB cap; the
+§7.3 multimodal gate only fires for image attachments since
+documents work on any model.
 
-- **Option A: store base64 in localStorage.** Simple, but localStorage
-  has a ~5MB origin quota and images blow through it fast.
-- **Option B: write attachments to `~/Documents/Margo/attachments/`
-  (mirroring `outputs/`) and store only the path in `Chat.messages`.**
-  Re-sending the chat reads bytes from disk. This is the right
-  long-term answer; pairs with the existing `OpenPath` plumbing for
-  click-to-open of attached images in the chat history.
-- Schema migration for the existing `margo:chats:v1` localStorage
-  shape: add `parts?: Part[]` to message; existing messages with
-  only `content` keep working unchanged.
+Follow-ups:
 
-Defer the choice until #7.2 is shipped and we have feel for typical
-attachment sizes.
-
-### 7.5 Document (PDF / text) attachments
-
-Once images work, extend to documents. Two paths converge:
-
-- **Anthropic native**: PDFs ride as `document` blocks (the SDK
-  already supports this). No preprocessing.
-- **OpenAI / OpenRouter fallback**: extract text on the Go side
-  (`github.com/ledongthuc/pdf` for PDFs, `os.ReadFile` for plain
-  text/markdown) and inline as a text part with a `<file
-  name="...">` wrapper. Loses structure but works on any model.
-
-Per-file size cap higher than images (~25MB). Token cost for
-extracted text is real — feeds into #7.6.
+- **Token cost on the composer.** The 100 KB extracted-text cap is
+  protective but invisible to the user. Surfacing an estimated
+  "+N tokens" pip per pending attachment is part of §7.6.
+- **Non-PDF docs.** `.docx`, `.html`, `.epub` would need additional
+  extractors. Add when a user actually asks; the abstraction is in
+  place (`ExtractTextFromDocument` returns "unsupported mime" for
+  anything else today).
 
 ### 7.6 Attachment token accounting
 
@@ -405,42 +339,9 @@ don't. See `docs/dev/personas_and_agents.md` for the design doc that
 covers the data model, UX, sequencing, anti-patterns, and tradeoffs in
 detail. The entries below mirror that doc's rollout sequence.
 
-### 8.1 Personas (tool-less roles) — **done**
+### 8.1–8.2 — done
 
-Frontend-only slice landed. `Persona` interface +
-`Settings.personas: Persona[]` carry a `BUILTIN_PERSONAS` catalog
-(Editor, Code Reviewer, Researcher, Concise) merged on each load
-so a deleted-by-hand builtin reappears next launch. `Chat.personaId`
-persists the per-chat selection. Role picker is a native `<select>`
-in the topbar (Default + Personas group only; Agents group lands in
-8.2). Settings → Agents grows a "Personas" section listing the
-catalog with Edit / Duplicate / Delete (builtins are duplicate-only)
-and a + New persona button; create/edit shares a Melt UI dialog.
-`send()` resolves the active persona via
-`findPersona($settings.personas, chat.personaId)` and replaces
-`Settings.system` with the persona's `systemPrompt` for both
-`StreamChat` and `StreamAgent` paths. Docs:
-`docs/dev/personas_and_agents.md`.
-
-### 8.2 Agents (personas + tool allowlists) — **done**
-
-Frontend-only slice landed. `Agent` interface +
-`Settings.agents: Agent[]` carry a `BUILTIN_AGENTS` catalog (Quarto
-Author → `quarto_render`; Time-aware → `current_time`) merged on
-each load. `Chat.agentId` enforces mutual exclusivity with
-`personaId` via `setChatAgent` / `setChatPersona` (each clears the
-other). The role picker grows an Agents optgroup showing
-`Name [N]` per entry with `agentMissingTools` greying out agents
-whose tool list isn't currently registered ("needs quarto_render").
-Settings → Agents grows an "Agents" section with the same
-Edit/Duplicate/Delete affordances and a tool-allowlist checkbox
-group in the create/edit dialog. Validation: name +
-systemPrompt + at least one tool required at save; empty
-allowlists rejected. The legacy `agentMode` checkbox is removed
-from the composer; the persisted flag still drives the route for
-backwards compat on chats that have it set without picking an
-explicit agent. Active-agent's tool list surfaces under the
-composer when an agent is picked. Docs:
+Personas and Agents shipped (see CHANGELOG); design doc lives at
 `docs/dev/personas_and_agents.md`.
 
 ### 8.3 Composition

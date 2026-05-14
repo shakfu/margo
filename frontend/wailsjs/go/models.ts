@@ -108,6 +108,60 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class IndexResult {
+	    path: string;
+	    fileCount: number;
+	    chunkCount: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new IndexResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.fileCount = source["fileCount"];
+	        this.chunkCount = source["chunkCount"];
+	    }
+	}
+	export class KnowledgeSource {
+	    path: string;
+	    isDir: boolean;
+	    fileCount: number;
+	    chunkCount: number;
+	    indexedAt: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new KnowledgeSource(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.isDir = source["isDir"];
+	        this.fileCount = source["fileCount"];
+	        this.chunkCount = source["chunkCount"];
+	        this.indexedAt = source["indexedAt"];
+	    }
+	}
+	export class StoredAttachment {
+	    path: string;
+	    name: string;
+	    mimeType: string;
+	    size: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new StoredAttachment(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.name = source["name"];
+	        this.mimeType = source["mimeType"];
+	        this.size = source["size"];
+	    }
+	}
 
 }
 

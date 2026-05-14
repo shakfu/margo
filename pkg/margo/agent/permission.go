@@ -14,7 +14,8 @@ import (
 // state must NOT be added here; the user should see and approve each
 // invocation (or pre-authorise via the always-approve list).
 var ReadOnlyTools = map[string]bool{
-	"current_time": true,
+	"current_time":     true,
+	"search_knowledge": true,
 }
 
 // ErrPermissionDenied is returned by the middleware when the user denies a

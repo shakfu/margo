@@ -1,6 +1,6 @@
 module github.com/shakfu/margo
 
-go 1.23.0
+go 1.24.1
 
 toolchain go1.26.2
 
@@ -8,6 +8,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.38.0
 	github.com/cloudwego/eino v0.8.13
 	github.com/joho/godotenv v1.5.1
+	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/openai/openai-go/v3 v3.33.0
 	github.com/philippgille/chromem-go v0.7.0
 	github.com/wailsapp/wails/v2 v2.11.0

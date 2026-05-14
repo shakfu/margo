@@ -50,13 +50,20 @@ const (
 //   - PartText:     Text holds the part's text. MimeType / Data ignored.
 //   - PartImage:    MimeType is e.g. "image/png" / "image/jpeg"; Data is
 //                   the raw image bytes. Providers base64-encode as needed.
-//   - PartDocument: same as image, with MimeType e.g. "application/pdf".
-//                   Reserved; not yet wired through any provider.
+//   - PartDocument: MimeType is the document type (e.g. "application/pdf",
+//                   "text/markdown"); Data is the raw bytes. Anthropic
+//                   accepts PDFs natively; other providers extract text
+//                   on the Go side and inline it as a text part.
+//
+// Name is the original filename, surfaced in the extracted-text wrapper
+// (`<file name="...">`) so the model can distinguish multiple docs.
+// Optional; primarily used by PartDocument.
 type Part struct {
 	Kind     PartKind
 	Text     string
 	MimeType string
 	Data     []byte
+	Name     string
 }
 
 // Message is one turn in a conversation. System prompts go in Request.System,

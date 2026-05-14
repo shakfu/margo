@@ -9,7 +9,14 @@ export interface Usage {
   totalMs: number;
 }
 
-export type StepKind = 'tool_call' | 'tool_result' | 'permission';
+export type StepKind = 'tool_call' | 'tool_result' | 'tool_stream' | 'tool_retrieve' | 'permission';
+
+export interface RetrievalHit {
+  path: string;
+  doc?: string;
+  score: number;
+  snippet?: string;
+}
 
 export interface AgentStep {
   kind: StepKind;
@@ -17,11 +24,33 @@ export interface AgentStep {
   arguments?: string;
   result?: string;
   isError?: boolean;
+  // Live streaming buffer for a tool_call whose backing tool is a
+  // StreamableTool. Accumulates incoming `tool_stream` chunks until the
+  // matching `tool_result` arrives, at which point the final concatenated
+  // text lives in `result` and `stream` is no longer rendered separately.
+  stream?: string;
+  // Structured retrieval matches, attached when a `tool_retrieve` event
+  // arrives for this tool_call. When present, the step card renders the
+  // hit list instead of the raw result text; the result text still lives
+  // in `result` for the model's continuation.
+  hits?: RetrievalHit[];
   // Only on permission steps: the round-trip id used by RespondPermission,
   // and the user's resolved decision once they click. `permissionId` is
   // cleared once resolved so the UI knows to drop the buttons.
   permissionId?: string;
   permissionStatus?: 'pending' | 'approved' | 'denied';
+}
+
+// StoredAttachment mirrors main.StoredAttachment from the Wails bindings:
+// the on-disk record of an attachment that rode with a user message. The
+// bytes themselves live under os.UserConfigDir()/Margo/attachments/<chatID>/
+// keyed by `path`; localStorage holds only this lightweight record so the
+// chat history survives a reload without blowing the ~5 MB origin quota.
+export interface StoredAttachment {
+  path: string;
+  name: string;
+  mimeType: string;
+  size: number;
 }
 
 export interface Message {
@@ -30,10 +59,12 @@ export interface Message {
   thinking?: string;
   usage?: Usage;
   steps?: AgentStep[];
-  // Number of image attachments that rode with this user message at
-  // send time. Stored as a count rather than the bytes themselves
-  // because localStorage has a ~5MB origin quota that images blow
-  // through quickly. Persistence-of-bytes is §7.4.
+  // Attachments that rode with this user message. Bytes live on disk;
+  // see StoredAttachment. Optional + tolerated as absent on
+  // pre-§7.4 messages, which fall back to the legacy `attachmentCount`.
+  attachments?: StoredAttachment[];
+  // Legacy: count-only badge from before §7.4. New messages set
+  // `attachments` instead and ignore this field on render.
   attachmentCount?: number;
 }
 
@@ -829,6 +860,56 @@ export function resolvePermissionStep(
         const s = steps[i];
         if (s.kind === 'permission' && s.permissionId === permissionId) {
           steps[i] = { ...s, permissionStatus: status, permissionId: undefined };
+          break;
+        }
+      }
+      messages[messages.length - 1] = { ...last, steps };
+      return { ...c, messages, updatedAt: Date.now() };
+    })
+  );
+}
+
+// appendStepStream finds the most recent tool_call step for `name` that
+// is still streaming (no result yet) and appends a chunk to its `stream`
+// buffer. No-op if no matching open call exists — this guards against
+// out-of-order delivery on Wails' event channel.
+export function appendStepStream(id: string, name: string, chunk: string) {
+  if (!chunk) return;
+  chats.update(cs =>
+    cs.map(c => {
+      if (c.id !== id || c.messages.length === 0) return c;
+      const messages = [...c.messages];
+      const last = messages[messages.length - 1];
+      const steps = [...(last.steps ?? [])];
+      for (let i = steps.length - 1; i >= 0; i--) {
+        const s = steps[i];
+        if (s.kind === 'tool_call' && s.name === name && s.result === undefined) {
+          steps[i] = { ...s, stream: (s.stream ?? '') + chunk };
+          break;
+        }
+      }
+      messages[messages.length - 1] = { ...last, steps };
+      return { ...c, messages, updatedAt: Date.now() };
+    })
+  );
+}
+
+// setStepHits attaches a structured retrieval payload to the most recent
+// tool_call step for `name`. Renderer logic in App.svelte uses the
+// presence of `hits` to switch the step card from raw-text to hit-card
+// layout. No-op if no matching open call exists.
+export function setStepHits(id: string, name: string, hits: RetrievalHit[]) {
+  if (!hits || hits.length === 0) return;
+  chats.update(cs =>
+    cs.map(c => {
+      if (c.id !== id || c.messages.length === 0) return c;
+      const messages = [...c.messages];
+      const last = messages[messages.length - 1];
+      const steps = [...(last.steps ?? [])];
+      for (let i = steps.length - 1; i >= 0; i--) {
+        const s = steps[i];
+        if (s.kind === 'tool_call' && s.name === name && s.result === undefined) {
+          steps[i] = { ...s, hits };
           break;
         }
       }

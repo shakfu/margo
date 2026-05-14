@@ -3,6 +3,7 @@ package openai
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"time"
 
@@ -128,6 +129,18 @@ func toSDKUserParts(m margo.Message) []sdk.ChatCompletionContentPartUnionParam {
 			parts = append(parts, sdk.ImageContentPart(sdk.ChatCompletionContentPartImageImageURLParam{
 				URL: dataURL,
 			}))
+		case margo.PartDocument:
+			// OpenAI's chat-completions API has no native document block,
+			// so extract text on the Go side (§7.5). Failures fall back
+			// to a clear marker so the model can at least mention that
+			// the attachment was unreadable, rather than the call
+			// silently dropping the part.
+			text, err := margo.ExtractTextFromDocument(p, p.Name)
+			if err != nil {
+				text = fmt.Sprintf("<file name=%q>\n[could not extract: %s]\n</file>", p.Name, err.Error())
+			}
+			parts = append(parts, sdk.TextContentPart(text))
+			hasText = true
 		}
 	}
 	// Preserve the legacy Content string when Parts didn't include any text.

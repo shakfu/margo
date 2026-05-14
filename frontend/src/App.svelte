@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { createDialog, melt } from '@melt-ui/svelte';
-  import { Providers, Models, Chat, StreamChat, StreamAgent, CancelStream, Tools, OutputDir, OpenPath, RespondPermission, StartupWorkspaceDir } from '../wailsjs/go/main/App.js';
+  import { Providers, Models, Chat, StreamChat, StreamAgent, CancelStream, Tools, OutputDir, OpenPath, RespondPermission, StartupWorkspaceDir, SetActiveWorkspace, SaveAttachment } from '../wailsjs/go/main/App.js';
   import { EventsOn, EventsOff, BrowserOpenURL } from '../wailsjs/runtime/runtime.js';
   import { mathjax } from './lib/mathjax';
   import { renderMarkdownStreaming, setHighlightTheme } from './lib/markdown';
@@ -17,6 +17,8 @@
     appendToLast,
     appendThinkingToLast,
     appendStepToLast,
+    appendStepStream,
+    setStepHits,
     updateLastStepResult,
     resolvePermissionStep,
     setLastUsage,
@@ -35,6 +37,7 @@
   } from './lib/store';
   import ChatList from './lib/ChatList.svelte';
   import SettingsPanel from './lib/SettingsPanel.svelte';
+  import AttachmentThumb from './lib/AttachmentThumb.svelte';
 
   let providers: string[] = [];
   let models: string[] = [];
@@ -71,9 +74,14 @@
   };
   let attachments: PendingAttachment[] = [];
   // Anthropic / OpenAI vision / OpenRouter VL models all accept JPEG/PNG/
-  // WebP/GIF; this is the conservative intersection.
-  const ATTACHMENT_MIME_ACCEPT = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
-  const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024; // 10 MB per file
+  // WebP/GIF; this is the conservative intersection. PDFs ride on the
+  // same path: Anthropic accepts them natively, OpenAI / OpenRouter get
+  // a Go-side text extraction (§7.5).
+  const IMAGE_MIME = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+  const DOCUMENT_MIME = ['application/pdf'];
+  const ATTACHMENT_MIME_ACCEPT = [...IMAGE_MIME, ...DOCUMENT_MIME];
+  const ATTACHMENT_MAX_IMAGE_BYTES = 10 * 1024 * 1024;     // 10 MB per image
+  const ATTACHMENT_MAX_DOC_BYTES = 25 * 1024 * 1024;       // 25 MB per document
   let dragOver = false;
   let fileInputEl: HTMLInputElement | null = null;
   let error = '';
@@ -82,6 +90,16 @@
   let messagesEl: HTMLElement;
 
   $: messages = $activeChat?.messages ?? [];
+
+  // Push the active workspace id to Go so the search_knowledge tool can
+  // resolve which collection to query at invoke time. The reactive
+  // statement fires on any $settings change; the lastPushedWorkspaceId
+  // guard de-dupes so we only hit IPC on actual workspace switches.
+  let lastPushedWorkspaceId = '';
+  $: if ($settings.activeWorkspaceId && $settings.activeWorkspaceId !== lastPushedWorkspaceId) {
+    lastPushedWorkspaceId = $settings.activeWorkspaceId;
+    SetActiveWorkspace(lastPushedWorkspaceId).catch(() => {});
+  }
 
   $: gridCols =
     $settings.showLeft && $settings.showRight ? 'grid-cols-[280px_1fr_320px]' :
@@ -103,7 +121,12 @@
   $: ctxUsed = ($activeChat?.tokensIn ?? 0) + ($activeChat?.tokensOut ?? 0);
   // Gate: attachments are pending but the *effective* model isn't on
   // the multimodal allowlist. Disables send + surfaces an inline warning.
-  $: attachmentsBlocked = attachments.length > 0 && !!$effectiveSettings.model && !isMultimodal($effectiveSettings.model);
+  // Only image attachments need a multimodal-capable model. PDFs and
+  // other documents reach the model either natively (Anthropic) or via
+  // Go-side text extraction (OpenAI / OpenRouter), so they work
+  // regardless of vision support. (§7.5)
+  $: hasImageAttachment = attachments.some(a => a.mimeType.startsWith('image/'));
+  $: attachmentsBlocked = hasImageAttachment && !!$effectiveSettings.model && !isMultimodal($effectiveSettings.model);
   $: ctxPct = ctxWindow > 0 ? Math.min(100, Math.round((ctxUsed / ctxWindow) * 100)) : 0;
 
   onMount(async () => {
@@ -187,11 +210,13 @@
     if (!files) return;
     for (const file of Array.from(files)) {
       if (!ATTACHMENT_MIME_ACCEPT.includes(file.type)) {
-        error = `Unsupported attachment type: ${file.type || file.name}. Allowed: PNG, JPEG, WebP, GIF.`;
+        error = `Unsupported attachment type: ${file.type || file.name}. Allowed: PNG, JPEG, WebP, GIF, PDF.`;
         continue;
       }
-      if (file.size > ATTACHMENT_MAX_BYTES) {
-        error = `Attachment "${file.name}" exceeds 10 MB.`;
+      const cap = DOCUMENT_MIME.includes(file.type) ? ATTACHMENT_MAX_DOC_BYTES : ATTACHMENT_MAX_IMAGE_BYTES;
+      const capLabel = DOCUMENT_MIME.includes(file.type) ? '25 MB' : '10 MB';
+      if (file.size > cap) {
+        error = `Attachment "${file.name}" exceeds ${capLabel}.`;
         continue;
       }
       try {
@@ -302,10 +327,27 @@
     error = '';
     busy = true;
 
+    // Persist attachments to disk before recording the message so the
+    // chat history survives a reload (§7.4). Failure to save any
+    // single attachment aborts the send — partial persistence would
+    // leave the user with a "half-attached" message that re-sending
+    // can't reproduce.
+    let stored: { path: string; name: string; mimeType: string; size: number }[] = [];
+    try {
+      for (const a of attachments) {
+        const s = await SaveAttachment(chat.id, a.name, a.mimeType, a.data);
+        stored.push({ path: s.path, name: s.name, mimeType: s.mimeType, size: s.size });
+      }
+    } catch (e) {
+      error = `Couldn't save attachment: ${String(e)}`;
+      busy = false;
+      return;
+    }
+
     appendMessage(chat.id, {
       role: 'user',
       content: text,
-      attachmentCount: attachments.length || undefined,
+      attachments: stored.length > 0 ? stored : undefined,
     });
     const history = ($activeChat?.messages ?? []).map(m => ({
       role: m.role,
@@ -363,7 +405,7 @@
     const base = `margo:stream:${id}`;
     const targetChatId = chat.id;
 
-    EventsOn(`${base}:chunk`, (payload: { kind: string; text?: string; name?: string; arguments?: string; result?: string; isError?: boolean; permissionId?: string }) => {
+    EventsOn(`${base}:chunk`, (payload: { kind: string; text?: string; name?: string; arguments?: string; result?: string; isError?: boolean; permissionId?: string; chunk?: string; hits?: Array<{ path: string; doc?: string; score: number; snippet?: string }> }) => {
       switch (payload.kind) {
         case 'thinking':
           appendThinkingToLast(targetChatId, payload.text ?? '');
@@ -374,6 +416,12 @@
             name: payload.name ?? '',
             arguments: payload.arguments ?? '',
           });
+          break;
+        case 'tool_stream':
+          appendStepStream(targetChatId, payload.name ?? '', payload.chunk ?? '');
+          break;
+        case 'tool_retrieve':
+          setStepHits(targetChatId, payload.name ?? '', payload.hits ?? []);
           break;
         case 'tool_result':
           updateLastStepResult(
@@ -518,11 +566,11 @@
 </script>
 
 <div class="grid h-screen bg-bg text-fg {gridCols}">
-  {#if $settings.showLeft}
-    <aside class="overflow-hidden min-w-0">
+  <aside class="overflow-hidden min-w-0" aria-hidden={!$settings.showLeft}>
+    {#if $settings.showLeft}
       <ChatList {busy} />
-    </aside>
-  {/if}
+    {/if}
+  </aside>
 
   <main class="flex flex-col min-w-0 h-screen">
     <header class="flex items-center gap-2 px-3.5 py-2 border-b border-border bg-bg">
@@ -614,9 +662,32 @@
                       {:else if step.permissionStatus === 'denied'}
                         <div class="px-2.5 py-1.5 text-error-fg"><span class="text-fg-faint mr-1">✗</span>denied</div>
                       {/if}
+                    {:else if step.hits && step.hits.length > 0}
+                      <ul class="flex flex-col gap-1 px-2.5 py-1.5">
+                        {#each step.hits as h, hi (hi)}
+                          <li class="border border-border rounded bg-bg px-2 py-1.5">
+                            <div class="flex items-baseline gap-2 text-[0.72rem]">
+                              <span class="text-fg-faint">{hi + 1}.</span>
+                              <a
+                                href={`file://${h.path}`}
+                                class="font-[family-name:var(--font-mono)] text-fg break-all hover:underline"
+                                title="Open source"
+                              >{h.doc || h.path}</a>
+                              <span class="text-fg-faint ml-auto shrink-0">score {h.score.toFixed(3)}</span>
+                            </div>
+                            {#if h.snippet}
+                              <div class="text-[0.72rem] text-fg-muted mt-0.5 leading-snug whitespace-pre-wrap break-words">{h.snippet}</div>
+                            {/if}
+                          </li>
+                        {/each}
+                      </ul>
                     {:else if step.result !== undefined}
                       <div class="px-2.5 py-1.5 {step.isError ? 'text-error-fg' : 'text-fg-muted'} whitespace-pre-wrap break-words">
                         <span class="text-fg-faint mr-1">←</span>{step.result}
+                      </div>
+                    {:else if step.stream !== undefined}
+                      <div class="px-2.5 py-1.5 text-fg-muted whitespace-pre-wrap break-words font-[family-name:var(--font-mono)]">
+                        <span class="text-fg-faint mr-1">…</span>{step.stream}{#if busy && i === messages.length - 1}<span class="cursor opacity-60">_</span>{/if}
                       </div>
                     {:else if busy && i === messages.length - 1}
                       <div class="px-2.5 py-1.5 text-fg-faint italic">running…</div>
@@ -627,7 +698,13 @@
             {/if}
             {#if m.role === 'user'}
               <div class="md whitespace-pre-wrap">{m.content}</div>
-              {#if m.attachmentCount}
+              {#if m.attachments && m.attachments.length > 0}
+                <div class="flex flex-wrap gap-2 mt-2">
+                  {#each m.attachments as a (a.path)}
+                    <AttachmentThumb {a} />
+                  {/each}
+                </div>
+              {:else if m.attachmentCount}
                 <div class="text-fg-faint text-[0.72rem] mt-1">
                   📎 {m.attachmentCount} {m.attachmentCount === 1 ? 'attachment' : 'attachments'}
                 </div>
@@ -685,14 +762,26 @@
       {#if attachments.length > 0}
         <div class="flex flex-wrap gap-2">
           {#each attachments as a (a.id)}
-            <div class="relative group" title="{a.name} ({Math.round(a.size / 1024)} KB)">
-              <img src={a.previewUrl} alt={a.name} class="h-14 w-14 object-cover rounded border border-border" />
-              <button
-                class="absolute -top-1 -right-1 bg-bg-elev border border-border rounded-full w-4 h-4 flex items-center justify-center text-[0.7rem] leading-none cursor-pointer hover:bg-hover-bg"
-                on:click={() => removeAttachment(a.id)}
-                aria-label="remove attachment"
-              >×</button>
-            </div>
+            {#if a.mimeType.startsWith('image/')}
+              <div class="relative group" title="{a.name} ({Math.round(a.size / 1024)} KB)">
+                <img src={a.previewUrl} alt={a.name} class="h-14 w-14 object-cover rounded border border-border" />
+                <button
+                  class="absolute -top-1 -right-1 bg-bg-elev border border-border rounded-full w-4 h-4 flex items-center justify-center text-[0.7rem] leading-none cursor-pointer hover:bg-hover-bg"
+                  on:click={() => removeAttachment(a.id)}
+                  aria-label="remove attachment"
+                >×</button>
+              </div>
+            {:else}
+              <div class="relative group flex items-center gap-2 px-2 py-1.5 border border-border bg-input-bg rounded text-[0.74rem] text-fg-muted" title="{a.name} ({Math.round(a.size / 1024)} KB)">
+                <span class="font-[family-name:var(--font-mono)]">📄</span>
+                <span class="truncate max-w-[140px]">{a.name}</span>
+                <button
+                  class="absolute -top-1 -right-1 bg-bg-elev border border-border rounded-full w-4 h-4 flex items-center justify-center text-[0.7rem] leading-none cursor-pointer hover:bg-hover-bg"
+                  on:click={() => removeAttachment(a.id)}
+                  aria-label="remove attachment"
+                >×</button>
+              </div>
+            {/if}
           {/each}
         </div>
       {/if}
@@ -754,11 +843,11 @@
     </footer>
   </main>
 
-  {#if $settings.showRight}
-    <aside class="overflow-hidden min-w-0">
+  <aside class="overflow-hidden min-w-0" aria-hidden={!$settings.showRight}>
+    {#if $settings.showRight}
       <SettingsPanel mode="workspace" {providers} {models} {busy} {outputDir} {availableTools} onReset={resetApp} />
-    </aside>
-  {/if}
+    {/if}
+  </aside>
 </div>
 
 <!--

@@ -25,11 +25,24 @@ type StepKind string
 const (
 	StepText       StepKind = "text"
 	StepToolCall   StepKind = "tool_call"
+	StepToolStream StepKind = "tool_stream"
 	StepToolResult StepKind = "tool_result"
+	StepRetrieve   StepKind = "tool_retrieve"
 	StepPermission StepKind = "permission"
 	StepError      StepKind = "error"
 	StepDone       StepKind = "done"
 )
+
+// RetrievalHit is one match surfaced by a knowledge-retrieval tool (e.g.
+// search_knowledge) for structured display in the UI. The tool also returns
+// its formatted text result through the standard tool_result path so the
+// model still sees the chunks; RetrievalHit is for the human reader.
+type RetrievalHit struct {
+	Path    string  `json:"path"`
+	Doc     string  `json:"doc,omitempty"`
+	Score   float32 `json:"score"`
+	Snippet string  `json:"snippet,omitempty"`
+}
 
 // StepEvent is one unit of agent progress, surfaced for UI rendering.
 //
@@ -38,8 +51,16 @@ const (
 //                     final answer.
 //   - StepToolCall:   Name is the tool's identifier, Arguments is the raw
 //                     JSON the model produced for the call.
+//   - StepToolStream: Name is the tool's identifier, Text holds an incremental
+//                     chunk of the tool's streaming output. Emitted only for
+//                     StreamableTools; followed by a StepToolResult carrying
+//                     the concatenated output once the stream ends.
 //   - StepToolResult: Name is the tool's identifier, Result is the textual
 //                     output, IsError flags execution failures.
+//   - StepRetrieve:   Name is the retrieval tool's identifier, Hits is the
+//                     structured list of matches. Emitted in addition to
+//                     the eventual StepToolResult so the UI can render
+//                     hits as cards rather than parsing a text blob.
 //   - StepError:      Text carries the error message; the run will not emit
 //                     further events.
 //   - StepDone:       The run has finished successfully; Usage is set.
@@ -52,6 +73,38 @@ type StepEvent struct {
 	IsError      bool
 	PermissionID string
 	Usage        *margo.Usage
+	// Hits is set for StepRetrieve events: the structured list of
+	// matches a retrieval tool surfaced. The matching StepToolResult
+	// (with the same Name) carries the textual rendering for the model.
+	Hits []RetrievalHit
+}
+
+// stepEmitterKey is the context key under which StreamReact stashes the
+// emit callback so tools running mid-loop can publish auxiliary step events
+// (e.g. retrieval hits) without going through the regular text-return path.
+type stepEmitterKey struct{}
+
+// WithStepEmitter returns a child context that carries the given emit
+// callback. Tools call PublishStep with that context to surface structured
+// events (RetrievalHit, future enrichments) to the UI in addition to their
+// text return value.
+func WithStepEmitter(ctx context.Context, emit func(StepEvent)) context.Context {
+	if emit == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, stepEmitterKey{}, emit)
+}
+
+// PublishStep emits a step event through whatever emitter the surrounding
+// StreamReact run installed. No-op if the context has no emitter (e.g.
+// when a tool is invoked outside an agent run from a test). Safe to call
+// from any goroutine spawned by a tool.
+func PublishStep(ctx context.Context, ev StepEvent) {
+	emit, _ := ctx.Value(stepEmitterKey{}).(func(StepEvent))
+	if emit == nil {
+		return
+	}
+	emit(ev)
 }
 
 // abortOnCtxCancel races each tool invocation against ctx.Done(). When the
@@ -136,6 +189,10 @@ func StreamReact(
 	if emit == nil {
 		emit = func(StepEvent) {}
 	}
+	// Make the emitter reachable to tools that want to publish structured
+	// auxiliary events (e.g. search_knowledge's retrieval hits) on top of
+	// their normal text return.
+	ctx = WithStepEmitter(ctx, emit)
 
 	middlewares := []compose.ToolMiddleware{abortOnCtxCancel}
 	if gate != nil {
@@ -223,6 +280,32 @@ func StreamReact(
 				result = out.Response
 			}
 			emit(StepEvent{Kind: StepToolResult, Name: info.Name, Result: result})
+			return ctx
+		},
+		// Streamable tools deliver their output as a stream of *tool.CallbackOutput
+		// chunks. Forward each chunk as a StepToolStream event for live UI
+		// rendering, then emit a single StepToolResult with the concatenated
+		// text so downstream merge logic (which pairs a tool_call with its
+		// final result) still functions identically to the non-streaming path.
+		OnEndWithStreamOutput: func(ctx context.Context, info *callbacks.RunInfo, out *schema.StreamReader[*tool.CallbackOutput]) context.Context {
+			defer out.Close()
+			var acc strings.Builder
+			for {
+				chunk, rerr := out.Recv()
+				if errors.Is(rerr, io.EOF) {
+					break
+				}
+				if rerr != nil {
+					emit(StepEvent{Kind: StepToolResult, Name: info.Name, Result: rerr.Error(), IsError: true})
+					return ctx
+				}
+				if chunk == nil || chunk.Response == "" {
+					continue
+				}
+				acc.WriteString(chunk.Response)
+				emit(StepEvent{Kind: StepToolStream, Name: info.Name, Text: chunk.Response})
+			}
+			emit(StepEvent{Kind: StepToolResult, Name: info.Name, Result: acc.String()})
 			return ctx
 		},
 		OnError: func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {

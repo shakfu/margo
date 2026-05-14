@@ -140,6 +140,16 @@ func toAnthropicUserBlocks(m margo.Message) []sdk.ContentBlockParamUnion {
 			if len(p.Data) > 0 && p.MimeType != "" {
 				blocks = append(blocks, sdk.NewImageBlockBase64(p.MimeType, base64.StdEncoding.EncodeToString(p.Data)))
 			}
+		case margo.PartDocument:
+			// Anthropic accepts PDFs natively as document blocks (§7.5).
+			// Other document mime types aren't supported on this path;
+			// the agent surface should route those through the OpenAI
+			// text-extraction fallback before reaching Anthropic.
+			if len(p.Data) > 0 && p.MimeType == "application/pdf" {
+				blocks = append(blocks, sdk.NewDocumentBlock(sdk.Base64PDFSourceParam{
+					Data: base64.StdEncoding.EncodeToString(p.Data),
+				}))
+			}
 		}
 	}
 	// Carry the legacy Content string too if Parts didn't include any

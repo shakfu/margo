@@ -229,3 +229,112 @@ func TestStreamReactCancelMidTool(t *testing.T) {
 		t.Fatalf("StreamReact did not return within 2s of cancel — abort middleware not honoring ctx")
 	}
 }
+
+// TestStreamReactStreamableTool verifies that a tool implementing
+// tool.StreamableTool fires StepToolStream events per chunk, that chunks
+// arrive in order, and that a final StepToolResult carrying the concatenated
+// output is emitted after the stream closes. Guards the
+// OnEndWithStreamOutput wiring in StreamReact.
+func TestStreamReactStreamableTool(t *testing.T) {
+	chunks := []string{"alpha ", "beta ", "gamma"}
+	streamingTool, err := toolutils.InferStreamTool(
+		"chunked_echo",
+		"Streams its input back one word at a time.",
+		func(ctx context.Context, _ struct{}) (*schema.StreamReader[string], error) {
+			sr, sw := schema.Pipe[string](len(chunks))
+			go func() {
+				defer sw.Close()
+				for _, c := range chunks {
+					sw.Send(c, nil)
+				}
+			}()
+			return sr, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("InferStreamTool: %v", err)
+	}
+
+	client := &scriptedClient{
+		turns: [][]margo.Chunk{
+			{
+				{Kind: margo.ChunkToolCall, ToolCall: &margo.ToolCall{
+					ID:        "call_1",
+					Name:      "chunked_echo",
+					Arguments: `{}`,
+				}},
+			},
+			{
+				{Kind: margo.ChunkText, Text: "ok"},
+			},
+		},
+	}
+
+	var (
+		mu     sync.Mutex
+		events []StepEvent
+	)
+	emit := func(ev StepEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, ev)
+	}
+
+	err = StreamReact(
+		context.Background(),
+		client,
+		margo.Request{Model: "test"},
+		[]tool.BaseTool{streamingTool},
+		[]*schema.Message{{Role: schema.User, Content: "stream"}},
+		nil,
+		nil,
+		emit,
+	)
+	if err != nil {
+		t.Fatalf("StreamReact: %v", err)
+	}
+
+	var streamed []string
+	var result string
+	sawCall := false
+	sawResultAfterStream := false
+	for _, ev := range events {
+		switch ev.Kind {
+		case StepToolCall:
+			if ev.Name == "chunked_echo" {
+				sawCall = true
+			}
+		case StepToolStream:
+			if ev.Name != "chunked_echo" {
+				t.Errorf("StepToolStream.Name = %q, want chunked_echo", ev.Name)
+			}
+			streamed = append(streamed, ev.Text)
+		case StepToolResult:
+			if ev.Name == "chunked_echo" {
+				result = ev.Result
+				if len(streamed) == len(chunks) {
+					sawResultAfterStream = true
+				}
+			}
+		}
+	}
+
+	if !sawCall {
+		t.Fatalf("missing StepToolCall for chunked_echo; events=%v", events)
+	}
+	if len(streamed) != len(chunks) {
+		t.Fatalf("StepToolStream count: got %d, want %d (chunks=%v)", len(streamed), len(chunks), streamed)
+	}
+	for i, c := range chunks {
+		if streamed[i] != c {
+			t.Errorf("chunk %d: got %q, want %q", i, streamed[i], c)
+		}
+	}
+	want := strings.Join(chunks, "")
+	if result != want {
+		t.Errorf("StepToolResult.Result: got %q, want %q", result, want)
+	}
+	if !sawResultAfterStream {
+		t.Errorf("StepToolResult arrived before all stream chunks — ordering regression")
+	}
+}

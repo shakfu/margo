@@ -3,6 +3,7 @@ package openrouter
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"time"
 
@@ -134,6 +135,15 @@ func toSDKUserParts(m margo.Message) []sdk.ChatCompletionContentPartUnionParam {
 			parts = append(parts, sdk.ImageContentPart(sdk.ChatCompletionContentPartImageImageURLParam{
 				URL: dataURL,
 			}))
+		case margo.PartDocument:
+			// Mirror the OpenAI fallback: most OpenRouter-routed models
+			// have no native PDF block, so extract text on the Go side.
+			text, err := margo.ExtractTextFromDocument(p, p.Name)
+			if err != nil {
+				text = fmt.Sprintf("<file name=%q>\n[could not extract: %s]\n</file>", p.Name, err.Error())
+			}
+			parts = append(parts, sdk.TextContentPart(text))
+			hasText = true
 		}
 	}
 	if !hasText && m.Content != "" {
