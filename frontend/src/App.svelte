@@ -24,7 +24,6 @@
     setLastUsage,
     setChatPersona,
     findPersona,
-    visiblePersonas,
     addWorkspace,
     activeWorkspace,
     setActiveWorkspace,
@@ -561,20 +560,18 @@
     }
   }
 
-  function rolePickerValue(chat: { personaId?: string }): string {
-    if (chat.personaId) return `persona:${chat.personaId}`;
-    return '';
-  }
+  // Effective persona for the active chat — drives the dynamic
+  // assistant-bubble label. When set, the message header reads the
+  // persona's name (uppercased) in place of "ASSISTANT".
+  $: activePersona = $activeChat
+    ? findPersona($settings.personas, $activeChat.personaId)
+    : undefined;
 
-  function onRoleChange(ev: Event) {
-    if (!$activeChat) return;
-    const value = (ev.target as HTMLSelectElement).value;
-    if (value.startsWith('persona:')) {
-      setChatPersona($activeChat.id, value.slice('persona:'.length));
-    } else {
-      // "Default" — clear the persona.
-      setChatPersona($activeChat.id, undefined);
+  function roleLabel(role: string): string {
+    if (role === 'assistant' && activePersona) {
+      return activePersona.name.toUpperCase();
     }
+    return role.toUpperCase();
   }
 
   async function respondPermission(
@@ -666,19 +663,6 @@
         <span class="badge">{$effectiveSettings.provider || 'no provider'}</span>
         {#if $effectiveSettings.model}<span class="badge">{$effectiveSettings.model}</span>{/if}
         {#if $effectiveSettings.thinkEnabled}<span class="badge badge-active">thinking</span>{/if}
-        {#if $activeChat}
-          <select
-            class="role-picker"
-            value={rolePickerValue($activeChat)}
-            on:change={onRoleChange}
-            title="Pick a role for this chat"
-          >
-            <option value="">Default</option>
-            {#each visiblePersonas($settings.personas, $settings.activeWorkspaceId) as p (p.id)}
-              <option value={`persona:${p.id}`}>{p.name}{p.workspaceId ? ' ◦' : ''}</option>
-            {/each}
-          </select>
-        {/if}
         <button
           class="topbar-btn"
           on:click={toggleRight}
@@ -690,7 +674,7 @@
     <section class="flex-1 overflow-y-auto px-5 py-4 flex flex-col gap-4 max-w-[820px] w-full mx-auto box-border" bind:this={messagesEl}>
       {#each messages as m, i (i)}
         <div class="flex flex-col gap-1">
-          <div class="text-[0.68rem] uppercase text-fg-faint tracking-wider">{m.role}</div>
+          <div class="text-[0.68rem] uppercase text-fg-faint tracking-wider">{roleLabel(m.role)}</div>
           <div
             class="leading-[1.55] px-4 py-3 rounded-lg text-[0.95rem] {m.role === 'user' ? 'bg-bubble-user' : 'bg-bubble-assistant'}"
           >
@@ -868,7 +852,7 @@
           {#each slashSuggestions as s (s.text)}
             <button
               type="button"
-              class="text-left px-2 py-1 rounded hover:bg-hover-bg flex items-center gap-2"
+              class="text-left px-2 py-1 rounded hover:bg-hover-bg flex items-center gap-2 bg-bubble-user"
               on:click={() => applySuggestion(s.text)}
               on:mousedown|preventDefault
             >
@@ -984,19 +968,6 @@
     background: var(--accent);
     border-color: transparent;
   }
-
-  .role-picker {
-    font-size: 0.72rem;
-    color: var(--fg-muted);
-    background: var(--input-bg);
-    padding: 0.2rem 0.4rem;
-    border-radius: 3px;
-    border: 1px solid var(--border);
-    font-family: inherit;
-    cursor: pointer;
-    max-width: 10rem;
-  }
-  .role-picker:hover { color: var(--fg); }
 
   .composer-btn {
     padding: 0 1.1rem;

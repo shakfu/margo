@@ -1,4 +1,4 @@
-import { writable, derived } from 'svelte/store';
+import { writable, derived, get } from 'svelte/store';
 
 export type Role = 'user' | 'assistant';
 
@@ -147,6 +147,13 @@ export interface Workspace {
   // so a tool unregistered at startup (e.g. quarto_render without
   // the quarto CLI) drops out regardless of the toggle.
   enabledTools?: string[];
+  // Persona id that newly-created chats in this workspace start
+  // with. Set in the Settings → Roles → Personas sidebar; per-chat
+  // override happens via `/persona <slug>`. Undefined means new
+  // chats start with no persona (the default 'assistant' voice
+  // from concepts.md). Dangling references (the persona was
+  // deleted) are cleared on load.
+  defaultPersonaId?: string;
 }
 
 // WorkspaceOverrides is the subset of Settings a workspace may shadow.
@@ -568,6 +575,19 @@ function loadSettings(): Settings {
       // Drain agents — the type still exists for legacy
       // deserialisation but the array is always empty after migration.
       merged.agents = BUILTIN_AGENTS;
+      // Clear any workspace.defaultPersonaId that points at a
+      // persona we no longer ship. Same idempotent migration shape
+      // as the chat.personaId clean-up in
+      // migrateAgentIdsToPersonaIds.
+      const validPersonaIds = new Set(merged.personas.map((p: Persona) => p.id));
+      if (Array.isArray(merged.workspaces)) {
+        merged.workspaces = merged.workspaces.map((w: Workspace) => {
+          if (w.defaultPersonaId && !validPersonaIds.has(w.defaultPersonaId)) {
+            return { ...w, defaultPersonaId: undefined };
+          }
+          return w;
+        });
+      }
       // Workspace invariants: at least one workspace; Default always present;
       // activeWorkspaceId points at a real entry. Re-asserting Default on
       // load makes "user deleted Default by editing storage" non-fatal.
@@ -694,6 +714,11 @@ export function setEffectiveOverride<K extends keyof WorkspaceOverrides>(
 export function newChat(): string {
   const id = uuid();
   const now = Date.now();
+  // Seed the new chat with the active workspace's default persona,
+  // if one is set. Per-chat `/persona <slug>` later overrides this.
+  const s = get(settings);
+  const ws = s.workspaces.find(w => w.id === s.activeWorkspaceId);
+  const seedPersonaId = ws?.defaultPersonaId;
   chats.update(cs => [
     {
       id,
@@ -703,6 +728,7 @@ export function newChat(): string {
       updatedAt: now,
       tokensIn: 0,
       tokensOut: 0,
+      personaId: seedPersonaId,
     },
     ...cs
   ]);
@@ -1151,6 +1177,20 @@ export function setWorkspaceToolEnabled(
 export function isToolEnabledForWorkspace(w: Workspace | undefined, toolName: string): boolean {
   if (!w || w.enabledTools === undefined) return true;
   return w.enabledTools.includes(toolName);
+}
+
+// setWorkspaceDefaultPersona binds (or clears, with undefined) the
+// persona id that new chats in this workspace start with. Existing
+// chats are unaffected — per-chat overrides via `/persona <slug>`
+// stay sticky to the chat that issued them.
+export function setWorkspaceDefaultPersona(workspaceId: string, personaId: string | undefined) {
+  settings.update(s => ({
+    ...s,
+    workspaces: s.workspaces.map(w => {
+      if (w.id !== workspaceId) return w;
+      return { ...w, defaultPersonaId: personaId, updatedAt: Date.now() };
+    }),
+  }));
 }
 
 // setWorkspaceDir attaches (or clears, with undefined) a directory path

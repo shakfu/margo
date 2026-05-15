@@ -11,6 +11,7 @@
     "email": "shakeeb.alireza@rezayat.net"
   },
   "info": {
-    "productName": "Margo"
+    "productName": "Margo",
+    "productVersion": "0.1.1"
   }
 }

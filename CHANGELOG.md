@@ -7,8 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1]
+
 ### Added
 
+- Explicit "Default" row in the sidebar Personas list. Represents
+  "no persona — the built-in 'assistant' voice"; sits at the top of
+  the list with a description, an `ACTIVE` badge when it's the
+  current workspace default, and a "Set default" button when it
+  isn't. Clicking the row's button is the symmetric way to revert
+  the workspace default to plain-assistant mode — the previous
+  one-off "Clear" button next to "Default: <name>" has been
+  retired in favour of the uniform pick-a-row pattern. Reverting a
+  single chat to the default voice continues to be `/persona` with
+  no argument (or `/default`), which clears the chat's persona
+  binding so the bubbles read "ASSISTANT" again. `docs/concepts.md`
+  updated to describe both revert paths and the new Default row.
+- Persona scope split: workspace default vs per-chat override.
+  New `Workspace.defaultPersonaId?: string` field; new chats in a
+  workspace are seeded with that persona via `newChat()` (per-chat
+  `/persona <slug>` continues to override stickily). The
+  SettingsPanel → Roles → Personas section grows a "Set default"
+  button per row and a "Default: <name>" / "Clear" indicator at
+  the top of the list; the row tinted with the bubble-user
+  background marks the active workspace default. Slash command
+  semantics unchanged. `loadSettings` clears any
+  `workspace.defaultPersonaId` pointing at a missing persona on
+  load (idempotent).
+- Dynamic assistant-message label. The "ASSISTANT" header above
+  each assistant bubble now reads the active persona's name in
+  uppercase when one is set (e.g. "EDITOR", "CODE REVIEWER"),
+  fall back to "ASSISTANT" otherwise. Driven by a reactive
+  `activePersona` derived from the active chat's `personaId`.
+- Chat-header role picker retired. The `<select>` dropdown that
+  conditionally appeared in the chat header has been removed
+  entirely — persona discovery + selection is now the Roles tab
+  in the right sidebar (for workspace defaults) and the
+  `/persona <slug>` slash command (for per-chat overrides). The
+  unused CSS, the `rolePickerValue` / `onRoleChange` helpers,
+  and the `visiblePersonas` import in `App.svelte` all go.
+  Removes the pre-existing UX bug where the picker was gated
+  behind `{#if $activeChat}` and therefore invisible until the
+  first message landed.
 - Sequential workflow runner (TODO §9.6). New
   `pkg/margo/agent/workflow_runner.go` wraps
   `adk.NewSequentialAgent` with a three-stage **drafter → critic
@@ -772,4 +812,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   required a `!` non-null assertion since `getElementById` returns
   `HTMLElement | null` and Svelte 4's `target` no longer accepts that.
 
-[Unreleased]: https://github.com/shakfu/margo
+## [0.1.0]

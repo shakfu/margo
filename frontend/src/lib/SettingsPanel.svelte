@@ -5,6 +5,7 @@
     setEffectiveOverride,
     upsertPersona, deletePersona, duplicatePersona,
     setWorkspaceToolEnabled, isToolEnabledForWorkspace,
+    setWorkspaceDefaultPersona,
     DEFAULT_WORKSPACE_ID, activeWorkspace,
     type Persona, type Workspace, type WorkspaceOverrides,
   } from './store';
@@ -622,22 +623,60 @@
     </button>
     <div use:melt={$persContent} class="section-body">
       <p class="text-[0.78rem] text-fg-muted leading-snug mb-2">
-        Tool-less roles. Pick one in the chat header to swap the system prompt.
+        Pick the default for new chats in this workspace. Existing chats are unaffected; use <code class="font-[family-name:var(--font-mono)] text-[0.72rem]">/persona &lt;name&gt;</code> in any chat to override per-conversation, or <code class="font-[family-name:var(--font-mono)] text-[0.72rem]">/persona</code> with no argument to revert that chat to the default voice.
       </p>
       <ul class="flex flex-col gap-1 mb-2">
-        {#each $settings.personas as p (p.id)}
-          <li class="flex items-start gap-2 text-[0.78rem] bg-input-bg border border-border rounded px-2 py-1.5">
+        {#if mode === 'workspace'}
+          {@const noDefault = !$activeWorkspace?.defaultPersonaId}
+          <!-- Explicit "Default" row: represents the built-in
+               assistant voice — no persona system prompt, no
+               parameter overrides. Clicking it clears the
+               workspace's defaultPersonaId so new chats start with
+               no persona. Always present at the top of the list. -->
+          <li class="flex items-start gap-2 text-[0.78rem] {noDefault ? 'bg-bubble-user/40 border-border-strong' : 'bg-input-bg border-border'} border rounded px-2 py-1.5">
             <div class="flex-1 min-w-0">
-              <div class="font-semibold text-fg flex items-center gap-1">
+              <div class="font-semibold text-fg flex items-center gap-1 flex-wrap">
+                <span>Default</span>
+                {#if noDefault}<span class="text-fg-muted text-[0.62rem] uppercase tracking-wider">active</span>{/if}
+                <span class="text-fg-faint text-[0.62rem] uppercase tracking-wider">builtin</span>
+              </div>
+              <div class="text-fg-faint text-[0.7rem] leading-snug mt-0.5">
+                No persona — the built-in 'assistant' voice. New chats start in this mode when no other persona is the workspace default.
+              </div>
+            </div>
+            <div class="flex flex-col gap-1 shrink-0">
+              {#if !noDefault}
+                <button
+                  class="mini-btn"
+                  on:click={() => setWorkspaceDefaultPersona($settings.activeWorkspaceId, undefined)}
+                  title="New chats will start with no persona"
+                >Set default</button>
+              {/if}
+            </div>
+          </li>
+        {/if}
+        {#each $settings.personas as p (p.id)}
+          {@const isDefault = mode === 'workspace' && $activeWorkspace?.defaultPersonaId === p.id}
+          <li class="flex items-start gap-2 text-[0.78rem] {isDefault ? 'bg-bubble-user/40 border-border-strong' : 'bg-input-bg border-border'} border rounded px-2 py-1.5">
+            <div class="flex-1 min-w-0">
+              <div class="font-semibold text-fg flex items-center gap-1 flex-wrap">
                 <span>{p.name}</span>
-                {#if p.builtin}<span class="text-fg-faint text-[0.65rem] uppercase tracking-wider">builtin</span>{/if}
-                <span class="text-fg-faint text-[0.65rem] uppercase tracking-wider">{scopeLabel(p.workspaceId, $settings.workspaces)}</span>
+                {#if isDefault}<span class="text-fg-muted text-[0.62rem] uppercase tracking-wider">active</span>{/if}
+                {#if p.builtin}<span class="text-fg-faint text-[0.62rem] uppercase tracking-wider">builtin</span>{/if}
+                <span class="text-fg-faint text-[0.62rem] uppercase tracking-wider">{scopeLabel(p.workspaceId, $settings.workspaces)}</span>
               </div>
               {#if p.description}
                 <div class="text-fg-faint text-[0.7rem] leading-snug mt-0.5">{p.description}</div>
               {/if}
             </div>
             <div class="flex flex-col gap-1 shrink-0">
+              {#if mode === 'workspace' && !isDefault}
+                <button
+                  class="mini-btn"
+                  on:click={() => setWorkspaceDefaultPersona($settings.activeWorkspaceId, p.id)}
+                  title="New chats in this workspace will start with this persona"
+                >Set default</button>
+              {/if}
               {#if p.builtin}
                 <button class="mini-btn" on:click={() => openDuplicate(p)} title="Duplicate; the copy is editable">Duplicate</button>
               {:else}
