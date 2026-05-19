@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help dev build build-debug build-universal package run cli cli-run \
+.PHONY: help dev build build-debug build-universal package run cli cli-run tui tui-run \
         tidy fmt vet test cover lint \
         frontend-install frontend-dev frontend-build vendor-mathjax bindings \
         clean clean-frontend clean-all doctor
@@ -7,6 +7,7 @@
 BINARY     := margo
 BUILD_DIR  := build/bin
 CLI_BIN    := $(BUILD_DIR)/margo-cli
+TUI_BIN    := $(BUILD_DIR)/margo-tui
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "Targets:\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -42,6 +43,15 @@ cli: ## Build the headless margo CLI to build/bin/margo-cli
 
 cli-run: ## Run the CLI (override args with ARGS=...). Example: make cli-run ARGS="-provider openai -prompt hi"
 	go run ./cmd/margo-cli $(ARGS)
+
+# ---------- TUI ----------
+
+tui: ## Build the Bubble Tea TUI to build/bin/margo-tui
+	@mkdir -p $(BUILD_DIR)
+	go build -o $(TUI_BIN) ./cmd/margo-tui
+
+tui-run: ## Run the TUI directly
+	go run ./cmd/margo-tui
 
 # ---------- Go ----------
 

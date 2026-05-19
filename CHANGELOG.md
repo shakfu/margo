@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Extracted UI-agnostic orchestration into a new `pkg/margo/core`
+  package. `core.Session` owns provider clients, the workspace +
+  RAG indexer registry, the attachment store, the permission
+  broker, and the tool registry, and exposes streaming methods
+  that return `<-chan core.Event` instead of calling
+  `runtime.EventsEmit` directly. The unified `Event` value
+  carries every kind a frontend cares about (text, thinking,
+  tool_call, tool_stream, tool_retrieve, tool_result, permission,
+  done, error) so chat and agent paths share one consumer
+  pattern. The Wails-bound `App` struct in `app.go` shrinks from
+  1088 lines to ~417 — it is now exclusively a wire-format
+  adapter: base64 ↔ bytes at the IPC edge, JSON-tagged structs
+  matching the prior `wailsjs/go/main/App` shapes byte-for-byte,
+  and `runtime.EventsEmit` translation of each core event to the
+  existing `margo:stream:<id>:{chunk,done,error}` channels. The
+  frontend contract is unchanged; the refactor is internal.
+- Helper-targeted tests (`attachmentsToParts` MIME routing,
+  `attachmentSafeBase`) relocated to `pkg/margo/core`; root
+  `attachments_test.go` continues to exercise the Wails-facing
+  methods through `NewApp()`.
+
+### Added
+
+- `cmd/margo-tui` — a self-contained Bubble Tea front-end that
+  consumes `pkg/margo/core.Session` directly. Renders a
+  streaming chat against the first configured provider's first
+  model in an alt-screen viewport with `textinput` prompt and
+  lipgloss styling. Key bindings: Enter sends, Ctrl+C cancels an
+  in-flight stream or quits when idle, Esc quits. The TUI is a
+  peer of the Wails desktop app — neither imports the other; both
+  link against `pkg/margo/core`. Build with `make tui`, run with
+  `make tui-run`. Scope is deliberately minimal (single-provider
+  chat); agent mode, tool permission prompts, workspace + RAG
+  indexing, attachments, markdown rendering, and multi-line input
+  are intentionally deferred and are straightforward additions
+  against the existing core API.
+
 ## [0.1.1]
 
 ### Added

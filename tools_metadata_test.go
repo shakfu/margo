@@ -10,7 +10,8 @@ import (
 // agent.ReadOnlyTools map, and the streamable flag is true exactly
 // for tools that implement tool.StreamableTool (web_fetch, today).
 func TestToolsMetadataShape(t *testing.T) {
-	a := &App{ctx: context.Background()}
+	a := NewApp()
+	a.ctx = context.Background()
 	got := a.ToolsMetadata()
 	if len(got) == 0 {
 		t.Fatalf("expected at least one tool registered")
@@ -55,7 +56,8 @@ func TestToolsMetadataShape(t *testing.T) {
 // TestToolsMetadataSortedByName guarantees a deterministic catalog
 // order so the UI doesn't reshuffle the Tools tab on each refresh.
 func TestToolsMetadataSortedByName(t *testing.T) {
-	a := &App{ctx: context.Background()}
+	a := NewApp()
+	a.ctx = context.Background()
 	got := a.ToolsMetadata()
 	for i := 1; i < len(got); i++ {
 		if got[i-1].Name > got[i].Name {
