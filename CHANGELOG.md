@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Conversation export to markdown. New "↓ md" button in the chat
+  header serialises the active chat (title, provider/model,
+  persona/agent name, token counts, full message history with
+  attachments and tool steps) and dispatches to a new Wails-bound
+  `ExportChatMarkdown` method. The renderer itself lives in
+  `pkg/margo/core` (`RenderChatMarkdown`) as a pure function so
+  the future TUI export and any HTTP-mode export share the code;
+  the Wails layer only owns the save-dialog + disk-write edge.
+  Output is h1-rooted, CommonMark + GFM safe: blockquote
+  metadata, role-headed turns, attachment lists, `<details>`-
+  wrapped thinking, and compact one-line tool-step summaries with
+  argument/result truncation so multi-KB JSON blobs from agent
+  runs don't paste verbatim. Defaults filename slugifies the
+  chat title; user-cancelled save is a silent no-op.
+- Model catalog consolidated into a single JSON file embedded
+  into the binary at `pkg/margo/models.json`. `Catalog` /
+  `Model` types live in the new `pkg/margo/models.go`; both
+  `core.Session.Models()` and `agent.BudgetForModel()` now read
+  from `margo.DefaultCatalog` instead of their own hardcoded
+  lists. A new Wails-bound `ModelsCatalog()` method exposes the
+  same catalog to the frontend, which retires the hand-mirrored
+  `CONTEXT_WINDOWS` map and `MULTIMODAL_MODELS` set in
+  `store.ts` in favour of a reactive `modelCatalog` Svelte
+  store populated at startup via `initModelCatalog()`. Adding a
+  model is now a one-file change to `models.json`; drift
+  between Go and Svelte is structurally impossible. The
+  `contextWindowFor` and `isMultimodal` helpers grew a
+  catalog-snapshot argument so consumers can pass
+  `$modelCatalog` from a `$:` block and stay reactive.
+
 ### Changed
 
 - Extracted UI-agnostic orchestration into a new `pkg/margo/core`

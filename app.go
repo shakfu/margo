@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	goruntime "runtime"
+	"strings"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/shakfu/margo/internal/config"
+	"github.com/shakfu/margo/pkg/margo"
 	"github.com/shakfu/margo/pkg/margo/agent"
 	"github.com/shakfu/margo/pkg/margo/core"
 )
@@ -60,6 +64,12 @@ func (a *App) Providers() []string { return a.session.Providers() }
 
 // Models returns the list of model identifiers we expose for a provider.
 func (a *App) Models(provider string) []string { return a.session.Models(provider) }
+
+// ModelsCatalog returns the full per-provider model catalog (id,
+// contextTokens, multimodal). Exposed so the frontend can retire its
+// hand-mirrored CONTEXT_WINDOWS / MULTIMODAL_MODELS lists in store.ts
+// and read the same source of truth as Go.
+func (a *App) ModelsCatalog() margo.Catalog { return a.session.Catalog() }
 
 // ChatMessage mirrors core.Message for JSON binding to the frontend.
 type ChatMessage struct {
@@ -415,3 +425,72 @@ func (a *App) RespondPermission(id string, approved bool, always bool) error {
 
 // CancelStream cancels an in-flight stream. No-op if the id is unknown.
 func (a *App) CancelStream(id string) { a.session.Cancel(id) }
+
+// ExportChatMarkdown renders the chat to markdown via
+// core.RenderChatMarkdown, opens the OS save dialog with a sensible
+// default filename, and writes the file. Returns the chosen path, or
+// "" if the user cancels. Returns an error if the user picked a path
+// but the write failed.
+//
+// The chat shape (ChatExport) is the same on Wails as it is in
+// core.RenderChatMarkdown: the Wails-generated TypeScript binding
+// gives the frontend a strongly-typed shape to fill in from its
+// localStorage Chat. Renderer-side concerns (formatting, truncation
+// of tool payloads) live in core; this method only handles the
+// transport edge: dialog + disk write.
+func (a *App) ExportChatMarkdown(chat core.ChatExport) (string, error) {
+	md := core.RenderChatMarkdown(chat)
+	defaultName := defaultExportFilename(chat.Title)
+	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "Export chat as markdown",
+		DefaultFilename: defaultName,
+		Filters: []runtime.FileFilter{
+			{DisplayName: "Markdown (*.md)", Pattern: "*.md"},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("save dialog: %w", err)
+	}
+	if path == "" {
+		// User cancelled — not an error. The frontend treats "" as
+		// "no-op, no toast."
+		return "", nil
+	}
+	// Ensure a .md extension if the user didn't type one — the OS
+	// dialog on macOS will silently strip extensions in some modes.
+	if filepath.Ext(path) == "" {
+		path += ".md"
+	}
+	if err := os.WriteFile(path, []byte(md), 0o644); err != nil {
+		return "", fmt.Errorf("write %s: %w", path, err)
+	}
+	return path, nil
+}
+
+// defaultExportFilename slugifies the chat title into a filesystem-safe
+// default for the save dialog. Falls back to "chat.md" for untitled
+// chats. Kept deliberately simple — the OS save dialog lets the user
+// edit anyway.
+func defaultExportFilename(title string) string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return "chat.md"
+	}
+	var b strings.Builder
+	for _, r := range title {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == ' ' || r == '-' || r == '_':
+			b.WriteRune('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "chat.md"
+	}
+	if len(out) > 60 {
+		out = out[:60]
+	}
+	return out + ".md"
+}

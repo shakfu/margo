@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { createDialog, melt } from '@melt-ui/svelte';
-  import { Providers, Models, Chat, StreamChat, StreamAgent, CancelStream, Tools, OutputDir, OpenPath, RespondPermission, StartupWorkspaceDir, SetActiveWorkspace, SaveAttachment } from '../wailsjs/go/main/App.js';
+  import { Providers, Models, Chat, StreamChat, StreamAgent, CancelStream, Tools, OutputDir, OpenPath, RespondPermission, StartupWorkspaceDir, SetActiveWorkspace, SaveAttachment, ExportChatMarkdown } from '../wailsjs/go/main/App.js';
   import { EventsOn, EventsOff, BrowserOpenURL } from '../wailsjs/runtime/runtime.js';
   import { mathjax } from './lib/mathjax';
   import { renderMarkdownStreaming, setHighlightTheme } from './lib/markdown';
@@ -12,6 +12,8 @@
     settings,
     effectiveSettings,
     contextWindowFor,
+    modelCatalog,
+    initModelCatalog,
     newChat,
     appendMessage,
     appendToLast,
@@ -114,7 +116,7 @@
 
   // Context usage for the active chat. Uses the *effective* model so a
   // workspace override of the model picks the right context window.
-  $: ctxWindow = contextWindowFor($effectiveSettings.model);
+  $: ctxWindow = contextWindowFor($effectiveSettings.model, $modelCatalog);
   $: ctxUsed = ($activeChat?.tokensIn ?? 0) + ($activeChat?.tokensOut ?? 0);
   // Gate: attachments are pending but the *effective* model isn't on
   // the multimodal allowlist. Disables send + surfaces an inline warning.
@@ -123,7 +125,7 @@
   // Go-side text extraction (OpenAI / OpenRouter), so they work
   // regardless of vision support. (§7.5)
   $: hasImageAttachment = attachments.some(a => a.mimeType.startsWith('image/'));
-  $: attachmentsBlocked = hasImageAttachment && !!$effectiveSettings.model && !isMultimodal($effectiveSettings.model);
+  $: attachmentsBlocked = hasImageAttachment && !!$effectiveSettings.model && !isMultimodal($effectiveSettings.model, $modelCatalog);
   $: ctxPct = ctxWindow > 0 ? Math.min(100, Math.round((ctxUsed / ctxWindow) * 100)) : 0;
 
   // Slash autocomplete (TODO §9.2). Suggestions populate from the
@@ -161,6 +163,11 @@
   onMount(async () => {
     document.documentElement.classList.toggle('dark', $settings.theme === 'dark');
     setHighlightTheme($settings.theme);
+
+    // Populate the model catalog before any UI consumer reads it. The
+    // catalog is the source of truth for context-window math and the
+    // multimodal allowlist (previously hand-mirrored in store.ts).
+    void initModelCatalog();
 
     try {
       providers = await Providers();
@@ -593,6 +600,48 @@
     }
   }
 
+  // Export the active chat as a markdown file. Builds the ChatExport
+  // shape from the in-memory Chat, dispatches to Go (which renders +
+  // saves), and shows a brief result. Cancelled save dialog is a
+  // silent no-op (Go returns "").
+  async function exportActiveChat() {
+    const chat = $activeChat;
+    if (!chat) return;
+    const persona = chat.personaId ? findPersona($settings.personas, chat.personaId) : undefined;
+    const agent = chat.agentId ? ($settings.agents ?? []).find(a => a.id === chat.agentId) : undefined;
+    const payload = {
+      title: chat.title,
+      provider: $effectiveSettings.provider ?? '',
+      model: $effectiveSettings.model ?? '',
+      personaName: persona?.name ?? '',
+      agentName: agent?.name ?? '',
+      createdAt: new Date(chat.createdAt).toISOString(),
+      updatedAt: new Date(chat.updatedAt).toISOString(),
+      tokensIn: chat.tokensIn ?? 0,
+      tokensOut: chat.tokensOut ?? 0,
+      messages: chat.messages.map(m => ({
+        role: m.role,
+        content: m.content,
+        thinking: m.thinking ?? '',
+        attachments: (m.attachments ?? []).map(a => ({
+          name: a.name, mimeType: a.mimeType, size: a.size,
+        })),
+        steps: (m.steps ?? []).map(s => ({
+          kind: s.kind, name: s.name,
+          arguments: s.arguments ?? '',
+          result: s.result ?? '',
+          isError: !!s.isError,
+        })),
+      })),
+    };
+    try {
+      const path = await ExportChatMarkdown(payload as any);
+      if (path) { error = ''; }
+    } catch (e) {
+      error = `Export failed: ${e}`;
+    }
+  }
+
   async function cancel() {
     if (!activeStreamId || cancelling) return;
     cancelling = true;
@@ -663,6 +712,12 @@
         <span class="badge">{$effectiveSettings.provider || 'no provider'}</span>
         {#if $effectiveSettings.model}<span class="badge">{$effectiveSettings.model}</span>{/if}
         {#if $effectiveSettings.thinkEnabled}<span class="badge badge-active">thinking</span>{/if}
+        <button
+          class="topbar-btn"
+          on:click={exportActiveChat}
+          disabled={!$activeChat || ($activeChat.messages?.length ?? 0) === 0}
+          title="Export chat as markdown"
+        >↓ md</button>
         <button
           class="topbar-btn"
           on:click={toggleRight}

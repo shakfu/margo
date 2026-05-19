@@ -6,30 +6,16 @@ import (
 	"github.com/shakfu/margo/pkg/margo"
 )
 
-// contextWindows mirrors frontend/src/lib/store.ts::CONTEXT_WINDOWS — the
-// per-model budget the UI's context-usage ring uses. Kept in sync by hand
-// because the frontend reads it via a TS module and the Go side via this
-// map; if you add a model in one place, add it here too.
-var contextWindows = map[string]int{
-	"claude-haiku-4-5":  200_000,
-	"claude-sonnet-4-6": 200_000,
-	"claude-opus-4-7":   1_000_000,
-	"gpt-5.5":           400_000,
-	"gpt-5.5-pro":       400_000,
-	"gpt-5.4":           400_000,
-	"gpt-5.4-mini":      400_000,
-	"gpt-5.4-nano":      400_000,
-	"gpt-5.4-pro":       400_000,
-}
-
-// defaultContextWindow is the fallback when a model id isn't recognised.
-// Conservative to avoid silently overflowing newly-added models.
+// defaultContextWindow is the fallback when a model id isn't in the
+// catalog. Conservative to avoid silently overflowing newly-added models
+// that haven't yet been declared in pkg/margo/models.json.
 const defaultContextWindow = 128_000
 
 // BudgetForModel returns the input-token budget for the given model id,
-// falling back to defaultContextWindow when the model isn't in the table.
+// reading from margo.DefaultCatalog (the embedded models.json). Falls
+// back to defaultContextWindow when the model is unknown.
 func BudgetForModel(model string) int {
-	if w, ok := contextWindows[model]; ok {
+	if w := margo.DefaultCatalog.ContextWindow(model); w > 0 {
 		return w
 	}
 	return defaultContextWindow

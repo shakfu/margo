@@ -18,6 +18,10 @@ export function DeleteKnowledgeSource(arg1, arg2) {
   return window['go']['main']['App']['DeleteKnowledgeSource'](arg1, arg2);
 }
 
+export function ExportChatMarkdown(arg1) {
+  return window['go']['main']['App']['ExportChatMarkdown'](arg1);
+}
+
 export function Greet(arg1) {
   return window['go']['main']['App']['Greet'](arg1);
 }
@@ -36,6 +40,10 @@ export function LoadAttachment(arg1) {
 
 export function Models(arg1) {
   return window['go']['main']['App']['Models'](arg1);
+}
+
+export function ModelsCatalog() {
+  return window['go']['main']['App']['ModelsCatalog']();
 }
 
 export function OpenPath(arg1) {

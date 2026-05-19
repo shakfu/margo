@@ -114,49 +114,20 @@ func (s *Session) Providers() []string {
 	return out
 }
 
-// Models returns the model identifiers exposed for a provider. First entry
-// is the default. Lists are baked in here because no provider's catalog
-// API gives us a clean curated subset that matches the ones we test
-// against; revisit when we add per-user model preferences.
+// Models returns the model identifiers exposed for a provider, in
+// catalog-declared order. First entry is the default. The catalog itself
+// lives in pkg/margo/models.json so a model bump does not require a code
+// change; see margo.DefaultCatalog.
 func (s *Session) Models(provider string) []string {
-	switch provider {
-	case "anthropic":
-		return []string{
-			"claude-haiku-4-5",
-			"claude-sonnet-4-6",
-			"claude-opus-4-7",
-		}
-	case "openai":
-		return []string{
-			"gpt-5.4-nano",
-			"gpt-5.4-mini",
-			"gpt-5.4",
-			"gpt-5.4-pro",
-			"gpt-5.5",
-			"gpt-5.5-pro",
-		}
-	case "openrouter":
-		return []string{
-			"deepseek/deepseek-v3.2",
-			"deepseek/deepseek-v4-flash",
-			"deepseek/deepseek-v4-pro",
-			"google/gemini-2.5-flash",
-			"google/gemini-2.5-flash-lite",
-			"google/gemini-3-flash-preview",
-			"google/gemma-4-26b-a4b-it:free",
-			"google/gemma-4-31b-it:free",
-			"moonshotai/kimi-k2.5",
-			"moonshotai/kimi-k2.6",
-			"nvidia/nemotron-3-super-120b-a12b:free",
-			"openrouter/owl-alpha",
-			"qwen/qwen3-235b-a22b-2507",
-			"qwen/qwen3.5-flash-02-23",
-			"qwen/qwen3.6-plus",
-			"x-ai/grok-4.1-fast",
-			"x-ai/grok-4.3",
-		}
-	}
-	return []string{}
+	return margo.DefaultCatalog.ModelIDs(provider)
+}
+
+// Catalog returns the full model catalog. Exposed so frontends can
+// retire their own hand-mirrored model lists (the original Wails app's
+// store.ts CONTEXT_WINDOWS / MULTIMODAL_MODELS, the TUI's future model
+// picker) and read the single source of truth instead.
+func (s *Session) Catalog() margo.Catalog {
+	return margo.DefaultCatalog
 }
 
 // Chat is a non-streaming multi-turn completion.

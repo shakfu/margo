@@ -366,46 +366,57 @@ export const WORKSPACE_TEMPLATES: WorkspaceTemplate[] = [
   },
 ];
 
-// Approximate context window per model. Used by the context-usage ring.
-// Numbers are conservative; intent is "is this conversation about to overflow",
-// not exact accounting.
-export const CONTEXT_WINDOWS: Record<string, number> = {
-  'claude-haiku-4-5': 200_000,
-  'claude-sonnet-4-6': 200_000,
-  'claude-opus-4-7': 1_000_000,
-  'gpt-5.5': 400_000,
-  'gpt-5.5-pro': 400_000,
-  'gpt-5.4': 400_000,
-  'gpt-5.4-mini': 400_000,
-  'gpt-5.4-nano': 400_000,
-  'gpt-5.4-pro': 400_000,
-};
-
-export function contextWindowFor(model: string): number {
-  return CONTEXT_WINDOWS[model] ?? 128_000;
+// Model catalog. Single source of truth lives in pkg/margo/models.json
+// and reaches the frontend via the Wails-bound ModelsCatalog() method.
+// The hand-mirrored CONTEXT_WINDOWS / MULTIMODAL_MODELS lists that
+// previously lived here are retired — adding a model is now a one-file
+// change to pkg/margo/models.json.
+export interface CatalogModel {
+  id: string;
+  contextTokens: number;
+  multimodal?: boolean;
 }
 
-// Models known to accept image input. Used to gate the composer's
-// paperclip / drop-zone affordances and warn before sending attachments
-// that a text-only model would silently drop or error on. Conservative
-// allowlist: opt-in per model id; unknown models are treated as
-// text-only. Maintained alongside the provider model menus in app.go.
-export const MULTIMODAL_MODELS = new Set<string>([
-  // Anthropic Claude 4.x family — all support vision per Anthropic docs.
-  'claude-haiku-4-5',
-  'claude-sonnet-4-6',
-  'claude-opus-4-7',
-  // OpenAI GPT-5.x family — vision-capable.
-  'gpt-5.4-nano',
-  'gpt-5.4-mini',
-  'gpt-5.4',
-  'gpt-5.4-pro',
-  'gpt-5.5',
-  'gpt-5.5-pro',
-]);
+export type Catalog = Record<string, CatalogModel[]>;
 
-export function isMultimodal(model: string): boolean {
-  return MULTIMODAL_MODELS.has(model);
+// Reactive catalog store. Empty until initModelCatalog() resolves; the
+// 128k default in contextWindowFor protects callers that read before
+// the first Wails round-trip completes.
+export const modelCatalog = writable<Catalog>({});
+
+// initModelCatalog populates the catalog from Go. Idempotent; call once
+// at app startup. Network/IPC failure leaves the empty default in place
+// (logged, not surfaced — UI consumers fall back to safe defaults).
+export async function initModelCatalog(): Promise<void> {
+  try {
+    const { ModelsCatalog } = await import('../../wailsjs/go/main/App');
+    const cat = (await ModelsCatalog()) as Catalog;
+    modelCatalog.set(cat ?? {});
+  } catch (e) {
+    console.error('initModelCatalog: failed to load catalog from Go', e);
+  }
+}
+
+// contextWindowFor returns the model's context-token budget from the
+// catalog snapshot passed in. The catalog argument is explicit (not read
+// from the store) so callers reactively re-compute when the store
+// updates — pass $modelCatalog from a $: block.
+export function contextWindowFor(model: string, catalog: Catalog): number {
+  for (const ms of Object.values(catalog)) {
+    const found = ms.find((m) => m.id === model);
+    if (found) return found.contextTokens;
+  }
+  return 128_000;
+}
+
+// isMultimodal reports whether the model accepts image input. Same
+// reactivity contract as contextWindowFor: pass a catalog snapshot.
+export function isMultimodal(model: string, catalog: Catalog): boolean {
+  for (const ms of Object.values(catalog)) {
+    const found = ms.find((m) => m.id === model);
+    if (found) return !!found.multimodal;
+  }
+  return false;
 }
 
 const LEGACY_CHATS_KEY = 'margo:chats:v1';
