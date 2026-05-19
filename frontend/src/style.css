@@ -146,3 +146,131 @@ body {
 #app {
     height: 100vh;
 }
+
+/* ----------------------------------------------------------------------
+ * Settings UI primitives.
+ *
+ * These classes previously lived inside SettingsPanel.svelte's scoped
+ * <style> block and are now global so the settings panel subcomponents
+ * (lib/settings/*.svelte) can share them without each duplicating ~100
+ * lines of CSS. Naming convention is conservative — short, scoped to a
+ * recognisable family (section-, select-, tab-, mini-btn) — so accidental
+ * collisions with future Tailwind utilities are unlikely.
+ */
+.section-head {
+    width: 100%;
+    background: transparent;
+    border: none;
+    padding: 0.6rem 0.85rem;
+    text-align: left;
+    cursor: pointer;
+    color: var(--fg);
+    font-size: 0.85rem;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-family: inherit;
+}
+.section-head:hover { background: var(--hover-bg); }
+.caret { font-size: 0.7rem; color: var(--fg-muted); width: 0.8em; }
+
+.section-body {
+    padding: 0.4rem 0.85rem 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    font-size: 0.8rem;
+    color: var(--fg-muted);
+}
+
+.text-input {
+    background: var(--input-bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.4rem 0.55rem;
+    font-family: inherit;
+    font-size: 0.85rem;
+    outline: none;
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+}
+.text-input:focus { border-color: var(--border-strong); }
+.text-input:disabled { opacity: 0.5; }
+
+.select-trigger {
+    background: var(--input-bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.4rem 0.55rem;
+    font-size: 0.85rem;
+    outline: none;
+    font-family: inherit;
+    text-align: left;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    cursor: pointer;
+}
+.select-trigger:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.select-menu {
+    z-index: 50;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+    padding: 0.25rem 0;
+    max-height: 15rem;
+    overflow-y: auto;
+    outline: none;
+}
+.select-item {
+    padding: 0.4rem 0.7rem;
+    font-size: 0.85rem;
+    color: var(--fg);
+    cursor: pointer;
+}
+.select-item:hover { background: var(--hover-bg); }
+.select-item > * { pointer-events: none; }
+
+.mini-btn {
+    background: var(--input-bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.25rem 0.55rem;
+    font-size: 0.75rem;
+    cursor: pointer;
+    font-family: inherit;
+}
+.mini-btn:hover:not(:disabled) { background: var(--hover-bg); }
+.mini-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.tab-trigger {
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 0.45rem 0.7rem;
+    font-size: 0.82rem;
+    color: var(--fg-muted);
+    cursor: pointer;
+    font-family: inherit;
+    margin-bottom: -1px; /* overlap parent's bottom border */
+}
+.tab-trigger:hover { color: var(--fg); }
+.tab-trigger[data-state="active"] {
+    color: var(--fg);
+    border-bottom-color: var(--fg);
+    font-weight: 600;
+}

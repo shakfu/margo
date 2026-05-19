@@ -3,10 +3,13 @@ package core
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
+	"time"
 
 	"github.com/shakfu/margo/pkg/margo"
 	"github.com/shakfu/margo/pkg/margo/agent"
+	"github.com/shakfu/margo/pkg/margo/mcp"
 	"github.com/shakfu/margo/pkg/margo/providers/anthropic"
 	"github.com/shakfu/margo/pkg/margo/providers/openai"
 	"github.com/shakfu/margo/pkg/margo/providers/openrouter"
@@ -19,6 +22,20 @@ type Config struct {
 	OpenAIAPIKey     string
 	OpenRouterAPIKey string
 	AttachmentRoot   string
+
+	// MCPConfig is the parsed Claude-Desktop-compatible mcpServers
+	// catalog. When non-nil and non-empty, NewSession starts every
+	// server eagerly and asynchronously — handshake/listTools runs in
+	// per-server goroutines so a slow or broken server does not delay
+	// Session construction. The frontend / TUI observes per-server
+	// status via Session.MCP().Servers().
+	MCPConfig mcp.Config
+
+	// MCPLogger, when non-nil, is the destination for MCP lifecycle
+	// events and per-server stderr lines. Pass log.Default() for the
+	// usual stdout/stderr; pass a file-backed logger to keep MCP noise
+	// out of the user's terminal.
+	MCPLogger *log.Logger
 }
 
 // Session is margo's UI-agnostic orchestration root: it owns the
@@ -36,6 +53,7 @@ type Session struct {
 	workspaces  *WorkspaceRegistry
 	attachments *AttachmentStore
 	permissions *PermissionBroker
+	mcp         *mcp.Manager
 
 	cancelsMu sync.Mutex
 	cancels   map[string]runHandle
@@ -48,13 +66,26 @@ type runHandle struct {
 	cancel context.CancelFunc
 }
 
+// mcpShutdownTimeout is the per-server grace window between SIGTERM
+// (implicit when we close stdin) and SIGKILL on Session.Shutdown.
+// Conservative — community servers are mostly node.js processes that
+// exit promptly on EOF, but a slow shutdown is preferable to a kill -9
+// that leaves temp files around.
+const mcpShutdownTimeout = 3 * time.Second
+
 // NewSession builds a Session from the given Config. Unconfigured
 // providers (missing API key) simply do not appear in Providers().
+//
+// MCP servers listed in cfg.MCPConfig are launched eagerly + async:
+// NewSession returns immediately; per-server initialize/listTools
+// runs in goroutines. The caller observes readiness via
+// Session.MCP().Servers()[i].Status().
 func NewSession(cfg Config) *Session {
 	s := &Session{
 		workspaces:  NewWorkspaceRegistry(cfg.OpenAIAPIKey),
 		attachments: NewAttachmentStore(cfg.AttachmentRoot),
 		permissions: NewPermissionBroker(),
+		mcp:         mcp.NewManager(cfg.MCPLogger),
 		cancels:     map[string]runHandle{},
 	}
 	if cfg.AnthropicAPIKey != "" {
@@ -66,6 +97,11 @@ func NewSession(cfg Config) *Session {
 	if cfg.OpenRouterAPIKey != "" {
 		s.openrouter = openrouter.New(cfg.OpenRouterAPIKey)
 	}
+	// Eager + async server start. context.Background is intentional —
+	// MCP server lifetime is tied to the Session, not to any one call.
+	// Each server's startServer runs in its own goroutine via the
+	// manager's addAndStart so we don't block here.
+	s.mcp.StartAll(context.Background(), cfg.MCPConfig)
 	return s
 }
 
@@ -79,6 +115,21 @@ func (s *Session) Attachments() *AttachmentStore { return s.attachments }
 // Permissions exposes the permission broker so the frontend can call
 // Respond when the user clicks Allow/Deny on a prompt.
 func (s *Session) Permissions() *PermissionBroker { return s.permissions }
+
+// MCP exposes the MCP manager so frontends can list servers, add/remove
+// servers at runtime, and observe per-server status (including the
+// stderr ring buffer for failure diagnostics).
+func (s *Session) MCP() *mcp.Manager { return s.mcp }
+
+// Shutdown stops every managed MCP server in parallel. Call from the
+// host application's exit path; safe to call multiple times. The
+// per-server stop timeout matches the manager default tradeoff —
+// polite SIGTERM first, SIGKILL after 3 seconds.
+func (s *Session) Shutdown() {
+	if s.mcp != nil {
+		s.mcp.StopAll(mcpShutdownTimeout)
+	}
+}
 
 // clientFor resolves a provider name to a configured client.
 func (s *Session) clientFor(provider string) (margo.Client, error) {

@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 .PHONY: help dev build build-debug build-universal package run cli cli-run tui tui-run \
-        tidy fmt vet test cover lint \
+        tidy fmt vet test test-integration cover lint \
         frontend-install frontend-dev frontend-build vendor-mathjax bindings \
         clean clean-frontend clean-all doctor
 
@@ -66,6 +66,9 @@ vet: ## go vet
 
 test: ## Run all Go tests
 	go test ./...
+
+test-integration: ## Run MCP integration tests (requires npx; downloads npm packages on first run)
+	go test -tags=integration -v -timeout=2m ./pkg/margo/mcp/
 
 cover: ## Run tests with coverage report
 	go test -cover -coverprofile=coverage.out ./...

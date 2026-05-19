@@ -12,6 +12,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 
@@ -19,9 +20,16 @@ import (
 
 	"github.com/shakfu/margo/internal/config"
 	"github.com/shakfu/margo/pkg/margo/core"
+	"github.com/shakfu/margo/pkg/margo/mcp"
 )
 
 func main() {
+	// -mcp-config overrides the default path so users can point the TUI
+	// at a different mcp.json than the Wails app uses — handy for
+	// per-project setups. Empty means "use DefaultConfigPath".
+	mcpConfigPath := flag.String("mcp-config", "", "Path to MCP servers config (default: <UserConfigDir>/Margo/mcp.json)")
+	flag.Parse()
+
 	cfg, err := config.Load()
 	if err != nil {
 		fatal("config: %v", err)
@@ -30,11 +38,22 @@ func main() {
 		fatal("config: %v", err)
 	}
 
+	mcpPath := *mcpConfigPath
+	if mcpPath == "" {
+		mcpPath, _ = mcp.DefaultConfigPath()
+	}
+	mcpCfg, mcpErr := mcp.LoadConfig(mcpPath)
+	if mcpErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: mcp config: %v\n", mcpErr)
+	}
+
 	sess := core.NewSession(core.Config{
 		AnthropicAPIKey:  cfg.AnthropicAPIKey,
 		OpenAIAPIKey:     cfg.OpenAIAPIKey,
 		OpenRouterAPIKey: cfg.OpenRouterAPIKey,
+		MCPConfig:        mcpCfg,
 	})
+	defer sess.Shutdown()
 
 	providers := sess.Providers()
 	if len(providers) == 0 {

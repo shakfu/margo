@@ -375,6 +375,12 @@ export interface CatalogModel {
   id: string;
   contextTokens: number;
   multimodal?: boolean;
+  // Optional cost data. Absent (`undefined`) means rate unknown — UI
+  // hides the cost meter for these. Explicit zero (e.g. free-tier
+  // models) means $0 — UI renders "$0.00" deliberately.
+  costPerMTokIn?: number;
+  costPerMTokOut?: number;
+  pricedAt?: string;
 }
 
 export type Catalog = Record<string, CatalogModel[]>;
@@ -407,6 +413,48 @@ export function contextWindowFor(model: string, catalog: Catalog): number {
     if (found) return found.contextTokens;
   }
   return 128_000;
+}
+
+// modelFor finds the catalog entry for a model id. Internal helper for
+// the cost / multimodal / context helpers below.
+function modelFor(model: string, catalog: Catalog): CatalogModel | undefined {
+  for (const ms of Object.values(catalog)) {
+    const found = ms.find((m) => m.id === model);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+// hasCost reports whether both input and output per-MTok rates are
+// declared for this model. Free-tier models with explicit zero rates
+// return true; rate-omitted models return false (UI hides the meter).
+// Mirrors margo.Catalog.HasCost on the Go side.
+export function hasCost(model: string, catalog: Catalog): boolean {
+  const m = modelFor(model, catalog);
+  return !!m && m.costPerMTokIn !== undefined && m.costPerMTokOut !== undefined;
+}
+
+// costFor returns the running USD cost for a chat's accumulated token
+// usage against the named model. Returns 0 when rates are unknown;
+// callers should gate on hasCost() to distinguish that from a real
+// "$0" (free-tier model).
+//
+// Does not account for Anthropic prompt-cache discounts — see the
+// Go-side Catalog.Cost doc comment for the same trade-off; the meter
+// overestimates rather than underestimates.
+export function costFor(model: string, tokensIn: number, tokensOut: number, catalog: Catalog): number {
+  const m = modelFor(model, catalog);
+  if (!m || m.costPerMTokIn === undefined || m.costPerMTokOut === undefined) return 0;
+  return (tokensIn / 1_000_000) * m.costPerMTokIn + (tokensOut / 1_000_000) * m.costPerMTokOut;
+}
+
+// formatCost renders a USD cost with sensible precision. Sub-cent
+// amounts get 4 decimals so a $0.0023 conversation reads accurately;
+// larger amounts collapse to the conventional 2 decimals.
+export function formatCost(usd: number): string {
+  if (usd === 0) return '$0.00';
+  if (usd < 0.01) return `$${usd.toFixed(4)}`;
+  return `$${usd.toFixed(2)}`;
 }
 
 // isMultimodal reports whether the model accepts image input. Same

@@ -30,6 +30,9 @@
     activeWorkspace,
     setActiveWorkspace,
     isMultimodal,
+    hasCost,
+    costFor,
+    formatCost,
     type Usage,
     type AgentStep
   } from './lib/store';
@@ -118,6 +121,18 @@
   // workspace override of the model picks the right context window.
   $: ctxWindow = contextWindowFor($effectiveSettings.model, $modelCatalog);
   $: ctxUsed = ($activeChat?.tokensIn ?? 0) + ($activeChat?.tokensOut ?? 0);
+  // Running USD cost for the active chat. Sums input + output tokens
+  // accumulated across the conversation against the effective model's
+  // per-MTok rates from the catalog. Hidden when the model has no
+  // declared rates — see hasCost / costFor in store.ts for the
+  // present-vs-unknown distinction.
+  $: chatCost = costFor(
+    $effectiveSettings.model,
+    $activeChat?.tokensIn ?? 0,
+    $activeChat?.tokensOut ?? 0,
+    $modelCatalog,
+  );
+  $: showCost = hasCost($effectiveSettings.model, $modelCatalog) && ctxUsed > 0;
   // Gate: attachments are pending but the *effective* model isn't on
   // the multimodal allowlist. Disables send + surfaces an inline warning.
   // Only image attachments need a multimodal-capable model. PDFs and
@@ -711,6 +726,12 @@
       <div class="flex items-center gap-2">
         <span class="badge">{$effectiveSettings.provider || 'no provider'}</span>
         {#if $effectiveSettings.model}<span class="badge">{$effectiveSettings.model}</span>{/if}
+        {#if showCost}
+          <span
+            class="badge"
+            title="Approximate USD cost for this chat. Excludes prompt-cache discounts and assumes the uncached rate from models.json — overestimates rather than underestimates."
+          >{formatCost(chatCost)}</span>
+        {/if}
         {#if $effectiveSettings.thinkEnabled}<span class="badge badge-active">thinking</span>{/if}
         <button
           class="topbar-btn"

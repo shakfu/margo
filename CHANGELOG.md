@@ -9,6 +9,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Provider tests for all three first-party providers (Anthropic,
+  OpenAI, OpenRouter) — 15 tests across 699 LoC closing the largest
+  hidden risk in the codebase. Each test boots an
+  `httptest.NewServer` replaying the provider's wire format and
+  drives the SDK against it via `option.WithBaseURL`, so no real
+  API keys are touched. Coverage: `Complete` parsing of text +
+  usage + tool calls, `Stream` SSE decoding for text deltas +
+  delta-assembled tool-call arguments + usage tail, outbound
+  multimodal image encoding (Anthropic's
+  `{source: {type: base64, media_type}}` and OpenAI's
+  `image_url` data-URL shapes), and HTTP-error propagation
+  through the stream channel. OpenRouter tests focus on the
+  provider-specific divergence (HTTP-Referer + X-Title identity
+  headers for app attribution, default-model fallback) since the
+  shared `openai-go/v3` SDK behavior is exercised in depth by the
+  OpenAI suite. Tests bypass the public `New()` constructor — which
+  fixes baseURL/headers per-provider — via a `newTestClient`
+  helper that preserves production options while overriding the
+  URL. Closes the historical bug class visible in earlier
+  CHANGELOG entries (SSE parser drift, tool-call argument
+  fragment reassembly, multimodal request encoding).
+
+- MCP integration tests (`pkg/margo/mcp/integration_test.go`,
+  gated behind `//go:build integration`). Three end-to-end tests
+  spawn the real `@modelcontextprotocol/server-filesystem` via
+  `npx` and exercise the wire protocol: handshake +
+  `tools/list` returns the expected catalog, full `tools/call`
+  round-trip on `read_file` recovers seeded content verbatim,
+  and `Manager.StopAll` terminates the subprocess within 5s.
+  Skipped at run-time when `npx` isn't on PATH so they don't
+  fail on machines without Node. New `make test-integration`
+  target runs them with a 2-minute timeout (`go test
+  -tags=integration -v -timeout=2m ./pkg/margo/mcp/`); the
+  default `make test` is unchanged. The build-tag gate is
+  intentional — first-run downloads the npm package into the
+  user's cache (10–30s), which is too slow for the inner-loop
+  test run.
+
+  These tests validated the MCP MVP works against a real
+  community server on first try; the protocol layer needed
+  zero changes. The smoke test surfaced one bug in our *own*
+  test helper (since fixed): `waitForReady` originally cached
+  a `*Server` pointer, but `Manager.addAndStart` inserts a
+  placeholder Server and swaps in the live one only after
+  `startServer` returns — polling the stale placeholder
+  observed `starting` forever. The fix re-resolves
+  `mgr.Server(name)` on each poll iteration. Worth flagging
+  for downstream callers: anyone caching a `*Server` returned
+  by `AddServer` may be holding the placeholder. `Tools()` and
+  `CallQualified` re-resolve internally so they're unaffected.
+
+- Model Context Protocol (MCP) client. New `pkg/margo/mcp` package
+  implements the protocol from scratch — JSON-RPC 2.0 over
+  newline-delimited stdio, `initialize` handshake, `tools/list`,
+  `tools/call`, and request/response correlation with crash-drain
+  semantics. Subprocess lifecycle (`Server`) manages the child:
+  spawn via `exec.Cmd`, ring-buffered stderr tail for failure
+  diagnostics, graceful SIGTERM-via-stdin-close with 3s SIGKILL
+  fallback. `Manager` is a named registry that loads a
+  Claude-Desktop-compatible `mcpServers` JSON config and starts
+  every server eagerly + asynchronously — `NewSession` returns
+  immediately; per-server handshake runs in its own goroutine so
+  a slow or broken server never blocks app boot. MCP tools surface
+  to the agent runner as `eino.tool.InvokableTool` via a thin
+  adapter, namespaced `mcp:<server>:<tool>` so collisions with
+  builtins are structurally impossible. Hand-rolled rather than
+  wrapping a third-party SDK to match the codebase's "own the wire"
+  pattern (providers, agent adapter, core all hand-roll their
+  protocol layers); MCP 1.0 is stable enough that the maintenance
+  cost is modest. 17 tests pass against an in-pipe fake server
+  covering handshake, ListTools, CallTool, RPC vs tool-level
+  errors, concurrent call correlation, context cancellation,
+  server-crash drain, server-initiated request reply, config
+  parsing, ParseQualified, failure-fast paths, ring rotation, and
+  Tools aggregation skipping failed servers.
+- MCP integration in `core.Session`. `Config` gained `MCPConfig`
+  and `MCPLogger`. `Session.MCP() *mcp.Manager` accessor exposes
+  the manager. `Session.Tools()` and `ToolsMetadata()` merge MCP
+  tools after builtins (sorted, namespaced). `Session.buildTools`
+  routes `mcp:*` names through the manager; unknown MCP names
+  error up-front rather than at first call so the agent runner
+  surfaces "you asked for an MCP tool that isn't available" once
+  rather than letting the model burn turns invoking a tool that
+  will always fail. `Session.Shutdown()` for clean app exit;
+  Wails desktop wires it via the `OnShutdown` hook so MCP
+  subprocesses always get a polite stop.
+- Wails MCP management methods: `MCPServers() []MCPServerInfo`,
+  `AddMCPServer(name, spec)`, `RemoveMCPServer(name)`. Loaded
+  from `<UserConfigDir>/Margo/mcp.json` at boot (Claude-Desktop
+  compatible); missing/malformed file is best-effort.
+- TUI now consumes the same MCP config. New `-mcp-config` flag
+  overrides the default path; `defer sess.Shutdown()` for clean
+  teardown.
+- MCP servers tab in the right-pane settings (workspace mode).
+  Lists each managed server with status badge (`ready` /
+  `starting` / `failed` / `stopped`), tool count, and a
+  `<details>`-wrapped stderr tail on failure. Polls every 2
+  seconds while the tab is expanded; stops on collapse. Inline
+  add-server form (session-only; the footer notes that persistent
+  additions go in `mcp.json`). Remove button stops the
+  subprocess and unregisters cleanly. The existing Tools tab
+  tags MCP tools with an `mcp` badge so users can enable them in
+  the per-workspace palette like any builtin.
 - Conversation export to markdown. New "↓ md" button in the chat
   header serialises the active chat (title, provider/model,
   persona/agent name, token counts, full message history with
@@ -41,6 +144,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `SettingsPanel.svelte` split from a 1100-LoC monolith into an
+  87-LoC tabs shell plus seven focused subcomponents under
+  `lib/settings/`: `ProviderSettings` (Models tab),
+  `PersonasSection`, `KnowledgeSection`, `ToolsSection`,
+  `TrustedToolsSection`, `MCPServersSection` (new MCP tab),
+  `GeneralSettings`. Each subcomponent owns its own collapsible
+  state, dialogs, and Wails calls so the parent shell only
+  composes them. Shared form styles (`mini-btn`, `text-input`,
+  `section-head`, `select-trigger`, `tab-trigger`, etc.) moved
+  from the panel's scoped `<style>` block to global `style.css`
+  so the subcomponents don't each carry ~100 LoC of duplicated
+  CSS. Write-routing extracted into `lib/settings/writeKey.ts`
+  so a future scope (per-chat overrides) is a one-place change.
+  Behavior preserved exactly; one structural change: Persona
+  section's `noDefault` const hoisted from a `{@const}` (which
+  Svelte requires be the immediate child of a block) into a
+  `$:` reactive in the script section. The split is a
+  prerequisite for variant scaffolding (`Settings.uiTier`) since
+  tier-aware gates are easier to add per-subcomponent than to a
+  monolith.
 - Extracted UI-agnostic orchestration into a new `pkg/margo/core`
   package. `core.Session` owns provider clients, the workspace +
   RAG indexer registry, the attachment store, the permission

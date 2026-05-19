@@ -1,8 +1,8 @@
 {
   "anthropic": [
-    { "id": "claude-haiku-4-5",  "contextTokens": 200000,   "multimodal": true },
-    { "id": "claude-sonnet-4-6", "contextTokens": 200000,   "multimodal": true },
-    { "id": "claude-opus-4-7",   "contextTokens": 1000000,  "multimodal": true }
+    { "id": "claude-haiku-4-5",  "contextTokens": 200000,   "multimodal": true, "costPerMTokIn":  0.80, "costPerMTokOut":  4.00, "pricedAt": "2026-05-19" },
+    { "id": "claude-sonnet-4-6", "contextTokens": 200000,   "multimodal": true, "costPerMTokIn":  3.00, "costPerMTokOut": 15.00, "pricedAt": "2026-05-19" },
+    { "id": "claude-opus-4-7",   "contextTokens": 1000000,  "multimodal": true, "costPerMTokIn": 15.00, "costPerMTokOut": 75.00, "pricedAt": "2026-05-19" }
   ],
   "openai": [
     { "id": "gpt-5.4-nano", "contextTokens": 400000, "multimodal": true },
@@ -19,11 +19,11 @@
     { "id": "google/gemini-2.5-flash",                    "contextTokens": 1000000, "multimodal": true },
     { "id": "google/gemini-2.5-flash-lite",               "contextTokens": 1000000, "multimodal": true },
     { "id": "google/gemini-3-flash-preview",              "contextTokens": 1000000, "multimodal": true },
-    { "id": "google/gemma-4-26b-a4b-it:free",             "contextTokens": 128000 },
-    { "id": "google/gemma-4-31b-it:free",                 "contextTokens": 128000 },
+    { "id": "google/gemma-4-26b-a4b-it:free",             "contextTokens": 128000,                       "costPerMTokIn": 0, "costPerMTokOut": 0, "pricedAt": "2026-05-19" },
+    { "id": "google/gemma-4-31b-it:free",                 "contextTokens": 128000,                       "costPerMTokIn": 0, "costPerMTokOut": 0, "pricedAt": "2026-05-19" },
     { "id": "moonshotai/kimi-k2.5",                       "contextTokens": 200000 },
     { "id": "moonshotai/kimi-k2.6",                       "contextTokens": 200000 },
-    { "id": "nvidia/nemotron-3-super-120b-a12b:free",     "contextTokens": 128000 },
+    { "id": "nvidia/nemotron-3-super-120b-a12b:free",     "contextTokens": 128000,                       "costPerMTokIn": 0, "costPerMTokOut": 0, "pricedAt": "2026-05-19" },
     { "id": "openrouter/owl-alpha",                       "contextTokens": 128000 },
     { "id": "qwen/qwen3-235b-a22b-2507",                  "contextTokens": 128000 },
     { "id": "qwen/qwen3.5-flash-02-23",                   "contextTokens": 128000 },

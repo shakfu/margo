@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
+	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/shakfu/margo/pkg/margo"
 	"github.com/shakfu/margo/pkg/margo/agent"
 	"github.com/shakfu/margo/pkg/margo/core"
+	"github.com/shakfu/margo/pkg/margo/mcp"
 )
 
 // App is the Wails-bound struct. Exported methods are callable from the
@@ -40,18 +42,40 @@ type App struct {
 
 func NewApp() *App {
 	cfg, _ := config.Load()
+
+	// MCP config is best-effort: a missing or malformed file leaves the
+	// app running with an empty manager so the user can still chat. The
+	// failure mode is surfaced in the MCP tab once the frontend learns
+	// to read it; logging captures the parse error in the meantime.
+	var mcpCfg mcp.Config
+	if path, err := mcp.DefaultConfigPath(); err == nil {
+		mcpCfg, _ = mcp.LoadConfig(path)
+	}
+
 	return &App{
 		cfg: cfg,
 		session: core.NewSession(core.Config{
 			AnthropicAPIKey:  cfg.AnthropicAPIKey,
 			OpenAIAPIKey:     cfg.OpenAIAPIKey,
 			OpenRouterAPIKey: cfg.OpenRouterAPIKey,
+			MCPConfig:        mcpCfg,
+			// MCPLogger left nil → manager uses a discarding logger.
+			// A file-backed logger is a follow-up; for now stderr is
+			// fine when launched from a terminal.
 		}),
 	}
 }
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+}
+
+// shutdown is the Wails OnShutdown hook. Wired in main.go so MCP
+// subprocesses get a clean SIGTERM (via stdin close) before the
+// process exits. Without this, killed Wails sessions leave orphaned
+// child processes around — easy to miss in dev, painful in prod.
+func (a *App) shutdown(ctx context.Context) {
+	a.session.Shutdown()
 }
 
 // Greet is the stock Wails template method, retained for reference.
@@ -425,6 +449,66 @@ func (a *App) RespondPermission(id string, approved bool, always bool) error {
 
 // CancelStream cancels an in-flight stream. No-op if the id is unknown.
 func (a *App) CancelStream(id string) { a.session.Cancel(id) }
+
+// MCPServerInfo is the JSON-friendly view of one managed MCP server.
+// Mirrors mcp.Server's getters; kept here so the wire shape is owned
+// at the Wails boundary and the underlying mcp.Server stays free of
+// JSON tags (the TUI consumes it directly without re-serializing).
+type MCPServerInfo struct {
+	Name       string   `json:"name"`
+	Command    string   `json:"command"`
+	Args       []string `json:"args,omitempty"`
+	Status     string   `json:"status"`
+	Error      string   `json:"error,omitempty"`
+	Tools      []string `json:"tools,omitempty"`
+	StderrTail []string `json:"stderrTail,omitempty"`
+}
+
+// MCPServers returns one info row per managed server, sorted by name.
+// Frontends poll this to render the MCP tab; status transitions are
+// the only thing that changes during a session (eager start means new
+// servers are rare). A push channel is a follow-up.
+func (a *App) MCPServers() []MCPServerInfo {
+	servers := a.session.MCP().Servers()
+	out := make([]MCPServerInfo, 0, len(servers))
+	for _, s := range servers {
+		status, statusErr := s.Status()
+		toolNames := []string{}
+		for _, t := range s.Tools() {
+			toolNames = append(toolNames, t.Name)
+		}
+		row := MCPServerInfo{
+			Name:       s.Name(),
+			Status:     string(status),
+			Tools:      toolNames,
+			StderrTail: s.StderrTail(),
+		}
+		if statusErr != nil {
+			row.Error = statusErr.Error()
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// AddMCPServer registers + starts a new MCP server at runtime. The
+// frontend's MCP tab calls this when the user adds a row. Persistence
+// (writing the new spec back to mcp.json) is the frontend's
+// responsibility for MVP — keeps a single round-trip per change and
+// avoids racing the manager's internal state.
+func (a *App) AddMCPServer(name string, spec mcp.ServerSpec) error {
+	if name == "" {
+		return fmt.Errorf("server name is required")
+	}
+	a.session.MCP().AddServer(a.ctx, name, spec)
+	return nil
+}
+
+// RemoveMCPServer stops and unregisters a server. Idempotent: removing
+// a non-existent name is a no-op.
+func (a *App) RemoveMCPServer(name string) error {
+	return a.session.MCP().RemoveServer(name, 3*time.Second)
+}
 
 // ExportChatMarkdown renders the chat to markdown via
 // core.RenderChatMarkdown, opens the OS save dialog with a sensible

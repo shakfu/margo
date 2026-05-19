@@ -310,6 +310,53 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class MCPServerInfo {
+	    name: string;
+	    command: string;
+	    args?: string[];
+	    status: string;
+	    error?: string;
+	    tools?: string[];
+	    stderrTail?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new MCPServerInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.command = source["command"];
+	        this.args = source["args"];
+	        this.status = source["status"];
+	        this.error = source["error"];
+	        this.tools = source["tools"];
+	        this.stderrTail = source["stderrTail"];
+	    }
+	}
+
+}
+
+export namespace mcp {
+	
+	export class ServerSpec {
+	    command: string;
+	    args?: string[];
+	    env?: Record<string, string>;
+	    cwd?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ServerSpec(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.command = source["command"];
+	        this.args = source["args"];
+	        this.env = source["env"];
+	        this.cwd = source["cwd"];
+	    }
+	}
 
 }
 

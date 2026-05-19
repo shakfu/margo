@@ -5,19 +5,33 @@ import (
 	"encoding/json"
 )
 
-// Model is one entry in the model catalog: the provider-specific id, the
-// context-window budget the agent's budget rewriter uses to decide when
-// to summarize history, and whether the model accepts image input. The
-// frontend gates its paperclip / drop-zone affordances on Multimodal.
+// Model is one entry in the model catalog.
 //
-// Cost fields are intentionally omitted here; when a cost meter ships,
-// extend this struct with optional `CostPerInputTokens` / `CostPerOutputTokens`
-// fields and populate them in models.json — adding optional fields is
-// backwards-compatible with existing consumers.
+// Fields:
+//
+//   - ID              provider-native model identifier (matches the
+//                     wire-level model parameter).
+//   - ContextTokens   input-token context window. Used by
+//                     agent/budget.go for history-rewrite decisions.
+//   - Multimodal      true if the model accepts image input. Gates the
+//                     frontend's paperclip affordance.
+//   - CostPerMTokIn   optional USD price per million input tokens.
+//                     Pointer so nil ≠ &0 — a free-tier model
+//                     (rate set to zero) is distinguishable from an
+//                     unknown-rate model (rate omitted entirely).
+//                     The frontend hides the cost meter for chats on
+//                     unknown-rate models rather than showing $0.00,
+//                     which would be misleading.
+//   - CostPerMTokOut  optional USD price per million output tokens.
+//   - PricedAt        optional ISO date for when costs were last
+//                     verified. Helps reviewers spot stale data.
 type Model struct {
-	ID            string `json:"id"`
-	ContextTokens int    `json:"contextTokens"`
-	Multimodal    bool   `json:"multimodal,omitempty"`
+	ID             string   `json:"id"`
+	ContextTokens  int      `json:"contextTokens"`
+	Multimodal     bool     `json:"multimodal,omitempty"`
+	CostPerMTokIn  *float64 `json:"costPerMTokIn,omitempty"`
+	CostPerMTokOut *float64 `json:"costPerMTokOut,omitempty"`
+	PricedAt       string   `json:"pricedAt,omitempty"`
 }
 
 // Catalog is the parsed shape of models.json: a map from provider name
@@ -87,4 +101,48 @@ func (c Catalog) IsMultimodal(id string) bool {
 		}
 	}
 	return false
+}
+
+// HasCost reports whether the named model has both input and output
+// per-MTok rates declared in models.json. Used by callers that need to
+// distinguish "free-tier zero" from "rate unknown" — both manifest as
+// a zero result from Cost() but only the former is meaningful.
+func (c Catalog) HasCost(id string) bool {
+	for _, ms := range c {
+		for _, m := range ms {
+			if m.ID == id {
+				return m.CostPerMTokIn != nil && m.CostPerMTokOut != nil
+			}
+		}
+	}
+	return false
+}
+
+// Cost returns the USD cost of a token-count usage against the named
+// model. Returns 0 (and HasCost returns false) when rates are not
+// declared — callers should check HasCost first if they need to
+// distinguish "free / unknown" from "non-zero cost." Rates are
+// per-million-tokens; this method does the divide.
+//
+// Cost does not differentiate between cached and uncached input tokens
+// (Anthropic charges 10% for cache reads, 125% for cache writes); the
+// usage parameter is the single InputTokens / OutputTokens pair
+// returned by the provider, so the calculation assumes the uncached
+// rate. Real-world cost may be lower for prompt-cached workloads;
+// the meter overestimates, which is the safer error to display.
+func (c Catalog) Cost(id string, inputTokens, outputTokens int) float64 {
+	for _, ms := range c {
+		for _, m := range ms {
+			if m.ID != id {
+				continue
+			}
+			if m.CostPerMTokIn == nil || m.CostPerMTokOut == nil {
+				return 0
+			}
+			in := float64(inputTokens) / 1_000_000 * (*m.CostPerMTokIn)
+			out := float64(outputTokens) / 1_000_000 * (*m.CostPerMTokOut)
+			return in + out
+		}
+	}
+	return 0
 }
