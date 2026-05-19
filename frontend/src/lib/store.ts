@@ -582,7 +582,12 @@ const defaults: Settings = {
   activeWorkspaceId: DEFAULT_WORKSPACE_ID,
 };
 
-function loadSettings(): Settings {
+// Exported for store.test.ts so the migration paths (legacy agents →
+// personas, builtin re-assertion, workspace invariants, default-
+// persona dangling-id cleanup) have a unit-test surface. Not called
+// from frontend code outside this module; do not rely on this as a
+// public API.
+export function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) {

@@ -697,3 +697,362 @@ runner's assembly shape.
   Adoption doesn't grow the binary. The `eino-ext/devops`
   optional add-on (chromedp) is the only new heavy dep — gate
   it behind a build tag.
+
+## 10. Post-0.1.1 backlog
+
+This section consolidates the remaining work surfaced by the
+post-0.1.1 strategic review (the prior REVIEW.md, retired after
+its actionable items were either shipped or migrated here).
+Items are ordered by priority across themes, not grouped by
+theme — pick from the top.
+
+The platform thesis is **"a substrate for digital work with
+LLM/agent assistance and MCP tooling, plus downstream variants
+that hide complexity for less-technical audiences."** Priorities
+below are weighted accordingly: substrate-validating work first,
+then user-facing polish, then ergonomic and operational
+cleanups.
+
+### P1 — strategic platform work, next sprint candidates
+
+#### 10.1 Variant scaffolding (`Settings.uiTier`)
+
+Add `Settings.uiTier: 'novice' | 'standard' | 'expert'` and gate
+the most-advanced controls per `lib/settings/*.svelte`
+subcomponent (sampling, thinking, stop sequences, trusted
+tools, MCP servers tab, agent runner picker). No actual variant
+build yet — just the mechanism, so the variant story is one
+build-flag (or runtime-toggle) away.
+
+**Why:** the substrate-with-variants moat hypothesis only works
+if the substrate has a tier-aware visibility layer. The
+`SettingsPanel` split into per-section components was done
+specifically to enable this; adding tier gates per-subcomponent
+is much cheaper than against the prior 1100-LoC monolith.
+
+**Open decision:** variants as separate build binaries (clean
+mental model) or runtime modes of one binary (cleaner marketing
+pitch — "margo, with simple mode"). Pick before this work
+begins.
+
+#### 10.2 Per-workspace MCP server scoping
+
+Today the `mcp.Manager` is global (one set of servers per
+process). The original design intent was per-workspace scoping
+so different projects can bring different filesystem roots,
+different DB connections, etc. Add a workspace-aware lookup
+layer; the existing `Manager` becomes the underlying registry.
+
+**Why:** explicitly flagged by the author during MCP MVP work as
+"the eventual goal — global for MVP." Now is the time, since
+the MCP UI is fresh and any breaking change to the config shape
+(adding a `scope: workspaceId | "global"` field per server) is
+cheaper before adoption grows.
+
+#### 10.3 OpenRouter live model fetch
+
+`models.json` declares ~17 OpenRouter models with no cost data
+(only the `:free` tier rows have explicit zero rates). Fetch the
+live catalogue from `/api/v1/models` at boot, cache to disk,
+merge into the in-memory `Catalog` so cost meter coverage
+becomes universal for OR users without hand-maintaining rates.
+
+**Why:** OR ships new models continuously; hand-maintaining is
+unsustainable. The mechanism doubles as a template for
+Anthropic / OpenAI catalogue refresh if they ever ship `/models`
+endpoints.
+
+**Risk:** boot latency on cold cache + offline failure mode.
+Fallback to the embedded `models.json` when fetch fails.
+
+#### 10.4 Ollama / local model support
+
+New `pkg/margo/providers/ollama/ollama.go`. Implements
+`margo.Client` against `localhost:11434`'s OpenAI-compatible
+endpoint (the existing `openai-go/v3` SDK works with
+`option.WithBaseURL`). Register in `core.Session.clientFor`.
+Promote in docs as the zero-API-key onboarding path.
+
+**Why:** lowers the bar to first useful conversation to
+"install Ollama, pick a model" — significant onboarding win for
+local-first power users and developers without paid keys. The
+provider abstraction was built for this; it's one of the
+cheapest high-value adds remaining.
+
+#### 10.5 First-run wizard
+
+UI flow that walks a new user to add at least one API key (or
+point margo at a running Ollama), pick a default provider, and
+land in an empty chat ready to send. Today opening margo with
+zero providers configured yields a confusing empty state.
+
+**Why:** the platform's first impression matters more than any
+internal cleanup. Coupled with 10.4 (Ollama), the first-run
+story can be zero-key for users who already have a local
+model runtime.
+
+#### 10.6 `/help` slash command
+
+The slash-command grammar (`/agent`, `/agent-plan`,
+`/agent-workflow`, `/persona`, `/clear`, `/default`) is the
+most powerful and least discoverable feature in margo. Typing
+`/help` should print the full catalogue inline (already
+available as `SLASH_COMMANDS` in `lib/slash.ts`).
+
+**Why:** the runner taxonomy is well-designed but invisible to
+users who don't read docs. Discoverability fix is ~30 LoC.
+
+### P2 — high-value work, after P1 clears
+
+#### 10.7 SQLite chat store + history search
+
+Add `pkg/margo/store/` with a `ChatStore` interface and a
+`sqlite` implementation using `modernc.org/sqlite` (pure Go, no
+cgo). Migrate chat state out of `localStorage` and surface
+through the Wails layer. Add FTS5 over messages for the history
+search affordance.
+
+**Why:** localStorage caps (~5 MB Chromium) + silent
+`setItem` failures + no export / multi-device / FTS — every
+one will eventually bite a user. The migration is the largest
+remaining tech debt in the project. Combining with FTS makes
+the user-visible win compelling enough to justify the
+disruption.
+
+**Risk:** state migration is destructive if mishandled. Ship
+a one-time importer that reads existing localStorage and
+populates the SQLite store before flipping the read path.
+
+#### 10.8 Real tokenizer
+
+Replace `pkg/margo/agent/budget.go::estimateTokens`'s
+chars/4 heuristic with a real tokenizer: `tiktoken-go` for
+OpenAI; Anthropic's published estimator for Claude. Wrap
+behind a `Tokenizer interface { Count(string) int }` so
+providers plug in different counters.
+
+**Why:** chars/4 under-counts by 20-40% on dense / non-Latin
+content. A chat the UI thinks is at 80% of context can
+silently overflow. Affects both the context-window ring and
+the cost meter (which divides token counts by 1M); a real
+tokenizer improves both at once.
+
+#### 10.9 Conversation fork + regenerate
+
+Two affordances:
+- **Regenerate**: re-send the user's last message; replace
+  the assistant's last response.
+- **Fork**: copy the chat history up to a chosen point into a
+  new chat; useful for "try a different prompt from here."
+
+Both are standard chat-product features and modest UI work
+(message-bubble dropdown + a `forkChat(chatId, untilIndex)`
+store helper).
+
+**Why:** the easiest "feels like a real chat product" win
+remaining.
+
+#### 10.10 Keyboard shortcuts
+
+Conventional shortcuts wired through the Wails app menu (so
+they work even when input isn't focused): Cmd+N (new chat),
+Cmd+K (chat switcher / palette), Cmd+/ (focus composer),
+Cmd+Enter (send), Cmd+. (cancel stream), Cmd+, already wired.
+
+**Why:** power users live on these; the Mac menu is the
+correct registration point.
+
+#### 10.11 `App.svelte` split
+
+`App.svelte` is still 1100+ LoC (the SettingsPanel split
+addressed its sibling; App is the remaining monolith). Suggested
+cuts:
+- `MessageList.svelte` — pure render of `Chat.messages`.
+- `MessageInput.svelte` — input + attachment dropzone + slash
+  autocomplete.
+- `StreamController.ts` — non-Svelte module wiring `EventsOn`
+  to chat-state mutation.
+- Keep `App.svelte` as layout + wiring (target: <300 LoC).
+
+**Why:** highest-defect-risk frontend file. Should land before
+variant scaffolding (§10.1) touches `App.svelte` as well, so the
+splits produce tier-aware files in one pass.
+
+#### 10.12 Playwright smoke test
+
+One end-to-end happy-path spec: launch margo (Wails dev), type
+"hello", observe a chunk land, kill the stream. Vitest (now
+landed for unit tests) doesn't cover the Wails IPC round-trip;
+Playwright does.
+
+**Why:** the IPC contract `app.go` upholds is the boundary
+most likely to silently break across refactors. One spec is
+cheap and protects everything below it.
+
+#### 10.13 Stable `pkg/margo/core` API + conformance suite
+
+Treat `core.Session`'s public methods as a versioned API; tag
+semver violations as breaking. Add `core.Config` slots for
+`EnabledTools []string` and `EnabledRunners []string` so
+downstream variants can curate the substrate without subclassing.
+Add a `pkg/margo/core/conformance/` test suite frontend
+integrators can run against their build to confirm contract
+adherence.
+
+**Why:** the variants story (§10.1) assumes a stable substrate.
+Crystallise it before downstream binaries depend on a moving
+target.
+
+#### 10.14 Git tool
+
+`pkg/margo/agent/tools_git.go` exposing `read_file`,
+`git_log`, `git_blame`, `git_diff`, `git_status` as read-only
+tools (all in `ReadOnlyTools` so they auto-approve). Bounded
+output, working-directory rooted at the active workspace's
+folder.
+
+**Why:** developer audience overlap is high; the workspace
+already binds to a directory; the tool is straightforward
+shell-shelling-out work. Same shape as `quarto_render`.
+
+#### 10.15 Code execution sandbox tool
+
+Sandboxed Python / shell execution behind a tool. Two
+implementation paths:
+- **Docker-backed** (`pkg/margo/agent/tools_exec.go`): spawn a
+  container per call, mount the workspace dir read-only, time
+  out aggressively. Heavy but well-understood.
+- **Bubblewrap / sandbox-exec** (per-OS): lighter, no Docker
+  dependency. Worse Windows story.
+
+Opens up data-science / scripting / "code interpreter"-class
+use cases that LLM-only chats can't do.
+
+**Why:** the biggest single feature delta vs. generic chat
+clients. Should land after MCP per-workspace scoping (§10.2)
+so the sandbox can be MCP-served rather than baked into core.
+
+### P3 — ergonomics, hygiene, and deferred decisions
+
+#### 10.16 Daemon mode (`cmd/margod`)
+
+HTTP + SSE server wrapping `core.Session`. The TUI becomes an
+optional HTTP client; the Wails app keeps embedding the session
+for offline use. Pre-req for any future mobile / multi-device /
+remote story.
+
+**Why:** strategically valuable, tactically not blocking
+anything today. Defer until a concrete variant or remote-use
+case is planned; the core extraction makes this a ~one-week
+project when the time comes.
+
+#### 10.17 Per-tool-argument permission policy
+
+The current gate is per-tool-name (approve `web_fetch` once →
+approves every URL). Add an optional matcher: e.g. "approve
+`web_fetch` if `host` matches `*.github.com`." Becomes
+important when shell-execution tools (§10.15) land.
+
+**Why:** acceptable ceiling for the current builtins; a hard
+requirement for high-risk tools.
+
+#### 10.18 System-prompt resolution refactor
+
+Today system-prompt resolution order (chat / workspace overrides
+/ persona / agent / runner) is encoded in the frontend's
+`effectiveSettings` derived store. Move into Go as
+`core.ResolveSystem(...)` so the slash-command runners and the
+chat path can never disagree.
+
+**Why:** correctness — currently a frontend-only contract that
+the TUI will eventually need to re-implement, inviting drift.
+
+#### 10.19 `localStorage` save error surfacing
+
+Until §10.7 ships, surface `localStorage.setItem` failures as a
+toast rather than the current silent `try/catch (_)` in
+`store.ts`. A user hitting the ~5 MB quota will otherwise
+silently stop persisting chats and discover it only on next
+reload.
+
+**Why:** transitional safety net during the SQLite migration
+runway.
+
+#### 10.20 Accessibility pass
+
+Add `<label>` element pairing with form inputs; semantic
+structure on message timestamps and persona badges; error
+boundaries for streaming failures; verify focus management
+through the Melt dialogs. Currently basic `aria-label` on
+buttons; nothing more.
+
+**Why:** business audience or screen-reader users won't get
+past 30 seconds with the current state. Should be done before
+any meaningful 1.0 announcement.
+
+#### 10.21 Eliminate `as any` casts in `App.svelte`
+
+Two known sites. Both recoverable with proper typing of the
+Wails-emitted event payloads.
+
+#### 10.22 Move Wails binary to `cmd/margo/`
+
+`main.go` + `app.go` + `frontend/` currently live at the repo
+root. The Wails template default; no technical reason to stay
+there. Move under `cmd/margo/` for symmetry with `cmd/margo-cli/`
+and `cmd/margo-tui/`. Update `wails.json`, `//go:embed` path,
+Makefile.
+
+**Why:** tidiness; no functional change. Cheap to do now, more
+awkward after deeper coupling lands.
+
+#### 10.23 CI configuration
+
+No `.github/workflows/` today; `make test` is locally green and
+globally unverified. Add a GitHub Actions workflow running
+`make test-all` on push / PR, plus a separate weekly job for
+`make test-integration` (needs Node).
+
+#### 10.24 Persona / Agent docs-first decision
+
+Per the original REVIEW §7.4: write one paragraph in
+`docs/concepts.md` distinguishing Persona (voice / style) from
+Agent (task-shaped capability). If the paragraph can be written
+cleanly, keep the split. If not, collapse into a single `Role`
+type. Cheaper than ripping the types apart speculatively.
+
+#### 10.25 Attachment size pre-validation
+
+Today, dropping a 50 MB PDF gets a provider error after a slow
+upload. Pre-validate against a per-provider cap (e.g. 32 MB
+Anthropic, ~20 MB OpenAI) and surface a clear inline warning.
+~30 LoC.
+
+#### 10.26 Move `internal/config` to `pkg/margo/config`
+
+The TUI already imports `internal/config` (same-module rule
+allows it), but moving to `pkg/margo/config` removes the
+artificial barrier and makes downstream variants' construction
+of a Session cleaner.
+
+#### 10.27 Conversation JSON export / import
+
+Markdown export shipped; JSON round-trip lets users share
+chats and seed new chats from a saved one. Symmetric to the
+existing export flow; ~50 LoC.
+
+#### 10.28 Themable UI
+
+Light / dark already exist. A community-extensible
+theme-overlay system is low-priority — the substrate audience
+will customise via CSS regardless. Flagged for awareness;
+defer unless a contributor proposes it.
+
+### Deliberately out of scope
+
+- **Plugin system.** MCP is the right answer; building a
+  parallel margo-specific plugin runtime is anti-pattern.
+- **Crash reporting / telemetry.** Margo is local-first and
+  collects nothing. Treat as a feature.
+- **Mobile.** No path to it without daemon mode (§10.16) and
+  a real platform commitment.

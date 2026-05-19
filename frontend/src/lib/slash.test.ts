@@ -1,124 +1,98 @@
-// Hand-runnable assertions for slash.ts (TODO §9.2).
+// Vitest unit tests for slash.ts. Replaces the prior hand-runnable
+// assertion file with the standard test-runner shape so failures land
+// in `npm run test` output instead of being discovered manually.
 //
-// The frontend has no test runner configured (see TODO §9.2 follow-up).
-// This file is structured as bare top-level assertions that throw on
-// failure so it can be executed with `tsx slash.test.ts` from the
-// frontend/ directory once a runner lands, and read as
-// documentation in the meantime. Each block stays small enough that a
-// failing assertion's message identifies which case broke.
-//
-// To exercise manually:
-//   cd frontend && npx tsx src/lib/slash.test.ts
+// Coverage:
+//   - parseSlash dispatches to the right command kind, tolerating
+//     case, whitespace, and multi-line task bodies.
+//   - Non-slash input (and slashes not at the start) falls through.
+//   - slugify normalises names to the form persona ids use.
+//   - SLASH_COMMANDS catalogue is non-empty and well-shaped.
 
+import { describe, test, expect } from 'vitest';
 import { parseSlash, slugify, SLASH_COMMANDS } from './slash';
 
-function assert(cond: unknown, msg: string): void {
-  if (!cond) {
-    throw new Error('assertion failed: ' + msg);
-  }
-}
+describe('parseSlash', () => {
+  test('non-slash input falls through', () => {
+    expect(parseSlash('')).toBeNull();
+    expect(parseSlash('hello')).toBeNull();
+    expect(parseSlash('  hello /agent')).toBeNull();
+    expect(parseSlash('/etc/passwd is sensitive')).toBeNull();
+  });
 
-function assertEq<T>(got: T, want: T, msg: string): void {
-  if (JSON.stringify(got) !== JSON.stringify(want)) {
-    throw new Error(`${msg}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
-  }
-}
+  test('/agent dispatches to react runner', () => {
+    expect(parseSlash('/agent')).toEqual({ kind: 'agent', runnerType: 'react', task: '' });
+    expect(parseSlash('/agent draft the doc')).toEqual({
+      kind: 'agent', runnerType: 'react', task: 'draft the doc',
+    });
+  });
 
-// --- non-slash input falls through ---
+  test('/agent-plan and /agent-workflow select their runners', () => {
+    expect(parseSlash('/agent-plan summarise this')).toEqual({
+      kind: 'agent', runnerType: 'plan', task: 'summarise this',
+    });
+    expect(parseSlash('/agent-workflow do it')).toEqual({
+      kind: 'agent', runnerType: 'workflow', task: 'do it',
+    });
+  });
 
-assertEq(parseSlash(''), null, 'empty');
-assertEq(parseSlash('hello'), null, 'plain word');
-assertEq(parseSlash('  hello /agent'), null, 'slash not at start');
-assertEq(parseSlash('/etc/passwd is sensitive'), null, 'literal path containing slashes');
+  test('command word is case-insensitive but task case is preserved', () => {
+    expect(parseSlash('/AGENT Hello World')).toEqual({
+      kind: 'agent', runnerType: 'react', task: 'Hello World',
+    });
+  });
 
-// --- /agent forms ---
+  test('tolerates leading/trailing/intra whitespace', () => {
+    expect(parseSlash('  /agent   draft  ')).toEqual({
+      kind: 'agent', runnerType: 'react', task: 'draft',
+    });
+  });
 
-assertEq(
-  parseSlash('/agent'),
-  { kind: 'agent', runnerType: 'react', task: '' },
-  '/agent bare'
-);
-assertEq(
-  parseSlash('/agent draft the doc'),
-  { kind: 'agent', runnerType: 'react', task: 'draft the doc' },
-  '/agent with task'
-);
-assertEq(
-  parseSlash('/agent-plan summarise this'),
-  { kind: 'agent', runnerType: 'plan', task: 'summarise this' },
-  '/agent-plan typed'
-);
-assertEq(
-  parseSlash('/agent-workflow do it'),
-  { kind: 'agent', runnerType: 'workflow', task: 'do it' },
-  '/agent-workflow typed'
-);
+  test('preserves multi-line task body (shift+enter content)', () => {
+    expect(parseSlash('/agent line1\nline2')).toEqual({
+      kind: 'agent', runnerType: 'react', task: 'line1\nline2',
+    });
+  });
 
-// Case insensitivity on the command word; argument case is preserved.
-assertEq(
-  parseSlash('/AGENT Hello World'),
-  { kind: 'agent', runnerType: 'react', task: 'Hello World' },
-  'uppercase /AGENT'
-);
+  test('/persona — bare clears, with slug binds', () => {
+    expect(parseSlash('/persona')).toEqual({ kind: 'persona', slug: '' });
+    expect(parseSlash('/persona researcher')).toEqual({ kind: 'persona', slug: 'researcher' });
+  });
 
-// Whitespace tolerance.
-assertEq(
-  parseSlash('  /agent   draft  '),
-  { kind: 'agent', runnerType: 'react', task: 'draft' },
-  'leading/trailing whitespace'
-);
+  test('/default and /clear collapse to the clear kind', () => {
+    expect(parseSlash('/default')).toEqual({ kind: 'clear' });
+    expect(parseSlash('/clear')).toEqual({ kind: 'clear' });
+  });
 
-// Multi-line task: shift-enter content rides through.
-assertEq(
-  parseSlash('/agent line1\nline2'),
-  { kind: 'agent', runnerType: 'react', task: 'line1\nline2' },
-  'multi-line task'
-);
+  test('unknown commands report the word so the UI can hint', () => {
+    expect(parseSlash('/agnet draft')).toEqual({ kind: 'unknown', word: 'agnet' });
+    expect(parseSlash('/foo')).toEqual({ kind: 'unknown', word: 'foo' });
+  });
+});
 
-// --- /persona forms ---
+describe('slugify', () => {
+  test('normalises names to lowercase-kebab', () => {
+    expect(slugify('Code Reviewer')).toBe('code-reviewer');
+  });
+  test('trims surrounding whitespace', () => {
+    expect(slugify('  Editor  ')).toBe('editor');
+  });
+  test('strips punctuation, collapses runs of separators', () => {
+    expect(slugify("Bob's Persona!")).toBe('bob-s-persona');
+  });
+  test('empty in, empty out', () => {
+    expect(slugify('')).toBe('');
+  });
+});
 
-assertEq(
-  parseSlash('/persona'),
-  { kind: 'persona', slug: '' },
-  '/persona bare (clear)'
-);
-assertEq(
-  parseSlash('/persona researcher'),
-  { kind: 'persona', slug: 'researcher' },
-  '/persona with slug'
-);
-
-// --- /default and /clear ---
-
-assertEq(parseSlash('/default'), { kind: 'clear' }, '/default');
-assertEq(parseSlash('/clear'), { kind: 'clear' }, '/clear');
-
-// --- unknown commands ---
-
-assertEq(
-  parseSlash('/agnet draft'),
-  { kind: 'unknown', word: 'agnet' },
-  'misspelt /agnet'
-);
-assertEq(
-  parseSlash('/foo'),
-  { kind: 'unknown', word: 'foo' },
-  'unknown /foo'
-);
-
-// --- slugify ---
-
-assertEq(slugify('Code Reviewer'), 'code-reviewer', 'slugify basic');
-assertEq(slugify('  Editor  '), 'editor', 'slugify trim');
-assertEq(slugify("Bob's Persona!"), 'bob-s-persona', 'slugify punctuation');
-assertEq(slugify(''), '', 'slugify empty');
-
-// --- catalog sanity ---
-
-assert(SLASH_COMMANDS.length >= 4, 'SLASH_COMMANDS catalog populated');
-assert(
-  SLASH_COMMANDS.every(c => c.command.startsWith('/') && c.description.length > 0),
-  'catalog entries shaped correctly',
-);
-
-console.log(`slash.test: ${assert.toString().length > 0 ? 'all assertions passed' : ''}`);
+describe('SLASH_COMMANDS catalog', () => {
+  test('contains at least the four built-in command kinds', () => {
+    expect(SLASH_COMMANDS.length).toBeGreaterThanOrEqual(4);
+  });
+  test('every entry starts with `/` and carries a description', () => {
+    for (const c of SLASH_COMMANDS) {
+      expect(c.command.startsWith('/')).toBe(true);
+      expect(c.description.length).toBeGreaterThan(0);
+    }
+  });
+});

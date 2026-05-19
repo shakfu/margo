@@ -9,6 +9,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Vitest frontend test runner + three test files closing the
+  largest remaining hidden risk (the frontend's previously zero
+  test coverage). Setup: `vitest` + `jsdom` as devDependencies;
+  `vite.config.ts` extended with a `test` block (jsdom env so
+  `store.ts`'s module-init localStorage read works, `isolate:
+  true` so `vi.resetModules()` lets migration tests replay
+  loadSettings against fresh seeds); `npm run test` / `npm run
+  test:watch` scripts; new `make test-frontend` and `make
+  test-all` Makefile targets. **`slash.test.ts`** — converted
+  from the prior hand-runnable assertion file to standard
+  Vitest shape; ~17 cases covering `parseSlash` dispatch,
+  case-insensitivity, whitespace tolerance, multi-line task
+  bodies, `slugify`, and the `SLASH_COMMANDS` catalog.
+  **`cost.test.ts`** — regression net for the just-shipped cost
+  meter helpers: the pointer-vs-zero distinction (priced
+  vs free-tier vs rate-unknown), `costFor` arithmetic, and
+  `formatCost`'s sub-cent (4-decimal) vs ≥$0.01 (2-decimal)
+  formatting rule. **`store.test.ts`** — the migration logic
+  REVIEW §7.5 called out as the highest-value first frontend
+  test: empty/malformed localStorage paths, workspace
+  invariants (Default re-asserted when missing, invalid
+  `activeWorkspaceId` falls back to Default, dangling
+  `workspace.defaultPersonaId` cleared), and the §9.4 legacy
+  agent → persona migration (user agents become custom
+  personas with tool-hint appended, builtins re-asserted,
+  `LEGACY_BUILTIN_AGENT_IDS` dropped idempotently). 36 tests
+  total, all passing in <1s. `loadSettings` was exported (with
+  a test-only doc comment) — the only API surface change
+  needed to make the migration paths unit-testable.
+
+- Running USD cost meter in the chat header. `Model` in
+  `pkg/margo/models.json` grew optional `costPerMTokIn`,
+  `costPerMTokOut`, and `pricedAt` fields; the Go struct uses
+  `*float64` pointers so `nil` (rate unknown) is distinguishable
+  from `&0` (free-tier model). New `Catalog.HasCost(id)` and
+  `Catalog.Cost(id, in, out)` helpers on the Go side; mirror
+  `hasCost`, `costFor`, and `formatCost` in `store.ts` so the
+  frontend computes the running total reactively against
+  `$modelCatalog`. The header badge appears between the model
+  and thinking badges, hidden when rates are absent or no
+  tokens have been used yet. Sub-cent amounts render with 4
+  decimals (so a $0.0023 chat reads accurately); larger amounts
+  collapse to 2. Tooltip notes the prompt-cache caveat — the
+  meter assumes uncached rates so real-world cost on
+  cache-heavy workloads is lower (safer error direction than
+  underestimating). Anthropic Claude 4.x family populated with
+  the long-stable Haiku/Sonnet/Opus tier pricing
+  ($0.80/$4, $3/$15, $15/$75 per MTok); OpenAI gpt-5.4 family
+  and most OpenRouter entries left rate-unknown until verified
+  against current pricing pages — populating them is a
+  one-file edit to `models.json`. OpenRouter `:free` tier rows
+  set to explicit `0` rates with `pricedAt` so they read as
+  deliberate free-tier rather than unknown. Tests
+  (`TestHasCostDistinguishesUnknownFromFree`,
+  `TestCostCalculation`) verify the pointer-vs-zero
+  distinction.
+
+- `ARCHITECTURE.md` at the repo root — a contributor-facing tour
+  of margo's code, grounded in real file paths. Eight sections:
+  layered shape and boundary rules; package map (every file
+  under `pkg/margo/*` and each `cmd/*`); key flows with ASCII
+  sequence diagrams for streaming chat, agent runs, RAG
+  retrieval, MCP tool invocation, and the attachment lifecycle;
+  configuration surfaces; five "if you're adding to margo,
+  you're probably doing one of:" recipes (new tool, new
+  provider, new agent runner, new frontend, new MCP server);
+  test landscape; build / run targets; and explicit
+  cross-references to `docs/concepts.md` (user taxonomy) and
+  `REVIEW.md` (strategic direction). The TUI is used as the
+  worked example for "add a new frontend" since it concretely
+  demonstrates the `pkg/margo/core.Session` boundary in ~270
+  LoC. Lives at the repo root alongside `README.md`,
+  `CHANGELOG.md`, and `REVIEW.md` rather than under `docs/`
+  because contributors expect to find architecture docs in
+  the project root.
+
 - Provider tests for all three first-party providers (Anthropic,
   OpenAI, OpenRouter) — 15 tests across 699 LoC closing the largest
   hidden risk in the codebase. Each test boots an
