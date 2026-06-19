@@ -27,7 +27,7 @@ type Config struct {
 	// catalog. When non-nil and non-empty, NewSession starts every
 	// server eagerly and asynchronously — handshake/listTools runs in
 	// per-server goroutines so a slow or broken server does not delay
-	// Session construction. The frontend / TUI observes per-server
+	// Session construction. The front-end observes per-server
 	// status via Session.MCP().Servers().
 	MCPConfig mcp.Config
 
@@ -42,9 +42,9 @@ type Config struct {
 // configured provider clients, the workspace registry, the attachment
 // store, the permission broker, and the per-stream cancel registry.
 //
-// Streaming methods return <-chan Event. Each frontend consumes the
-// channel and translates events to its own transport (Wails event emit,
-// Bubble Tea Msg, SSE, …).
+// Streaming methods return <-chan Event. Each front-end consumes the
+// channel and translates events to its own transport (a desktop event
+// emit, a terminal-UI message, SSE, …).
 type Session struct {
 	anthropic  margo.Client
 	openai     margo.Client
@@ -106,17 +106,17 @@ func NewSession(cfg Config) *Session {
 }
 
 // Workspaces exposes the registry for IndexPath / Sources / SetActive
-// calls from the frontend.
+// calls from the front-end.
 func (s *Session) Workspaces() *WorkspaceRegistry { return s.workspaces }
 
 // Attachments exposes the attachment store.
 func (s *Session) Attachments() *AttachmentStore { return s.attachments }
 
-// Permissions exposes the permission broker so the frontend can call
-// Respond when the user clicks Allow/Deny on a prompt.
+// Permissions exposes the permission broker so the front-end can call
+// Respond when the user accepts or rejects a prompt.
 func (s *Session) Permissions() *PermissionBroker { return s.permissions }
 
-// MCP exposes the MCP manager so frontends can list servers, add/remove
+// MCP exposes the MCP manager so front-ends can list servers, add/remove
 // servers at runtime, and observe per-server status (including the
 // stderr ring buffer for failure diagnostics).
 func (s *Session) MCP() *mcp.Manager { return s.mcp }
@@ -173,10 +173,9 @@ func (s *Session) Models(provider string) []string {
 	return margo.DefaultCatalog.ModelIDs(provider)
 }
 
-// Catalog returns the full model catalog. Exposed so frontends can
-// retire their own hand-mirrored model lists (the original Wails app's
-// store.ts CONTEXT_WINDOWS / MULTIMODAL_MODELS, the TUI's future model
-// picker) and read the single source of truth instead.
+// Catalog returns the full model catalog. Exposed so front-ends can
+// retire their own hand-mirrored model lists (context-window sizes,
+// multimodal capability) and read this single source of truth instead.
 func (s *Session) Catalog() margo.Catalog {
 	return margo.DefaultCatalog
 }

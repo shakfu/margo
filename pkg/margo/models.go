@@ -14,12 +14,12 @@ import (
 //   - ContextTokens   input-token context window. Used by
 //                     agent/budget.go for history-rewrite decisions.
 //   - Multimodal      true if the model accepts image input. Gates the
-//                     frontend's paperclip affordance.
+//                     front-end's image-attachment affordance.
 //   - CostPerMTokIn   optional USD price per million input tokens.
 //                     Pointer so nil ≠ &0 — a free-tier model
 //                     (rate set to zero) is distinguishable from an
 //                     unknown-rate model (rate omitted entirely).
-//                     The frontend hides the cost meter for chats on
+//                     The front-end hides the cost meter for chats on
 //                     unknown-rate models rather than showing $0.00,
 //                     which would be misleading.
 //   - CostPerMTokOut  optional USD price per million output tokens.
@@ -45,9 +45,9 @@ var modelsJSON []byte
 // DefaultCatalog is the package-level parsed catalog, populated from the
 // embedded models.json at process start. It is the single source of
 // truth that both pkg/margo/core (provider/model surface) and
-// pkg/margo/agent (context-window budget) read from; the frontend reads
-// it via the Wails-bound ModelsCatalog() method so the prior hand-mirrored
-// CONTEXT_WINDOWS / MULTIMODAL_MODELS lists in store.ts can be retired.
+// pkg/margo/agent (context-window budget) read from; a front-end reads
+// it through core.Session.Catalog() so it need not hand-mirror its own
+// context-window / multimodal lists.
 var DefaultCatalog Catalog
 
 func init() {
@@ -90,7 +90,7 @@ func (c Catalog) ContextWindow(id string) int {
 }
 
 // IsMultimodal reports whether the named model accepts image input.
-// Unknown models return false (conservative default; the frontend uses
+// Unknown models return false (conservative default; the front-end uses
 // this to decide whether to expose attachment affordances).
 func (c Catalog) IsMultimodal(id string) bool {
 	for _, ms := range c {

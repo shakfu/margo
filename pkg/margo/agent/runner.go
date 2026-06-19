@@ -38,7 +38,7 @@ type Runner interface {
 }
 
 // RunnerType is the stable string identifier the slash-command parser
-// and the Wails surface will use to address runners ("react",
+// and the front-end use to address runners ("react",
 // "plan", "workflow"). Strings rather than an enum so the registry
 // can grow without recompiling callers.
 type RunnerType = string

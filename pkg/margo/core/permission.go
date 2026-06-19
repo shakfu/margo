@@ -16,14 +16,14 @@ type PermissionDecision struct {
 }
 
 // PermissionBroker brokers per-tool-call approval prompts between an
-// in-flight agent run and whichever frontend is hosting the user. The
+// in-flight agent run and whichever front-end is hosting the user. The
 // runner asks New() for an id + channel, the session emits a Permission
-// event carrying that id, and the frontend later calls Respond(id, …) to
+// event carrying that id, and the front-end later calls Respond(id, …) to
 // resolve the channel.
 //
-// Decoupling the broker from the transport lets a Wails frontend render
-// a modal, a TUI render an inline confirm, and an HTTP server pause an
-// SSE stream — all against the same channel-based primitive.
+// Decoupling the broker from the transport lets a desktop GUI render
+// a modal, a terminal UI render an inline confirm, and an HTTP server
+// pause an SSE stream — all against the same channel-based primitive.
 type PermissionBroker struct {
 	pending sync.Map // map[string]chan PermissionDecision
 	counter uint64

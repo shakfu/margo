@@ -20,7 +20,7 @@ import (
 // (`cloudwego/eino/adk`). It stands up an `adk.ChatModelAgent` against
 // the same margo.Adapter our older code used, runs it via
 // `adk.Runner`, and bridges the kit's AgentEvent stream into the
-// StepEvent contract the Wails surface and frontend consume.
+// StepEvent contract the front-end consumes.
 //
 // Registered under RunnerReact ("react"); the canonical
 // implementation as of §9.4b.3. A zero-value ReactRunner is ready to
@@ -137,8 +137,8 @@ func (ReactRunner) Run(
 
 // bridgeAgentEvent translates one ADK event into zero or more
 // StepEvent emissions. Synchronously drains MessageStream events so
-// the ordering downstream consumers (the Wails surface, the UI's
-// step-card merger) see is the same regardless of whether the model
+// the ordering downstream consumers (the front-end's step-card merger)
+// see is the same regardless of whether the model
 // streamed or returned in one shot.
 //
 // The translator is intentionally exhaustive over MessageVariant

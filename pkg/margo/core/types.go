@@ -1,19 +1,21 @@
 // Package core is margo's UI-agnostic library: it exposes a Session whose
-// streaming methods return Go channels of Event values, so any frontend
-// (Wails desktop, Bubble Tea TUI, plain CLI) can consume the same
-// orchestration code without depending on a specific transport.
+// streaming methods return Go channels of Event values, so any front-end
+// can consume the same orchestration code without depending on a specific
+// transport. The shipped binaries (a desktop GUI, a terminal UI, a CLI) are
+// interchangeable consumers; none of them is privileged by this package.
 //
 // The package owns:
 //   - provider clients + model catalog
-//   - request/response and event types (carry JSON tags so a Wails layer
-//     can pass them through unchanged, but core itself never serializes)
+//   - request/response and event types (carry JSON tags so a transport
+//     layer can pass them through unchanged, but core itself never serializes)
 //   - workspace + RAG indexer registry
-//   - attachment store (bytes in, bytes out — base64 is a frontend concern)
+//   - attachment store (bytes in, bytes out — transport encoding such as
+//     base64 is a front-end concern)
 //   - permission broker (channel-based, no UI assumptions)
 //   - tool registry
 //
-// What it does NOT do: OS dialogs, file pickers, `runtime.EventsEmit`,
-// `xdg-open`. Those belong to the frontend cmd binary.
+// What it does NOT do: OS dialogs, file pickers, event emission, opening
+// URLs/files. Those belong to the consumer binary.
 package core
 
 // Role identifies the speaker of a Message in a conversation history.
@@ -32,8 +34,8 @@ type Message struct {
 }
 
 // Attachment is a binary payload accompanying the most recent user-role
-// message (image, PDF, …). Data holds the raw bytes; a Wails or HTTP
-// frontend is responsible for any transport encoding (base64, multipart).
+// message (image, PDF, …). Data holds the raw bytes; the front-end is
+// responsible for any transport encoding (base64, multipart).
 type Attachment struct {
 	Name     string
 	MimeType string
@@ -110,7 +112,7 @@ type Event struct {
 	// ToolRetrieve structured hits.
 	Hits []RetrievalHit
 
-	// PermissionID is the broker id the frontend echoes back via
+	// PermissionID is the broker id the front-end echoes back via
 	// Session.RespondPermission. Set only on Permission events.
 	PermissionID string
 
@@ -123,7 +125,7 @@ type Event struct {
 }
 
 // RetrievalHit is a single hit returned by a RAG search tool, surfaced to
-// the frontend so it can render a citation card.
+// the front-end so it can render a citation card.
 type RetrievalHit struct {
 	Path    string  `json:"path"`
 	Doc     string  `json:"doc,omitempty"`

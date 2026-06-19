@@ -42,7 +42,7 @@ var builtinTools = func() map[string]toolCtor {
 // (sorted), then any MCP tools currently exposed by Ready servers
 // (in mcp:server:tool form, sorted within their namespace).
 //
-// The split-then-merge order makes the frontend's tool picker stable:
+// The split-then-merge order makes the front-end's tool picker stable:
 // rebuilding the list mid-session can only add MCP entries at the end;
 // builtins never reshuffle.
 func (s *Session) Tools() []string {

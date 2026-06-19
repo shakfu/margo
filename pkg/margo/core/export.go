@@ -7,8 +7,8 @@ import (
 
 // ChatExport is the payload passed to RenderChatMarkdown. It is a
 // transport-agnostic representation of a chat suitable for serialization
-// from any frontend — Wails serializes from its localStorage Chat shape,
-// the TUI will eventually serialize from its in-memory transcript.
+// from any front-end — a GUI may serialize from its persisted chat shape,
+// a terminal UI from its in-memory transcript.
 // Fields are deliberately denormalized (PersonaName / AgentName as
 // strings rather than ids) so the renderer needs no lookup tables.
 type ChatExport struct {

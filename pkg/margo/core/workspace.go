@@ -11,7 +11,7 @@ import (
 )
 
 // WorkspaceRegistry owns the per-workspace RAG indexers and tracks which
-// workspace the user currently has in focus. The frontend pushes the
+// workspace the user currently has in focus. The front-end pushes the
 // active id via SetActive whenever the user switches; the
 // search_knowledge tool reads it via ActiveIndexer at invoke time.
 type WorkspaceRegistry struct {

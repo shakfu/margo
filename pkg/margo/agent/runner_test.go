@@ -52,7 +52,7 @@ func TestLookupRunnerWorkflow(t *testing.T) {
 func TestLookupRunnerEmptyDefaultsToReact(t *testing.T) {
 	// Empty name resolves to the default runner per the slash grammar
 	// ("/agent <task>" with no type suffix means ReAct). Critical
-	// because the Wails surface will sometimes get an unset string
+	// because the front-end will sometimes get an unset string
 	// before the slash parser fills it in.
 	r, err := LookupRunner("")
 	if err != nil {

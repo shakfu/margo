@@ -59,7 +59,7 @@ func NewAdapter(c margo.Client, defaults margo.Request) *Adapter {
 // WithFinalUserAttachments returns a new Adapter that, on each request,
 // stamps the supplied parts onto the final user-role message before
 // shipping. Used by StreamReact to inject image attachments that came
-// in via the Wails surface; the parts are independent of WithTools.
+// in via the front-end; the parts are independent of WithTools.
 func (a *Adapter) WithFinalUserAttachments(parts []margo.Part) *Adapter {
 	out := &Adapter{
 		client:               a.client,

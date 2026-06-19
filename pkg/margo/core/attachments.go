@@ -11,9 +11,9 @@ import (
 )
 
 // AttachmentStore manages on-disk storage of chat attachments. Bytes in,
-// bytes out — base64 (or any other transport encoding) is a frontend
-// concern, kept out of the store so a TUI or HTTP server can use the
-// same code without an unnecessary encode/decode round-trip.
+// bytes out — base64 (or any other transport encoding) is a front-end
+// concern, kept out of the store so a terminal UI or HTTP server can use
+// the same code without an unnecessary encode/decode round-trip.
 type AttachmentStore struct {
 	root string // override; empty = derive from os.UserConfigDir
 }
@@ -117,7 +117,7 @@ func (s *AttachmentStore) DeleteChat(chatID string) error {
 }
 
 // validateChatID rejects ids that would let a caller write outside the
-// per-chat subtree. Chat ids in the frontend are crypto.randomUUID(); the
+// per-chat subtree. Chat ids are opaque, front-end-generated UUIDs; the
 // allow-list keeps that intent without trusting the caller.
 func validateChatID(id string) error {
 	if id == "" {
