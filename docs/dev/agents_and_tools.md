@@ -295,7 +295,7 @@ emit the text, and (depending on whether eino decides to surface that turn
 through the agent stream) the outer reader could emit it again. Today's
 ReAct loop does not surface final-turn-with-tool-calls text through the
 outer stream so the gate is correct in practice, but the assumption is
-load-bearing — flag this if you change the ReAct loop, the
+structural — flag this if you change the ReAct loop, the
 `StreamToolCallChecker`, or move to a different agent topology.
 
 A custom `StreamToolCallChecker` (`streamHasToolCall` in `stream.go`)
