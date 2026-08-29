@@ -1,19 +1,16 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { createDialog, createPopover, melt } from '@melt-ui/svelte';
+  import { createDialog, melt } from '@melt-ui/svelte';
   import { Providers, Models, Chat, StreamChat, StreamAgent, CancelStream, Tools, ToolsMetadata, OutputDir, OpenPath, RespondPermission, StartupWorkspaceDir, SetActiveWorkspace, SaveAttachment, LoadAttachment, ExportChatMarkdown } from '../wailsjs/go/main/App.js';
   import { EventsOn, EventsOff, BrowserOpenURL } from '../wailsjs/runtime/runtime.js';
   import { mathjax } from './lib/mathjax';
   import { renderMarkdownStreaming, setHighlightTheme } from './lib/markdown';
   import { subscribeStream } from './lib/stream';
+  import Composer from './lib/Composer.svelte';
+  import { revokePreviews, selectPriorAttachments, type PendingAttachment } from './lib/attachments';
+  import Topbar from './lib/Topbar.svelte';
+  import MessageList from './lib/MessageList.svelte';
 
-  // Cost breakdown popover. The header carries the total; the split by
-  // model sits behind a click because most chats use one model and have
-  // nothing to show.
-  const {
-    elements: { trigger: costTrigger, content: costContent },
-    states: { open: costOpen },
-  } = createPopover({ positioning: { placement: 'bottom' } });
   import {
     chats,
     activeChat,
@@ -39,8 +36,6 @@
     activeWorkspace,
     setActiveWorkspace,
     isMultimodal,
-    costBreakdown,
-    formatCost,
     modelToRestore,
     setEffectiveOverride,
     type Usage,
@@ -75,29 +70,7 @@
     states: { open: settingsDlgOpen },
   } = createDialog({ role: 'dialog' });
 
-  // Pending image attachments for the next message. Each entry carries
-  // already-base64-encoded bytes so the Wails IPC sees a clean string.
-  // Cleared after send. Not persisted in chat history (see §7.4).
-  type PendingAttachment = {
-    id: string;
-    name: string;
-    mimeType: string;
-    data: string;        // base64
-    previewUrl: string;  // blob URL for the thumbnail; revoked on remove
-    size: number;        // raw byte count for the size cap
-  };
   let attachments: PendingAttachment[] = [];
-  // Anthropic / OpenAI vision / OpenRouter VL models all accept JPEG/PNG/
-  // WebP/GIF; this is the conservative intersection. PDFs ride on the
-  // same path: Anthropic accepts them natively, OpenAI / OpenRouter get
-  // a Go-side text extraction (§7.5).
-  const IMAGE_MIME = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
-  const DOCUMENT_MIME = ['application/pdf'];
-  const ATTACHMENT_MIME_ACCEPT = [...IMAGE_MIME, ...DOCUMENT_MIME];
-  const ATTACHMENT_MAX_IMAGE_BYTES = 10 * 1024 * 1024;     // 10 MB per image
-  const ATTACHMENT_MAX_DOC_BYTES = 25 * 1024 * 1024;       // 25 MB per document
-  let dragOver = false;
-  let fileInputEl: HTMLInputElement | null = null;
   let error = '';
   let activeStreamId = '';
   let cancelling = false;
@@ -167,12 +140,6 @@
   // workspace override of the model picks the right context window.
   $: ctxWindow = contextWindowFor($effectiveSettings.model, $modelCatalog);
   $: ctxUsed = ($activeChat?.tokensIn ?? 0) + ($activeChat?.tokensOut ?? 0);
-  // Running USD cost for the active chat, priced per turn against the
-  // model that produced it. The header shows only the total; the
-  // per-model split lives behind it, since a single-model chat (the
-  // common case) has nothing to break down.
-  $: costs = costBreakdown($activeChat?.messages ?? [], $modelCatalog);
-  $: showCost = costs.entries.length > 0 || costs.unrecordedTurns > 0;
   // Gate: attachments are pending but the *effective* model isn't on
   // the multimodal allowlist. Disables send + surfaces an inline warning.
   // Only image attachments need a multimodal-capable model. PDFs and
@@ -181,39 +148,6 @@
   // regardless of vision support. (§7.5)
   $: hasImageAttachment = attachments.some(a => a.mimeType.startsWith('image/'));
   $: attachmentsBlocked = hasImageAttachment && !!$effectiveSettings.model && !isMultimodal($effectiveSettings.model, $modelCatalog);
-  $: ctxPct = ctxWindow > 0 ? Math.min(100, Math.round((ctxUsed / ctxWindow) * 100)) : 0;
-
-  // Slash autocomplete (TODO §9.2). Suggestions populate from the
-  // SLASH_COMMANDS catalog while the user is still typing the
-  // command word; once they've moved past it ("/persona r…"), we
-  // switch to argument-specific suggestions (persona slugs).
-  type SlashSuggestion = { text: string; description: string };
-  function computeSlashSuggestions(s: string, personas: { name: string }[]): SlashSuggestion[] {
-    if (!s.startsWith('/')) return [];
-    const sp = s.indexOf(' ');
-    if (sp === -1) {
-      // Still typing the command word — filter known commands by prefix.
-      const pre = s.toLowerCase();
-      return SLASH_COMMANDS
-        .filter(c => c.command.startsWith(pre))
-        .map(c => ({ text: c.command + ' ', description: c.description }));
-    }
-    const cmd = s.slice(0, sp).toLowerCase();
-    const argPrefix = s.slice(sp + 1).toLowerCase();
-    if (cmd === '/persona') {
-      return personas
-        .map(p => ({ slug: slugify(p.name), name: p.name }))
-        .filter(p => p.slug.startsWith(argPrefix))
-        .map(p => ({ text: `/persona ${p.slug}`, description: p.name }));
-    }
-    return [];
-  }
-  $: slashSuggestions = computeSlashSuggestions(input, $settings.personas);
-  $: showSlashHint = input.startsWith('/') && slashSuggestions.length > 0;
-
-  function applySuggestion(text: string) {
-    input = text;
-  }
 
   onMount(async () => {
     document.documentElement.classList.toggle('dark', $settings.theme === 'dark');
@@ -313,118 +247,29 @@
 
   // ---- attachments ----
 
-  async function addFiles(files: FileList | File[] | null) {
-    if (!files) return;
-    for (const file of Array.from(files)) {
-      if (!ATTACHMENT_MIME_ACCEPT.includes(file.type)) {
-        error = `Unsupported attachment type: ${file.type || file.name}. Allowed: PNG, JPEG, WebP, GIF, PDF.`;
-        continue;
-      }
-      const cap = DOCUMENT_MIME.includes(file.type) ? ATTACHMENT_MAX_DOC_BYTES : ATTACHMENT_MAX_IMAGE_BYTES;
-      const capLabel = DOCUMENT_MIME.includes(file.type) ? '25 MB' : '10 MB';
-      if (file.size > cap) {
-        error = `Attachment "${file.name}" exceeds ${capLabel}.`;
-        continue;
-      }
-      try {
-        const data = await fileToBase64(file);
-        attachments = [
-          ...attachments,
-          {
-            id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            name: file.name,
-            mimeType: file.type,
-            data,
-            previewUrl: URL.createObjectURL(file),
-            size: file.size,
-          },
-        ];
-      } catch (e) {
-        error = `Failed to read "${file.name}": ${String(e)}`;
-      }
-    }
-  }
-
-  // loadPriorAttachments rehydrates every stored attachment on earlier
-  // turns, newest first, stopping once the batch would get unreasonably
-  // large. The cap exists because a long chat can accumulate more bytes
-  // than any context window holds; the budget rewriter on the Go side
-  // then trims turns, but there is no reason to ship the bytes across
-  // the IPC boundary just to have them dropped.
-  const MAX_REFED_ATTACHMENTS = 8;
-  const MAX_REFED_BYTES = 24 * 1024 * 1024;
-
+  // loadPriorAttachments reads back the attachments an earlier turn
+  // carried, so a follow-up question still has the document in front of
+  // it. Which ones to re-send is decided by selectPriorAttachments;
+  // this only performs the reads, skipping any blob that has gone (the
+  // user cleared storage, or moved the profile).
   async function loadPriorAttachments(
     priorMessages: Message[],
   ): Promise<{ name: string; mimeType: string; data: string }[]> {
-    const stored: StoredAttachment[] = [];
-    for (let i = priorMessages.length - 1; i >= 0; i--) {
-      for (const a of priorMessages[i].attachments ?? []) {
-        stored.push(a);
-      }
-    }
     const out: { name: string; mimeType: string; data: string }[] = [];
-    let bytes = 0;
-    for (const a of stored.slice(0, MAX_REFED_ATTACHMENTS)) {
-      if (bytes + a.size > MAX_REFED_BYTES) break;
+    for (const a of selectPriorAttachments(priorMessages)) {
       try {
-        const data = await LoadAttachment(a.path);
-        out.push({ name: a.name, mimeType: a.mimeType, data });
-        bytes += a.size;
+        out.push({ name: a.name, mimeType: a.mimeType, data: await LoadAttachment(a.path) });
       } catch (_) {
-        // Blob gone (user cleared storage, moved the profile). Skip it.
+        // Blob gone; the turn proceeds without it.
       }
     }
-    // Restore chronological order: oldest first, matching how the user
-    // added them.
-    return out.reverse();
+    return out;
   }
 
-  function fileToBase64(file: File): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const result = reader.result as string;
-        // result is a "data:<mime>;base64,<payload>" URL — strip the prefix.
-        const i = result.indexOf(',');
-        resolve(i >= 0 ? result.slice(i + 1) : result);
-      };
-      reader.onerror = () => reject(reader.error);
-      reader.readAsDataURL(file);
-    });
-  }
-
-  function removeAttachment(id: string) {
-    const found = attachments.find(a => a.id === id);
-    if (found) URL.revokeObjectURL(found.previewUrl);
-    attachments = attachments.filter(a => a.id !== id);
-  }
-
+  // clearAttachments drops the pending strip and releases its blob URLs.
   function clearAttachments() {
-    for (const a of attachments) URL.revokeObjectURL(a.previewUrl);
+    revokePreviews(attachments);
     attachments = [];
-  }
-
-  function onPaperclip() {
-    fileInputEl?.click();
-  }
-
-  function onFileInputChange(ev: Event) {
-    const target = ev.currentTarget as HTMLInputElement;
-    addFiles(target.files);
-    target.value = ''; // reset so the same file can be picked again later
-  }
-
-  function onComposerDragOver(ev: DragEvent) {
-    if (!ev.dataTransfer || ev.dataTransfer.types.indexOf('Files') < 0) return;
-    ev.preventDefault();
-    dragOver = true;
-  }
-  function onComposerDragLeave() { dragOver = false; }
-  function onComposerDrop(ev: DragEvent) {
-    ev.preventDefault();
-    dragOver = false;
-    if (ev.dataTransfer?.files) addFiles(ev.dataTransfer.files);
   }
 
   function newStreamId(): string {
@@ -670,13 +515,6 @@
     ? findPersona($settings.personas, $activeChat.personaId)
     : undefined;
 
-  function roleLabel(role: string): string {
-    if (role === 'assistant' && activePersona) {
-      return activePersona.name.toUpperCase();
-    }
-    return role.toUpperCase();
-  }
-
   async function respondPermission(
     permissionId: string,
     toolName: string,
@@ -768,23 +606,8 @@
     location.reload();
   }
 
-  function onKey(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
-  }
 
-  function toggleLeft()  { settings.update(s => ({ ...s, showLeft:  !s.showLeft  })); }
-  function toggleRight() { settings.update(s => ({ ...s, showRight: !s.showRight })); }
 
-  function fmtTokSec(u: Usage): string {
-    if (!u.totalMs) return '';
-    const elapsed = (u.totalMs - u.firstTokenMs) / 1000;
-    if (elapsed <= 0) return '';
-    return `${(u.outputTokens / elapsed).toFixed(1)} tok/s`;
-  }
-  function fmtMs(ms: number): string {
-    if (ms < 1000) return `${ms}ms`;
-    return `${(ms / 1000).toFixed(2)}s`;
-  }
 </script>
 
 <div class="grid h-screen bg-bg text-fg {gridCols}">
@@ -795,199 +618,16 @@
   </aside>
 
   <main class="flex flex-col min-w-0 h-screen">
-    <header class="flex items-center gap-2 px-3.5 py-2 border-b border-border bg-bg">
-      <button
-        class="topbar-btn"
-        on:click={toggleLeft}
-        title={$settings.showLeft ? 'Hide chats' : 'Show chats'}
-      >{$settings.showLeft ? '⟨' : '⟩'}</button>
-      <div class="flex-1 text-center text-[0.9rem] font-medium text-fg-muted overflow-hidden text-ellipsis whitespace-nowrap">
-        {$activeChat?.title ?? ''}
-      </div>
-      <div class="flex items-center gap-2">
-        <span class="badge">{$effectiveSettings.provider || 'no provider'}</span>
-        {#if $effectiveSettings.model}<span class="badge">{$effectiveSettings.model}</span>{/if}
-        {#if showCost}
-          <button
-            class="badge cursor-pointer hover:bg-hover-bg"
-            use:melt={$costTrigger}
-            title="Approximate USD cost for this chat, priced per turn against the model that produced it. Excludes prompt-cache discounts and assumes the uncached rate, so it overestimates rather than underestimates. Click for the per-model split."
-          >
-            {formatCost(costs.total)}{costs.partial ? '+' : ''}
-            {#if costs.multiProvider}
-              <span class="text-fg-faint ml-1">{costs.entries.length} models, {new Set(costs.entries.map(e => e.provider)).size} providers</span>
-            {:else if costs.multiModel}
-              <span class="text-fg-faint ml-1">{costs.entries.length} models</span>
-            {/if}
-          </button>
-          {#if $costOpen}
-            <div use:melt={$costContent} class="z-50 rounded border border-border bg-bg-elev shadow-lg p-2 min-w-[19rem] text-[0.78rem]">
-              <div class="font-semibold mb-1.5">Cost by model</div>
-              {#if costs.entries.length === 0}
-                <div class="text-fg-muted">No priced turns yet.</div>
-              {/if}
-              {#each costs.entries as e (e.provider + e.model)}
-                <div class="flex items-baseline gap-2 py-0.5">
-                  <span class="flex-1 font-[family-name:var(--font-mono)] break-all">
-                    {e.model}
-                    {#if costs.multiProvider && e.provider}
-                      <span class="text-fg-faint">({e.provider})</span>
-                    {/if}
-                  </span>
-                  <span class="text-fg-faint whitespace-nowrap">
-                    {e.tokensIn.toLocaleString()} in / {e.tokensOut.toLocaleString()} out
-                  </span>
-                  <span class="w-16 text-right whitespace-nowrap">
-                    {#if e.priced}{formatCost(e.cost)}{:else}<span class="text-fg-faint" title="No rates declared for this model in the catalog">no rate</span>{/if}
-                  </span>
-                </div>
-              {/each}
-              {#if costs.unrecordedTurns > 0}
-                <div class="text-fg-faint mt-1.5 pt-1.5 border-t border-border">
-                  {costs.unrecordedTurns} earlier turn{costs.unrecordedTurns === 1 ? '' : 's'} predate per-model tracking and cannot be priced.
-                </div>
-              {/if}
-              {#if costs.partial}
-                <div class="text-fg-faint mt-1">Total is a floor: some turns have no rate.</div>
-              {/if}
-            </div>
-          {/if}
-        {/if}
-        {#if $effectiveSettings.thinkEnabled}<span class="badge badge-active">thinking</span>{/if}
-        <button
-          class="topbar-btn"
-          on:click={exportActiveChat}
-          disabled={!$activeChat || ($activeChat.messages?.length ?? 0) === 0}
-          title="Export chat as markdown"
-        >↓ md</button>
-        <button
-          class="topbar-btn"
-          on:click={toggleRight}
-          title={$settings.showRight ? 'Hide settings' : 'Show settings'}
-        >{$settings.showRight ? '⟩' : '⟨'}</button>
-      </div>
-    </header>
+    <Topbar on:export={exportActiveChat} />
 
-    <section class="flex-1 overflow-y-auto px-5 py-4 flex flex-col gap-4 max-w-[820px] w-full mx-auto box-border" bind:this={messagesEl}>
-      {#each messages as m, i (i)}
-        <div class="flex flex-col gap-1">
-          <div class="text-[0.68rem] uppercase text-fg-faint tracking-wider">{roleLabel(m.role)}</div>
-          <div
-            class="leading-[1.55] px-4 py-3 rounded-lg text-[0.95rem] {m.role === 'user' ? 'bg-bubble-user' : 'bg-bubble-assistant'}"
-          >
-            {#if m.role === 'assistant' && m.thinking}
-              <details class="thinking-block" open={busy && i === messages.length - 1}>
-                <summary>thinking ({m.thinking.length} chars)</summary>
-                <div class="thinking-body">{m.thinking}</div>
-              </details>
-            {/if}
-            {#if m.role === 'assistant' && m.steps && m.steps.length > 0}
-              <div class="flex flex-col gap-1.5 mb-2">
-                {#each m.steps as step}
-                  <div class="border border-border rounded-md bg-input-bg overflow-hidden text-[0.78rem] font-[family-name:var(--font-mono)]">
-                    <div class="flex items-center gap-2 px-2.5 py-1 border-b border-border bg-bg-elev">
-                      <span class="text-fg-muted">{step.kind === 'permission' ? '?' : '→'}</span>
-                      <span class="font-semibold text-fg">{step.name}</span>
-                      <span class="text-fg-faint truncate flex-1">{step.arguments || '{}'}</span>
-                    </div>
-                    {#if step.kind === 'permission'}
-                      {#if step.permissionStatus === 'pending' && step.permissionId}
-                        <div class="px-2.5 py-1.5 flex items-center gap-2 flex-wrap">
-                          <span class="text-fg-muted">Allow this tool to run?</span>
-                          <button
-                            class="px-2 py-0.5 text-[0.75rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg"
-                            on:click={() => respondPermission(step.permissionId ?? '', step.name, 'approve')}
-                          >Approve</button>
-                          {#if canAlwaysApprove(step.name)}
-                            <button
-                              class="px-2 py-0.5 text-[0.75rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg"
-                              on:click={() => respondPermission(step.permissionId ?? '', step.name, 'always')}
-                              title="Auto-approve this tool in future runs"
-                            >Always</button>
-                          {:else}
-                            <span class="text-fg-faint text-[0.72rem]" title="This tool writes files or runs code, so each call is approved on its own.">approved per call</span>
-                          {/if}
-                          <button
-                            class="px-2 py-0.5 text-[0.75rem] rounded border border-error-border bg-error-bg text-error-fg cursor-pointer hover:opacity-90"
-                            on:click={() => respondPermission(step.permissionId ?? '', step.name, 'deny')}
-                          >Deny</button>
-                        </div>
-                      {:else if step.permissionStatus === 'approved'}
-                        <div class="px-2.5 py-1.5 text-fg-muted"><span class="text-fg-faint mr-1">✓</span>approved</div>
-                      {:else if step.permissionStatus === 'denied'}
-                        <div class="px-2.5 py-1.5 text-error-fg"><span class="text-fg-faint mr-1">✗</span>denied</div>
-                      {/if}
-                    {:else if step.hits && step.hits.length > 0}
-                      <ul class="flex flex-col gap-1 px-2.5 py-1.5">
-                        {#each step.hits as h, hi (hi)}
-                          <li class="border border-border rounded bg-bg px-2 py-1.5">
-                            <div class="flex items-baseline gap-2 text-[0.72rem]">
-                              <span class="text-fg-faint">{hi + 1}.</span>
-                              <a
-                                href={`file://${h.path}`}
-                                class="font-[family-name:var(--font-mono)] text-fg break-all hover:underline"
-                                title="Open source"
-                              >{h.doc || h.path}</a>
-                              <span class="text-fg-faint ml-auto shrink-0">score {h.score.toFixed(3)}</span>
-                            </div>
-                            {#if h.snippet}
-                              <div class="text-[0.72rem] text-fg-muted mt-0.5 leading-snug whitespace-pre-wrap break-words">{h.snippet}</div>
-                            {/if}
-                          </li>
-                        {/each}
-                      </ul>
-                    {:else if step.result !== undefined}
-                      <div class="px-2.5 py-1.5 {step.isError ? 'text-error-fg' : 'text-fg-muted'} whitespace-pre-wrap break-words">
-                        <span class="text-fg-faint mr-1">←</span>{step.result}
-                      </div>
-                    {:else if step.stream !== undefined}
-                      <div class="px-2.5 py-1.5 text-fg-muted whitespace-pre-wrap break-words font-[family-name:var(--font-mono)]">
-                        <span class="text-fg-faint mr-1">…</span>{step.stream}{#if busy && i === messages.length - 1}<span class="cursor opacity-60">_</span>{/if}
-                      </div>
-                    {:else if busy && i === messages.length - 1}
-                      <div class="px-2.5 py-1.5 text-fg-faint italic">running…</div>
-                    {/if}
-                  </div>
-                {/each}
-              </div>
-            {/if}
-            {#if m.role === 'user'}
-              <div class="md whitespace-pre-wrap">{m.content}</div>
-              {#if m.attachments && m.attachments.length > 0}
-                <div class="flex flex-wrap gap-2 mt-2">
-                  {#each m.attachments as a (a.path)}
-                    <AttachmentThumb {a} />
-                  {/each}
-                </div>
-              {:else if m.attachmentCount}
-                <div class="text-fg-faint text-[0.72rem] mt-1">
-                  📎 {m.attachmentCount} {m.attachmentCount === 1 ? 'attachment' : 'attachments'}
-                </div>
-              {/if}
-            {:else}
-              <div class="md" use:mathjax={m.content}>{@html renderMarkdownStreaming(m.content, busy && i === messages.length - 1)}</div>
-            {/if}
-            {#if busy && i === messages.length - 1 && m.role === 'assistant'}<span class="cursor opacity-60">_</span>{/if}
-          </div>
-          {#if m.role === 'assistant' && m.usage}
-            <div class="msg-footer">
-              {#if fmtTokSec(m.usage)}<span>{fmtTokSec(m.usage)}</span>{/if}
-              <span>{m.usage.outputTokens} tokens</span>
-              {#if m.usage.firstTokenMs > 0}<span>ttft {fmtMs(m.usage.firstTokenMs)}</span>{/if}
-              {#if m.usage.totalMs > 0}<span>total {fmtMs(m.usage.totalMs)}</span>{/if}
-            </div>
-          {/if}
-        </div>
-      {/each}
-      {#if messages.length === 0}
-        <div class="m-auto text-center text-fg-faint p-8">
-          <div class="text-base text-fg-muted mb-2">Start a conversation</div>
-          <div class="text-[0.85rem] max-w-[480px] leading-[1.5]">
-            Markdown, code blocks (with syntax highlighting), and math like $\int_0^1 x^2\,dx$ or $$e^{'{i\\pi}'} + 1 = 0$$ all render after the response completes.
-          </div>
-        </div>
-      {/if}
-    </section>
+    <MessageList
+      {messages}
+      {busy}
+      {canAlwaysApprove}
+      personaLabel={activePersona?.name ?? ''}
+      bind:scrollEl={messagesEl}
+      on:permission={(e) => respondPermission(e.detail.id, e.detail.name, e.detail.decision)}
+    />
 
     {#if error}
       <div class="bg-error-bg text-error-fg border border-error-border px-3 py-2 rounded mx-5 mb-2 text-[0.85rem] flex items-start gap-2">
@@ -1000,109 +640,19 @@
       </div>
     {/if}
 
-    <footer
-      class="flex flex-col gap-2 px-5 pt-3.5 pb-4 border-t border-border max-w-[820px] w-full mx-auto box-border {dragOver ? 'bg-bubble-user/40' : ''}"
-      on:dragover={onComposerDragOver}
-      on:dragleave={onComposerDragLeave}
-      on:drop={onComposerDrop}
-    >
-      {#if attachments.length > 0}
-        <div class="flex flex-wrap gap-2">
-          {#each attachments as a (a.id)}
-            {#if a.mimeType.startsWith('image/')}
-              <div class="relative group" title="{a.name} ({Math.round(a.size / 1024)} KB)">
-                <img src={a.previewUrl} alt={a.name} class="h-14 w-14 object-cover rounded border border-border" />
-                <button
-                  class="absolute -top-1 -right-1 bg-bg-elev border border-border rounded-full w-4 h-4 flex items-center justify-center text-[0.7rem] leading-none cursor-pointer hover:bg-hover-bg"
-                  on:click={() => removeAttachment(a.id)}
-                  aria-label="remove attachment"
-                >×</button>
-              </div>
-            {:else}
-              <div class="relative group flex items-center gap-2 px-2 py-1.5 border border-border bg-input-bg rounded text-[0.74rem] text-fg-muted" title="{a.name} ({Math.round(a.size / 1024)} KB)">
-                <span class="font-[family-name:var(--font-mono)]">📄</span>
-                <span class="truncate max-w-[140px]">{a.name}</span>
-                <button
-                  class="absolute -top-1 -right-1 bg-bg-elev border border-border rounded-full w-4 h-4 flex items-center justify-center text-[0.7rem] leading-none cursor-pointer hover:bg-hover-bg"
-                  on:click={() => removeAttachment(a.id)}
-                  aria-label="remove attachment"
-                >×</button>
-              </div>
-            {/if}
-          {/each}
-        </div>
-      {/if}
-      {#if dragOver}
-        <div class="text-[0.74rem] text-fg-muted italic">Drop image to attach…</div>
-      {/if}
-      {#if attachmentsBlocked}
-        <div class="text-[0.74rem] text-error-fg">
-          <strong>{$effectiveSettings.model}</strong> doesn't accept images. Switch to a vision-capable model (e.g. claude-sonnet-4-6, gpt-5.4) or remove the attachments to send.
-        </div>
-      {/if}
-      <input
-        type="file"
-        accept={ATTACHMENT_MIME_ACCEPT.join(',')}
-        multiple
-        bind:this={fileInputEl}
-        on:change={onFileInputChange}
-        class="hidden"
-      />
-      {#if showSlashHint}
-        <div class="border border-border rounded-md bg-bg-elev p-1 flex flex-col gap-0.5 text-[0.78rem]">
-          {#each slashSuggestions as s (s.text)}
-            <button
-              type="button"
-              class="text-left px-2 py-1 rounded hover:bg-hover-bg flex items-center gap-2 bg-bubble-user"
-              on:click={() => applySuggestion(s.text)}
-              on:mousedown|preventDefault
-            >
-              <code class="font-[family-name:var(--font-mono)] text-fg">{s.text.trim()}</code>
-              <span class="text-fg-muted truncate">{s.description}</span>
-            </button>
-          {/each}
-        </div>
-      {/if}
-      <div class="flex items-end gap-2">
-      <button
-        class="topbar-btn h-9 w-9 flex items-center justify-center"
-        on:click={onPaperclip}
-        title="Attach image"
-        disabled={busy || !$effectiveSettings.provider}
-        aria-label="attach image"
-      >📎</button>
-      <textarea
-        class="flex-1 bg-input-bg text-fg border border-border rounded-md px-3 py-2.5 font-[inherit] text-[0.9rem] resize-none outline-none focus:border-border-strong disabled:opacity-50 disabled:cursor-not-allowed"
-        placeholder={$effectiveSettings.provider ? "Send a message, or type / for commands…" : "Configure a provider in the settings panel..."}
-        bind:value={input}
-        on:keydown={onKey}
-        disabled={busy || !$effectiveSettings.provider}
-        rows="2"
-      ></textarea>
-      <div class="flex flex-col items-center gap-1">
-        <div
-          class="ctx-ring"
-          title="{ctxUsed.toLocaleString()} / {ctxWindow.toLocaleString()} tokens"
-          style="--pct: {ctxPct}"
-        >
-          <span>{ctxPct}%</span>
-        </div>
-        {#if busy && activeStreamId}
-          <button
-            class="composer-btn cancel-btn"
-            on:click={cancel}
-            disabled={cancelling}
-          >{cancelling ? 'cancelling…' : 'cancel'}</button>
-        {:else}
-          <button
-            class="composer-btn send-btn"
-            on:click={send}
-            disabled={busy || !$effectiveSettings.provider || attachmentsBlocked || (!input.trim() && attachments.length === 0)}
-          >{busy ? '...' : 'send'}</button>
-        {/if}
-      </div>
-      </div>
-    </footer>
+    <Composer
+      bind:input
+      bind:attachments
+      {busy}
+      streaming={!!activeStreamId}
+      {cancelling}
+      {attachmentsBlocked}
+      {ctxUsed}
+      {ctxWindow}
+      on:send={send}
+      on:cancel={cancel}
+      on:error={(e) => (error = e.detail)}
+    />
   </main>
 
   <aside class="overflow-hidden min-w-0" aria-hidden={!$settings.showRight}>
@@ -1139,172 +689,3 @@
     </div>
   {/if}
 </div>
-
-<style>
-  .topbar-btn {
-    background: transparent;
-    color: var(--fg-muted);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 0.2rem 0.5rem;
-    font-size: 0.85rem;
-    line-height: 1;
-    cursor: pointer;
-    font-family: inherit;
-  }
-  .topbar-btn:hover { background: var(--hover-bg); color: var(--fg); }
-
-  .badge {
-    font-size: 0.7rem;
-    color: var(--fg-faint);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    background: var(--input-bg);
-    padding: 0.2rem 0.5rem;
-    border-radius: 3px;
-    border: 1px solid var(--border);
-  }
-  .badge-active {
-    color: var(--fg);
-    background: var(--accent);
-    border-color: transparent;
-  }
-
-  .composer-btn {
-    padding: 0 1.1rem;
-    min-width: 80px;
-    height: 2rem;
-    border-radius: 6px;
-    border: 1px solid var(--border);
-    background: var(--input-bg);
-    color: var(--fg);
-    font-family: inherit;
-    font-size: 0.85rem;
-    cursor: pointer;
-  }
-  .send-btn:hover:not(:disabled) { background: var(--hover-bg); }
-  .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-  .cancel-btn {
-    background: var(--error-bg);
-    color: var(--error-fg);
-    border-color: var(--error-border);
-  }
-  .cancel-btn:hover { filter: brightness(1.05); }
-
-  .ctx-ring {
-    width: 2rem;
-    height: 2rem;
-    border-radius: 50%;
-    background:
-      conic-gradient(var(--fg-muted) calc(var(--pct) * 1%), var(--input-bg) 0);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 0.6rem;
-    color: var(--fg-muted);
-    font-variant-numeric: tabular-nums;
-    position: relative;
-  }
-  .ctx-ring::before {
-    content: '';
-    position: absolute;
-    inset: 3px;
-    background: var(--bg);
-    border-radius: 50%;
-  }
-  .ctx-ring span { position: relative; z-index: 1; }
-
-  .msg-footer {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.6rem;
-    font-size: 0.7rem;
-    color: var(--fg-faint);
-    padding-top: 0.25rem;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .thinking-block {
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    margin-bottom: 0.5rem;
-    background: var(--input-bg);
-  }
-  .thinking-block summary {
-    cursor: pointer;
-    padding: 0.4rem 0.6rem;
-    font-size: 0.75rem;
-    color: var(--fg-muted);
-    user-select: none;
-    list-style: none;
-  }
-  .thinking-block summary::-webkit-details-marker { display: none; }
-  .thinking-block summary::before {
-    content: '▸ ';
-    display: inline-block;
-    transition: transform 100ms;
-  }
-  .thinking-block[open] summary::before {
-    content: '▾ ';
-  }
-  .thinking-body {
-    padding: 0 0.6rem 0.5rem;
-    font-size: 0.82rem;
-    color: var(--fg-muted);
-    white-space: pre-wrap;
-    line-height: 1.45;
-    border-top: 1px solid var(--border);
-    padding-top: 0.5rem;
-  }
-
-  .cursor { animation: blink 1s steps(2) infinite; }
-  @keyframes blink { 50% { opacity: 0; } }
-
-  .md { font-family: var(--font-serif); }
-  .md :global(p) { margin: 0.4em 0; }
-  .md :global(p:first-child) { margin-top: 0; }
-  .md :global(p:last-child) { margin-bottom: 0; }
-  .md :global(h1), .md :global(h2), .md :global(h3),
-  .md :global(h4), .md :global(h5), .md :global(h6) {
-    margin: 0.8em 0 0.4em;
-    line-height: 1.25;
-  }
-  .md :global(h1) { font-size: 1.35em; }
-  .md :global(h2) { font-size: 1.2em; }
-  .md :global(h3) { font-size: 1.08em; }
-  .md :global(ul), .md :global(ol) { margin: 0.4em 0; padding-left: 1.5em; }
-  .md :global(li) { margin: 0.15em 0; }
-  .md :global(blockquote) {
-    border-left: 3px solid var(--border-strong);
-    margin: 0.5em 0;
-    padding: 0.2em 0.8em;
-    color: var(--fg-muted);
-  }
-  .md :global(a) { color: #3578d1; text-decoration: underline; }
-  .md :global(hr) { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
-  .md :global(table) { border-collapse: collapse; margin: 0.5em 0; }
-  .md :global(th), .md :global(td) { border: 1px solid var(--border); padding: 0.3em 0.6em; }
-  .md :global(th) { background: var(--input-bg); }
-  .md :global(code) {
-    font-family: var(--font-mono);
-    font-size: 0.88em;
-    background: var(--input-bg);
-    padding: 0.1em 0.35em;
-    border-radius: 3px;
-  }
-  .md :global(pre) {
-    background: var(--input-bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 0.7em 0.9em;
-    overflow-x: auto;
-    margin: 0.5em 0;
-  }
-  .md :global(pre code) {
-    background: transparent;
-    padding: 0;
-    border-radius: 0;
-    font-size: 0.85em;
-    line-height: 1.45;
-  }
-</style>

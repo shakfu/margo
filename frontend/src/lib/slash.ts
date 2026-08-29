@@ -76,6 +76,9 @@ export function slugify(s: string): string {
  * (not in a Svelte component) so the parser and the UI stay in lock-
  * step — adding a command means updating one list.
  */
+// SlashSuggestion is one row in the composer's autocomplete list.
+export type SlashSuggestion = { text: string; description: string };
+
 export const SLASH_COMMANDS: Array<{ command: string; description: string }> = [
   { command: '/agent', description: 'Run the next message through ReAct.' },
   { command: '/agent-plan', description: 'Run through plan-then-execute (planner → executor → replanner).' },

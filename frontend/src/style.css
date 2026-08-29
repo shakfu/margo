@@ -274,3 +274,18 @@ body {
     border-bottom-color: var(--fg);
     font-weight: 600;
 }
+
+/* Topbar / composer icon button. Global because both components
+   use it; keeping it scoped would mean two copies. */
+.topbar-btn {
+  background: transparent;
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.85rem;
+  line-height: 1;
+  cursor: pointer;
+  font-family: inherit;
+}
+.topbar-btn:hover { background: var(--hover-bg); color: var(--fg); }

@@ -46,8 +46,12 @@ margo/
 │   ├── src/
 │   │   ├── App.svelte           # layout shell
 │   │   └── lib/
+│   │       ├── Topbar.svelte    # title, badges, cost meter
+│   │       ├── Composer.svelte  # input, attachments, slash hints
+│   │       ├── MessageList.svelte # transcript + agent step cards
 │   │       ├── store/           # chats + settings (localStorage)
 │   │       ├── stream.ts        # stream-event routing
+│   │       ├── attachments.ts   # attachment rules + caps
 │   │       ├── slash.ts         # slash-command parser
 │   │       ├── markdown.ts      # marked + hljs + DOMPurify; math-aware
 │   │       ├── mathjax.ts       # debounced typeset action

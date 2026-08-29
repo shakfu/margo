@@ -54,6 +54,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The three ADK runners shared a 40-line prologue and epilogue. `prepareRun` and `runADKAgent` in `adk_common.go` hold them; each runner is now only its agent assembly.
 
+- `App.svelte` split from 1,310 lines to 691. `Topbar.svelte` (title, badges, cost popover, sidebar toggles), `Composer.svelte` (attachment strip, drag-and-drop, slash hints, textarea, context gauge), and `MessageList.svelte` (transcript, step cards, permission prompts, usage footers) each own their own markup, handlers and scoped CSS; `.topbar-btn` moved to global `style.css` because two of them use it. Attachment rules moved to `lib/attachments.ts` — what may be attached, size caps, and which prior-turn attachments to re-send — where they are unit-testable, and `SlashSuggestion` moved beside the rest of the slash grammar.
+
 - `frontend/src/lib/store.ts` (1,368 lines) split into `lib/store/` — types, builtins, catalog, cost, persistence, stores, chats, personas, workspaces — behind an index that is the module boundary. `./stores` is the only module with import-time side effects, so initialisation order stays deterministic regardless of import order. No exported name changed.
 
 - The stream-event switch moved out of `App.svelte`'s `send()` into `lib/stream.ts` as a pure function over injected store actions. It maps eight event kinds onto seven store mutations; a mismatch produced a silently wrong transcript and was previously untestable.
