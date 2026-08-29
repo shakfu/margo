@@ -1,34 +1,328 @@
 {
   "anthropic": [
-    { "id": "claude-haiku-4-5",  "contextTokens": 200000,   "multimodal": true, "costPerMTokIn":  0.80, "costPerMTokOut":  4.00, "pricedAt": "2026-05-19" },
-    { "id": "claude-sonnet-4-6", "contextTokens": 200000,   "multimodal": true, "costPerMTokIn":  3.00, "costPerMTokOut": 15.00, "pricedAt": "2026-05-19" },
-    { "id": "claude-opus-4-7",   "contextTokens": 1000000,  "multimodal": true, "costPerMTokIn": 15.00, "costPerMTokOut": 75.00, "pricedAt": "2026-05-19" }
+    {
+      "id": "claude-haiku-4-5",
+      "contextTokens": 200000,
+      "multimodal": true,
+      "costPerMTokIn": 0.8,
+      "costPerMTokOut": 4.0,
+      "pricedAt": "2026-05-19"
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "contextTokens": 200000,
+      "multimodal": true,
+      "costPerMTokIn": 3.0,
+      "costPerMTokOut": 15.0,
+      "pricedAt": "2026-05-19"
+    },
+    {
+      "id": "claude-opus-4-7",
+      "contextTokens": 1000000,
+      "multimodal": true,
+      "costPerMTokIn": 15.0,
+      "costPerMTokOut": 75.0,
+      "pricedAt": "2026-05-19"
+    }
   ],
   "openai": [
-    { "id": "gpt-5.4-nano", "contextTokens": 400000, "multimodal": true },
-    { "id": "gpt-5.4-mini", "contextTokens": 400000, "multimodal": true },
-    { "id": "gpt-5.4",      "contextTokens": 400000, "multimodal": true },
-    { "id": "gpt-5.4-pro",  "contextTokens": 400000, "multimodal": true },
-    { "id": "gpt-5.5",      "contextTokens": 400000, "multimodal": true },
-    { "id": "gpt-5.5-pro",  "contextTokens": 400000, "multimodal": true }
+    {
+      "id": "gpt-5.4-nano",
+      "contextTokens": 400000,
+      "multimodal": true,
+      "costPerMTokIn": 0.2,
+      "costPerMTokOut": 1.25,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "contextTokens": 400000,
+      "multimodal": true,
+      "costPerMTokIn": 0.75,
+      "costPerMTokOut": 4.5,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-5.4",
+      "contextTokens": 400000,
+      "multimodal": true,
+      "costPerMTokIn": 2.5,
+      "costPerMTokOut": 15.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-5.4-pro",
+      "contextTokens": 400000,
+      "multimodal": true,
+      "costPerMTokIn": 30.0,
+      "costPerMTokOut": 180.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-5.5",
+      "contextTokens": 400000,
+      "multimodal": true,
+      "costPerMTokIn": 5.0,
+      "costPerMTokOut": 30.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-5.5-pro",
+      "contextTokens": 400000,
+      "multimodal": true,
+      "costPerMTokIn": 30.0,
+      "costPerMTokOut": 180.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "costPerMTokIn": 4.0,
+      "costPerMTokOut": 20.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "costPerMTokIn": 2.0,
+      "costPerMTokOut": 12.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "costPerMTokIn": 0.2,
+      "costPerMTokOut": 1.2,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-5.2",
+      "costPerMTokIn": 1.75,
+      "costPerMTokOut": 14.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-5.2-pro",
+      "costPerMTokIn": 21.0,
+      "costPerMTokOut": 168.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-5.1",
+      "costPerMTokIn": 1.25,
+      "costPerMTokOut": 10.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-5",
+      "costPerMTokIn": 1.25,
+      "costPerMTokOut": 10.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-5-mini",
+      "costPerMTokIn": 0.25,
+      "costPerMTokOut": 2.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-5-nano",
+      "costPerMTokIn": 0.05,
+      "costPerMTokOut": 0.4,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-5-pro",
+      "costPerMTokIn": 15.0,
+      "costPerMTokOut": 120.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-4.1",
+      "costPerMTokIn": 2.0,
+      "costPerMTokOut": 8.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-4.1-mini",
+      "costPerMTokIn": 0.4,
+      "costPerMTokOut": 1.6,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-4.1-nano",
+      "costPerMTokIn": 0.1,
+      "costPerMTokOut": 0.4,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-4o",
+      "costPerMTokIn": 2.5,
+      "costPerMTokOut": 10.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-4o-mini",
+      "costPerMTokIn": 0.15,
+      "costPerMTokOut": 0.6,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-4o-2024-05-13",
+      "costPerMTokIn": 5.0,
+      "costPerMTokOut": 15.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "o1",
+      "costPerMTokIn": 15.0,
+      "costPerMTokOut": 60.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "o1-pro",
+      "costPerMTokIn": 150.0,
+      "costPerMTokOut": 600.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "o3",
+      "costPerMTokIn": 2.0,
+      "costPerMTokOut": 8.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "o3-pro",
+      "costPerMTokIn": 20.0,
+      "costPerMTokOut": 80.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "o3-mini",
+      "costPerMTokIn": 1.1,
+      "costPerMTokOut": 4.4,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "o4-mini",
+      "costPerMTokIn": 1.1,
+      "costPerMTokOut": 4.4,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-4-turbo-2024-04-09",
+      "costPerMTokIn": 10.0,
+      "costPerMTokOut": 30.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-4-0613",
+      "costPerMTokIn": 30.0,
+      "costPerMTokOut": 60.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-3.5-turbo",
+      "costPerMTokIn": 0.5,
+      "costPerMTokOut": 1.5,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-3.5-turbo-0125",
+      "costPerMTokIn": 0.5,
+      "costPerMTokOut": 1.5,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-3.5-turbo-1106",
+      "costPerMTokIn": 1.0,
+      "costPerMTokOut": 2.0,
+      "pricedAt": "2026-08-29"
+    },
+    {
+      "id": "gpt-3.5-turbo-instruct",
+      "costPerMTokIn": 1.5,
+      "costPerMTokOut": 2.0,
+      "pricedAt": "2026-08-29"
+    }
   ],
   "openrouter": [
-    { "id": "deepseek/deepseek-v3.2",                     "contextTokens": 128000 },
-    { "id": "deepseek/deepseek-v4-flash",                 "contextTokens": 128000 },
-    { "id": "deepseek/deepseek-v4-pro",                   "contextTokens": 128000 },
-    { "id": "google/gemini-2.5-flash",                    "contextTokens": 1000000, "multimodal": true },
-    { "id": "google/gemini-2.5-flash-lite",               "contextTokens": 1000000, "multimodal": true },
-    { "id": "google/gemini-3-flash-preview",              "contextTokens": 1000000, "multimodal": true },
-    { "id": "google/gemma-4-26b-a4b-it:free",             "contextTokens": 128000,                       "costPerMTokIn": 0, "costPerMTokOut": 0, "pricedAt": "2026-05-19" },
-    { "id": "google/gemma-4-31b-it:free",                 "contextTokens": 128000,                       "costPerMTokIn": 0, "costPerMTokOut": 0, "pricedAt": "2026-05-19" },
-    { "id": "moonshotai/kimi-k2.5",                       "contextTokens": 200000 },
-    { "id": "moonshotai/kimi-k2.6",                       "contextTokens": 200000 },
-    { "id": "nvidia/nemotron-3-super-120b-a12b:free",     "contextTokens": 128000,                       "costPerMTokIn": 0, "costPerMTokOut": 0, "pricedAt": "2026-05-19" },
-    { "id": "openrouter/owl-alpha",                       "contextTokens": 128000 },
-    { "id": "qwen/qwen3-235b-a22b-2507",                  "contextTokens": 128000 },
-    { "id": "qwen/qwen3.5-flash-02-23",                   "contextTokens": 128000 },
-    { "id": "qwen/qwen3.6-plus",                          "contextTokens": 128000 },
-    { "id": "x-ai/grok-4.1-fast",                         "contextTokens": 128000 },
-    { "id": "x-ai/grok-4.3",                              "contextTokens": 256000 }
+    {
+      "id": "deepseek/deepseek-v3.2",
+      "contextTokens": 128000
+    },
+    {
+      "id": "deepseek/deepseek-v4-flash",
+      "contextTokens": 128000
+    },
+    {
+      "id": "deepseek/deepseek-v4-pro",
+      "contextTokens": 128000
+    },
+    {
+      "id": "google/gemini-2.5-flash",
+      "contextTokens": 1000000,
+      "multimodal": true
+    },
+    {
+      "id": "google/gemini-2.5-flash-lite",
+      "contextTokens": 1000000,
+      "multimodal": true
+    },
+    {
+      "id": "google/gemini-3-flash-preview",
+      "contextTokens": 1000000,
+      "multimodal": true
+    },
+    {
+      "id": "google/gemma-4-26b-a4b-it:free",
+      "contextTokens": 128000,
+      "costPerMTokIn": 0,
+      "costPerMTokOut": 0,
+      "pricedAt": "2026-05-19"
+    },
+    {
+      "id": "google/gemma-4-31b-it:free",
+      "contextTokens": 128000,
+      "costPerMTokIn": 0,
+      "costPerMTokOut": 0,
+      "pricedAt": "2026-05-19"
+    },
+    {
+      "id": "moonshotai/kimi-k2.5",
+      "contextTokens": 200000
+    },
+    {
+      "id": "moonshotai/kimi-k2.6",
+      "contextTokens": 200000
+    },
+    {
+      "id": "nvidia/nemotron-3-super-120b-a12b:free",
+      "contextTokens": 128000,
+      "costPerMTokIn": 0,
+      "costPerMTokOut": 0,
+      "pricedAt": "2026-05-19"
+    },
+    {
+      "id": "openrouter/owl-alpha",
+      "contextTokens": 128000
+    },
+    {
+      "id": "qwen/qwen3-235b-a22b-2507",
+      "contextTokens": 128000
+    },
+    {
+      "id": "qwen/qwen3.5-flash-02-23",
+      "contextTokens": 128000
+    },
+    {
+      "id": "qwen/qwen3.6-plus",
+      "contextTokens": 128000
+    },
+    {
+      "id": "x-ai/grok-4.1-fast",
+      "contextTokens": 128000
+    },
+    {
+      "id": "x-ai/grok-4.3",
+      "contextTokens": 256000
+    }
   ]
 }

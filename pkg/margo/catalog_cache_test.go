@@ -408,3 +408,113 @@ func TestCacheAcceptsCurrentVersion(t *testing.T) {
 		t.Error("a current-version cache was rejected")
 	}
 }
+
+// Providers do not agree on how to spell a dated snapshot: Anthropic
+// writes claude-haiku-4-5-20251001, OpenAI writes gpt-4.1-2025-04-14.
+// Both must resolve to their alias, and neither form may let one model
+// claim another that merely shares a prefix.
+func TestAliasForAcceptsBothDateFormats(t *testing.T) {
+	overlay := map[string]Model{
+		"claude-haiku-4-5": {ID: "claude-haiku-4-5"},
+		"gpt-4.1":          {ID: "gpt-4.1"},
+		"gpt-4o":           {ID: "gpt-4o"},
+		"o3":               {ID: "o3"},
+	}
+	match := map[string]string{
+		"claude-haiku-4-5-20251001": "claude-haiku-4-5",
+		"gpt-4.1-2025-04-14":        "gpt-4.1",
+		"gpt-4o-2024-08-06":         "gpt-4o",
+		"o3-2025-04-16":             "o3",
+	}
+	for id, want := range match {
+		if got, ok := aliasFor(id, overlay); !ok || got != want {
+			t.Errorf("aliasFor(%q) = %q,%v; want %q", id, got, ok, want)
+		}
+	}
+
+	// Sibling models and suffixed variants are not snapshots.
+	for _, id := range []string{
+		"gpt-4.1-mini", "gpt-4o-mini", "o3-mini",
+		"gpt-5.1-chat-latest", "gpt-4.1-2025-4-14", "gpt-4o-preview",
+	} {
+		if got, ok := aliasFor(id, overlay); ok {
+			t.Errorf("aliasFor(%q) claimed %q; want no match", id, got)
+		}
+	}
+}
+
+// gpt-4o-2024-05-13 is priced apart from gpt-4o, so its own catalog
+// entry has to win over the alias it would otherwise inherit.
+func TestMergeLiveExactEntryBeatsAliasInheritance(t *testing.T) {
+	got, err := MergeLive("openai", []Model{{ID: "gpt-4o"}, {ID: "gpt-4o-2024-05-13"}})
+	if err != nil {
+		t.Fatalf("MergeLive: %v", err)
+	}
+	by := map[string]Model{}
+	for _, m := range got {
+		by[m.ID] = m
+	}
+	base, snap := by["gpt-4o"], by["gpt-4o-2024-05-13"]
+	if base.CostPerMTokIn == nil || snap.CostPerMTokIn == nil {
+		t.Fatal("both entries should be priced")
+	}
+	if *snap.CostPerMTokIn == *base.CostPerMTokIn {
+		t.Errorf("the dated snapshot inherited gpt-4o's rate ($%.2f) instead of its own",
+			*base.CostPerMTokIn)
+	}
+}
+
+// A cache written against a different models.json must be discarded.
+// The version counter alone did not cover this: filling in OpenAI
+// prices changed the overlay without changing the merge algorithm, so
+// every existing cache kept serving "no rate" for models that now had
+// one, until its 24h TTL lapsed.
+func TestCacheIgnoresStaleOverlayFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	c1 := NewCatalogCache(dir, time.Hour)
+	if err := c1.Refresh(context.Background(), "anthropic", &fakeLister{models: []Model{
+		{ID: "claude-haiku-4-5"},
+	}}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	// Rewrite the file with a fingerprint from some other overlay,
+	// standing in for a models.json edit since it was written.
+	path := filepath.Join(dir, "models-anthropic.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var cf map[string]any
+	if err := json.Unmarshal(raw, &cf); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if cf["overlay"] == "" || cf["overlay"] == nil {
+		t.Fatal("cache carried no overlay fingerprint")
+	}
+	cf["overlay"] = "deadbeefcafe"
+	out, _ := json.Marshal(cf)
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	c2 := NewCatalogCache(dir, time.Hour)
+	if !c2.Stale("anthropic") {
+		t.Error("a cache built against a different overlay was accepted")
+	}
+	if len(c2.ModelIDs("anthropic")) == 0 {
+		t.Error("discarding it should fall back to the seed, not to nothing")
+	}
+}
+
+func TestOverlayFingerprintIsStableAndPerProvider(t *testing.T) {
+	if overlayFingerprint("anthropic") != overlayFingerprint("anthropic") {
+		t.Error("fingerprint is not stable across calls")
+	}
+	if overlayFingerprint("anthropic") == overlayFingerprint("openai") {
+		t.Error("different providers should fingerprint differently")
+	}
+	if overlayFingerprint("no-such-provider") == "" {
+		t.Error("an unknown provider should still hash (to the empty slice), not fail")
+	}
+}

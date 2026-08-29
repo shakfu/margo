@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -352,6 +354,63 @@ func (a *App) OpenPath(path string) error {
 		cmd = exec.Command("xdg-open", abs)
 	}
 	return cmd.Start()
+}
+
+// wailsJSON is the project config, embedded so the version the About
+// dialog reports cannot drift from the one the build stamps on the
+// bundle. It was a hand-copied constant; two places to bump at release
+// is one too many.
+//
+//go:embed wails.json
+var wailsJSON []byte
+
+// appVersion is wails.json's info.productVersion, read once at start.
+var appVersion = readProductVersion(wailsJSON)
+
+// readProductVersion pulls info.productVersion out of a wails.json
+// payload. Returns "unknown" rather than failing: a malformed config is
+// a build-time problem, and an About dialog is no place to discover it.
+func readProductVersion(raw []byte) string {
+	var cfg struct {
+		Info struct {
+			ProductVersion string `json:"productVersion"`
+		} `json:"info"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil || cfg.Info.ProductVersion == "" {
+		return "unknown"
+	}
+	return cfg.Info.ProductVersion
+}
+
+// showAbout is the menu callback for Margo › About Margo. Wails' own
+// About is an informational NSAlert, so this matches it.
+func (a *App) showAbout() {
+	if a.ctx == nil {
+		return
+	}
+	_, _ = runtime.MessageDialog(a.ctx, runtime.MessageDialogOptions{
+		Type:    runtime.InfoDialog,
+		Title:   "Margo " + appVersion,
+		Message: "A Go AI framework with a Wails desktop front-end.\n\nhttps://github.com/shakfu/margo",
+	})
+}
+
+// hide is the menu callback for Margo › Hide Margo (Cmd+H).
+func (a *App) hide() {
+	if a.ctx == nil {
+		return
+	}
+	runtime.Hide(a.ctx)
+}
+
+// quit is the menu callback for Margo › Quit Margo (Cmd+Q). A custom
+// app menu supplies no Quit of its own, so it is wired explicitly
+// rather than relying on the implicit one.
+func (a *App) quit() {
+	if a.ctx == nil {
+		return
+	}
+	runtime.Quit(a.ctx)
 }
 
 // openSettings is the menu callback for Margo › Settings…

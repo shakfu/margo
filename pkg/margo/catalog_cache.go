@@ -2,6 +2,8 @@ package margo
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,22 +20,40 @@ import (
 // a day is generous; the user can force a refresh from the UI.
 const DefaultCatalogTTL = 24 * time.Hour
 
-// catalogCacheVersion stamps the on-disk format. Bump it whenever
-// MergeLive's semantics change.
-//
-// The cache stores merged output, not the raw provider response, so a
-// change to the merge leaves existing files frozen with the old
-// derivation until their TTL expires. Version 2 added alias resolution
-// for dated snapshots: without a bump, a cache written by version 1
-// would keep serving an unpriced Haiku ranked below Sonnet.
-const catalogCacheVersion = 2
+// catalogCacheVersion stamps the on-disk format. Bump it when
+// MergeLive's algorithm changes in a way the overlay fingerprint below
+// cannot detect — new alias rules, a different sort, added fallbacks.
+const catalogCacheVersion = 3
 
 // cacheFile is one provider's catalog as written to disk.
+//
+// The cache stores merged output rather than the raw provider response,
+// so it goes stale on two independent axes: the merge algorithm, and
+// the overlay it merges against. Version covers the first. Overlay is a
+// fingerprint of the provider's models.json slice and covers the
+// second, because a manual counter that has to be bumped on every
+// models.json edit gets forgotten — it was, the first time OpenAI
+// prices were filled in, and every existing cache kept reporting
+// "no rate" for models that now had one.
 type cacheFile struct {
 	Version   int       `json:"version"`
+	Overlay   string    `json:"overlay"`
 	Provider  string    `json:"provider"`
 	FetchedAt time.Time `json:"fetchedAt"`
 	Models    []Model   `json:"models"`
+}
+
+// overlayFingerprint hashes a provider's embedded catalog slice. Any
+// edit to its entries — a new model, a changed rate, a corrected
+// context window — yields a different value and retires the caches
+// derived from the old one.
+func overlayFingerprint(provider string) string {
+	raw, err := json.Marshal(DefaultCatalog[provider])
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:6])
 }
 
 // CatalogCache resolves a provider's model list from, in order of
@@ -253,9 +273,11 @@ func MergeLive(provider string, live []Model) ([]Model, error) {
 	return out, nil
 }
 
-// snapshotSuffix matches the `-YYYYMMDD` a provider appends to pin a
-// dated snapshot of an aliased model.
-var snapshotSuffix = regexp.MustCompile(`^-\d{8}$`)
+// snapshotSuffix matches the date a provider appends to pin a dated
+// snapshot of an aliased model. Anthropic writes `-20251001`; OpenAI
+// writes `-2025-04-14`. Both forms, nothing else — a bare prefix match
+// would let `gpt-4.1` claim `gpt-4.1-mini`.
+var snapshotSuffix = regexp.MustCompile(`^-(\d{8}|\d{4}-\d{2}-\d{2})$`)
 
 // aliasFor finds the overlay entry a dated snapshot id belongs to:
 // "claude-haiku-4-5-20251001" resolves to "claude-haiku-4-5".
@@ -351,9 +373,10 @@ func (c *CatalogCache) loadFromDisk() {
 		if err := json.Unmarshal(raw, &cf); err != nil || cf.Provider == "" || len(cf.Models) == 0 {
 			continue
 		}
-		if cf.Version != catalogCacheVersion {
-			// Written by a different merge. Ignore it and leave the
-			// provider stale so the next refresh rebuilds it.
+		if cf.Version != catalogCacheVersion || cf.Overlay != overlayFingerprint(cf.Provider) {
+			// Written against a different merge or a different overlay.
+			// Ignore it and leave the provider stale so the next refresh
+			// rebuilds it.
 			continue
 		}
 		c.models[cf.Provider] = cf.Models
@@ -373,6 +396,7 @@ func (c *CatalogCache) writeToDisk(provider string, models []Model) {
 	}
 	raw, err := json.MarshalIndent(cacheFile{
 		Version:   catalogCacheVersion,
+		Overlay:   overlayFingerprint(provider),
 		Provider:  provider,
 		FetchedAt: time.Now().UTC(),
 		Models:    models,

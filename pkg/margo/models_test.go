@@ -53,10 +53,13 @@ func TestHasCostDistinguishesUnknownFromFree(t *testing.T) {
 	if !DefaultCatalog.HasCost("claude-opus-4-7") {
 		t.Errorf("claude-opus-4-7 should have cost data declared")
 	}
-	// gpt-5.4-* entries are intentionally rate-unknown until OpenAI
-	// pricing is verified.
-	if DefaultCatalog.HasCost("gpt-5.4-nano") {
-		t.Errorf("gpt-5.4-nano has no cost in the catalog; HasCost should be false")
+	// A rate-unknown entry. Built here rather than named from the
+	// embedded catalog: this assertion used to point at gpt-5.4-nano
+	// and broke the day OpenAI's rates were filled in, which tested
+	// the fixture rather than the convention.
+	unknown := Catalog{"x": []Model{{ID: "unpriced", ContextTokens: 1000}}}
+	if unknown.HasCost("unpriced") {
+		t.Errorf("a model with no declared rates should report HasCost=false")
 	}
 	// Free OpenRouter tier has explicit zero rates; HasCost=true.
 	if !DefaultCatalog.HasCost("google/gemma-4-26b-a4b-it:free") {
@@ -79,9 +82,10 @@ func TestCostCalculation(t *testing.T) {
 	if got := DefaultCatalog.Cost("google/gemma-4-26b-a4b-it:free", 10000, 5000); got != 0 {
 		t.Errorf("Cost on free-tier model should be 0, got %v", got)
 	}
-	// Unknown-cost model: nil rates → zero cost.
-	// HasCost(...) lets the UI distinguish this from a real $0.
-	if got := DefaultCatalog.Cost("gpt-5.4-nano", 10000, 5000); got != 0 {
+	// Rate-unknown model: nil rates → zero cost. HasCost lets the UI
+	// tell this apart from a real $0.
+	unknown := Catalog{"x": []Model{{ID: "unpriced", ContextTokens: 1000}}}
+	if got := unknown.Cost("unpriced", 10000, 5000); got != 0 {
 		t.Errorf("Cost on rate-unknown model should be 0, got %v", got)
 	}
 	// Unknown model id → zero cost.

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0]
+
 ### Added
 
 - Model catalogs are fetched from each provider and cached, replacing the 26 hardcoded entries in `models.json` as the source of truth. `margo.ModelLister` is implemented by all three providers; the endpoints are not equivalent, so `CatalogCache` merges live data over the embedded file, which becomes the offline seed and the metadata overlay for whatever an endpoint omits. Anthropic reports context window and image support but no price; OpenRouter reports both plus per-token prices; OpenAI reports identifiers only. Cached per provider under `<UserConfigDir>/Margo/catalog/` with a 24h TTL, falling back live -> cache -> seed. A failed or empty fetch keeps the previous catalog rather than blanking the picker.
@@ -48,6 +52,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Version bumped to 0.2.0, and `wails.json` is embedded so the About dialog reads `info.productVersion` instead of a hand-copied constant. Two places to bump at release was one too many. `frontend/package.json` still carries its own copy, but it is `private: true`, nothing reads it, and it reaches no user-visible surface.
+
 - `providers/openrouter` was a 306-line copy of `providers/openai` differing in about 15 substantive lines, and the copy was the one at 18.9% coverage. Both now wrap a new `providers/openaicompat` parameterised by base URL, default model, headers, and an optional model filter, so the OpenAI suite exercises the shared SSE decoder and tool-call reassembler that OpenRouter previously duplicated untested. OpenRouter embeds rather than aliases so it can override `ListModels` for its richer catalog endpoint.
 
 - The Makefile pins `GOTOOLCHAIN=go1.26.2` for wails targets (`dev`, `build`, `package`, `bindings`). Wails v2.11.0 pins `golang.org/x/tools` v0.30.0, which cannot parse the export data Go 1.27 emits, so every wails subcommand that analyses the module died with `internal error: package "errors" without types was imported from ...`, naming whichever `internal/` package it reached first. `go build` / `test` / `vet` keep using the installed Go; override with `WAILS_GOTOOLCHAIN=`. A `toolchain` directive in `go.mod` does not help — it sets a minimum, so a newer local Go still wins.
@@ -70,6 +76,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `README.md` rewritten against the current feature set; it still described the Anthropic + OpenAI two-provider app from 0.1.1. References to the retired `REVIEW.md` repointed at `TODO.md`, and the `ARCHITECTURE.md` entry corrected to `docs/architecture.md`.
 
+- Two cost tests no longer name a catalog model as their rate-unknown fixture. They pointed at `gpt-5.4-nano` and broke the moment OpenAI's rates were filled in, testing the fixture rather than the nil-vs-zero convention; they now build a one-entry catalog.
+
 - `.env.example` lists `OPENROUTER_API_KEY` and notes that `OPENAI_API_KEY` doubles as the RAG embedder key.
 
 - `SettingsPanel.svelte` split from a 1100-LoC monolith into an 87-LoC tabs shell plus seven focused subcomponents under `lib/settings/`: `ProviderSettings` (Models tab), `PersonasSection`, `KnowledgeSection`, `ToolsSection`, `TrustedToolsSection`, `MCPServersSection` (new MCP tab), `GeneralSettings`. Each subcomponent owns its own collapsible state, dialogs, and Wails calls so the parent shell only composes them. Shared form styles (`mini-btn`, `text-input`, `section-head`, `select-trigger`, `tab-trigger`, etc.) moved from the panel's scoped `<style>` block to global `style.css` so the subcomponents don't each carry ~100 LoC of duplicated CSS. Write-routing extracted into `lib/settings/writeKey.ts` so a future scope (per-chat overrides) is a one-place change. Behavior preserved exactly; one structural change: Persona section's `noDefault` const hoisted from a `{@const}` (which Svelte requires be the immediate child of a block) into a `$:` reactive in the script section. The split is a prerequisite for variant scaffolding (`Settings.uiTier`) since tier-aware gates are easier to add per-subcomponent than to a monolith.
@@ -80,6 +88,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The macOS app menu carries About Margo, Hide Margo (Cmd+H) and Quit Margo (Cmd+Q) alongside Settings…, all of which the custom menu had dropped. Hand-built rather than using `menu.AppMenu()`: that role is all-or-nothing and has no Settings slot, so adopting it would push Settings out of the app menu where macOS users look for it. The fidelity cost is nil — Wails' own About is an informational `NSAlert`, not the rich About panel. Hide Others and Show All remain absent; Wails exposes no Go binding for either.
+
+- Cmd+C, Cmd+V and Cmd+X work again on macOS. Supplying any custom application menu replaces the entire menu bar, and on macOS the standard Edit menu is where Cut/Copy/Paste/Select All get their key equivalents — without it those chords are dead everywhere in the webview, including the message composer. The custom "Margo" menu added for Cmd+, had removed it. `menu.EditMenu()` restores the full set bound to the standard responder selectors, and `menu.WindowMenu()` restores Minimize and Zoom.
+
+- OpenAI models carry pricing. `models.json` had none, and OpenAI's `/v1/models` reports none, so the cost meter was blank for every OpenAI chat. Standard-tier rates for 34 models transcribed from the pricing page (uncached input, matching what `Catalog.Cost` documents it assumes). Context windows were deliberately left alone: the page's Context column is a pricing tier (`<272K`, `Short only`), not a maximum, so unlisted models keep the conservative 128k fallback rather than a guess.
+
+- `aliasFor` accepts OpenAI's dated-snapshot spelling. It matched only Anthropic's `-20251001`; OpenAI writes `-2025-04-14`, so its snapshots inherited nothing. With both forms, 24 further live models pick up their alias's rates — 57 of 65 priced against the current catalog, up from none. `gpt-4o-2024-05-13` is priced apart from `gpt-4o`, so it carries its own entry; the exact match wins over the alias.
+
 - `Session.Stream` and `Session.StreamAgent` could hand the provider client a nil context and crash. They registered the run's cancel slot and then looked the context back up in a second lock acquisition, discarding the not-found result; a `Cancel` landing in that window deleted the entry, the lookup returned nil, and the provider goroutine panicked on its first `ctx.Done()`. Pressing send and then cancel in quick succession was enough. `registerCancel` now returns the context from inside the same critical section; cancellation still propagates through it after the map entry is gone.
 
 - Chat cost is priced per turn against the model that produced it. It was previously the chat's running token totals priced against whatever model was selected when the badge rendered, so switching model mid-chat repriced the entire history — a chat run on Haiku and continued on Opus showed its earlier turns at roughly 19x their actual cost. Assistant messages now record `provider` and `model`. Turns recorded before this shipped keep their token counts but have no model, so they are counted separately and excluded from the total rather than assigned a rate they never had.
@@ -87,6 +103,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The remembered per-provider model is re-applied when a provider's catalog loads. Recording the pick was not enough: in the Default workspace model changes are session-scoped by design, so they never reach persisted settings, and the only other reader was a repair branch that fires solely when the current model has vanished from the catalog. The memory was written on every pick and read on none, so the picker snapped back to the catalog's first entry on the next launch. The restore waits for a catalog that actually contains the remembered model, so a cold start showing only the embedded seed does not overwrite the choice with a fallback.
 
 - A dated model snapshot inherits its alias's catalog metadata. Anthropic's `/v1/models` returns `claude-haiku-4-5-20251001` while `models.json` seeds the alias `claude-haiku-4-5`, and the merge drops overlay-only ids — so the snapshot arrived unpriced, with the 128k fallback window instead of its real 200k, and without the alias's curated rank. That last one moved the picker's default from Haiku to Sonnet, $0.80/$4 per MTok to $3/$15. `aliasFor` requires a `-YYYYMMDD` suffix rather than any prefix, so `claude-opus-4-5` cannot claim `claude-opus-4-50`.
+
+- The catalog cache is invalidated by the overlay it was built from, not just by a format-version counter. It stores merged output, so it goes stale on two axes: the merge algorithm and the `models.json` it merged against. The counter covered only the first, and had to be bumped by hand — which was forgotten the first time OpenAI prices were filled in, leaving every existing cache reporting "no rate" for models that now had one until its 24h TTL lapsed. Cache files now carry a fingerprint of the provider's catalog slice, so any edit to a rate, model or window retires the caches derived from it automatically.
 
 - The catalog cache carries a format version. It stores merged output rather than the raw provider response, so the alias fix above would otherwise have stayed invisible on any machine with an existing cache until its 24h TTL lapsed. A file written under a different version is discarded and the provider reads as stale, which rebuilds it on the next refresh.
 

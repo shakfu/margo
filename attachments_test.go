@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 )
 
@@ -93,6 +95,50 @@ func TestSaveAttachmentRejectsBadChatID(t *testing.T) {
 	for _, bad := range []string{"", "..", "a/b", "a\\b", "../escape"} {
 		if _, err := a.SaveAttachment(bad, "x.png", "image/png", b64("x")); err == nil {
 			t.Errorf("SaveAttachment with chatID %q should error", bad)
+		}
+	}
+}
+
+// The About dialog reports appVersion, which used to be a constant
+// hand-copied from wails.json. These guard the embedded read that
+// replaced it: a silent "unknown" in the About box is exactly the kind
+// of thing nobody notices until a release is out.
+func TestAppVersionComesFromEmbeddedConfig(t *testing.T) {
+	if appVersion == "unknown" || appVersion == "" {
+		t.Fatalf("appVersion = %q; wails.json did not parse", appVersion)
+	}
+	// Sanity: it should look like a version, not a stray field.
+	if !regexp.MustCompile(`^\d+\.\d+`).MatchString(appVersion) {
+		t.Errorf("appVersion = %q, want a dotted version", appVersion)
+	}
+}
+
+func TestAppVersionMatchesWailsJSON(t *testing.T) {
+	raw, err := os.ReadFile("wails.json")
+	if err != nil {
+		t.Fatalf("read wails.json: %v", err)
+	}
+	var cfg struct {
+		Info struct {
+			ProductVersion string `json:"productVersion"`
+		} `json:"info"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("parse wails.json: %v", err)
+	}
+	if appVersion != cfg.Info.ProductVersion {
+		t.Errorf("appVersion = %q but wails.json says %q", appVersion, cfg.Info.ProductVersion)
+	}
+}
+
+func TestReadProductVersionFallsBackOnBadConfig(t *testing.T) {
+	for name, raw := range map[string]string{
+		"malformed":     `{not json`,
+		"no info block": `{"name":"margo"}`,
+		"empty version": `{"info":{"productVersion":""}}`,
+	} {
+		if got := readProductVersion([]byte(raw)); got != "unknown" {
+			t.Errorf("%s: got %q, want \"unknown\"", name, got)
 		}
 	}
 }
