@@ -23,6 +23,26 @@ type Config struct {
 	OpenRouterAPIKey string
 	AttachmentRoot   string
 
+	// CatalogDir holds the per-provider model-catalog caches. Empty
+	// means os.UserConfigDir; tests pass a temp directory. A cache that
+	// cannot be written still works, it just refetches each launch.
+	CatalogDir string
+
+	// CatalogTTL is how long a fetched catalog is reused. Zero means
+	// margo.DefaultCatalogTTL.
+	CatalogTTL time.Duration
+
+	// AllowPrivateNetwork lets web_fetch reach loopback and LAN
+	// addresses. Off by default: the URL is model-chosen, so reaching
+	// the user's own network is a decision only the user can make.
+	AllowPrivateNetwork bool
+
+	// QuartoExecute enables Quarto's computational cells in the
+	// quarto_render tool. Off by default: the document body is
+	// model-authored, so executing it is arbitrary code execution on
+	// the user's machine. See agent.QuartoOptions.Execute.
+	QuartoExecute bool
+
 	// MCPConfig is the parsed Claude-Desktop-compatible mcpServers
 	// catalog. When non-nil and non-empty, NewSession starts every
 	// server eagerly and asynchronously — handshake/listTools runs in
@@ -54,9 +74,15 @@ type Session struct {
 	attachments *AttachmentStore
 	permissions *PermissionBroker
 	mcp         *mcp.Manager
+	catalog     *margo.CatalogCache
 
 	cancelsMu sync.Mutex
 	cancels   map[string]runHandle
+
+	// quartoExecute and allowPrivateNetwork are read by the tool
+	// constructors in tools.go on every buildTools call.
+	quartoExecute       bool
+	allowPrivateNetwork bool
 }
 
 // runHandle bundles the per-stream cancel function with the derived
@@ -81,12 +107,26 @@ const mcpShutdownTimeout = 3 * time.Second
 // runs in goroutines. The caller observes readiness via
 // Session.MCP().Servers()[i].Status().
 func NewSession(cfg Config) *Session {
+	catalogDir := cfg.CatalogDir
+	if catalogDir == "" {
+		// A missing config directory is not fatal: the cache falls back
+		// to memory-only and the embedded seed still serves models.
+		catalogDir, _ = margo.DefaultCatalogDir()
+	}
+	catalog := margo.NewCatalogCache(catalogDir, cfg.CatalogTTL)
+	// Installed process-wide so agent.BudgetForModel resolves context
+	// windows against live data rather than the build-time seed.
+	margo.SetActiveCatalog(catalog)
+
 	s := &Session{
-		workspaces:  NewWorkspaceRegistry(cfg.OpenAIAPIKey),
-		attachments: NewAttachmentStore(cfg.AttachmentRoot),
-		permissions: NewPermissionBroker(),
-		mcp:         mcp.NewManager(cfg.MCPLogger),
-		cancels:     map[string]runHandle{},
+		catalog:             catalog,
+		workspaces:          NewWorkspaceRegistry(cfg.OpenAIAPIKey),
+		attachments:         NewAttachmentStore(cfg.AttachmentRoot),
+		permissions:         NewPermissionBroker(),
+		mcp:                 mcp.NewManager(cfg.MCPLogger),
+		cancels:             map[string]runHandle{},
+		quartoExecute:       cfg.QuartoExecute,
+		allowPrivateNetwork: cfg.AllowPrivateNetwork,
 	}
 	if cfg.AnthropicAPIKey != "" {
 		s.anthropic = anthropic.New(cfg.AnthropicAPIKey)
@@ -166,18 +206,69 @@ func (s *Session) Providers() []string {
 }
 
 // Models returns the model identifiers exposed for a provider, in
-// catalog-declared order. First entry is the default. The catalog itself
-// lives in pkg/margo/models.json so a model bump does not require a code
-// change; see margo.DefaultCatalog.
+// catalog order: curated entries from the embedded models.json first,
+// then anything else the provider reported, alphabetically. First entry
+// is the default. See RefreshModels for where the list comes from.
 func (s *Session) Models(provider string) []string {
-	return margo.DefaultCatalog.ModelIDs(provider)
+	return s.catalog.ModelIDs(provider)
 }
 
 // Catalog returns the full model catalog. Exposed so front-ends can
 // retire their own hand-mirrored model lists (context-window sizes,
 // multimodal capability) and read this single source of truth instead.
 func (s *Session) Catalog() margo.Catalog {
-	return margo.DefaultCatalog
+	return s.catalog.Catalog()
+}
+
+// RefreshModels fetches provider's model list and stores it. Returns an
+// error when the provider has no key, cannot list models, or the fetch
+// fails; in every failure case the previous catalog stays in place, so a
+// failed refresh degrades to stale data rather than to an empty picker.
+func (s *Session) RefreshModels(ctx context.Context, provider string) error {
+	c, err := s.clientFor(provider)
+	if err != nil {
+		return err
+	}
+	lister, ok := c.(margo.ModelLister)
+	if !ok {
+		return fmt.Errorf("provider %q does not support listing models", provider)
+	}
+	return s.catalog.Refresh(ctx, provider, lister)
+}
+
+// RefreshStaleModels refreshes every configured provider whose catalog
+// has aged past the TTL, in parallel. Errors are returned per provider
+// and are advisory: the caller shows them, the app keeps working.
+//
+// Intended to be called once at startup on a background goroutine. It
+// is not called from NewSession because a constructor that makes
+// network calls is a constructor that hangs.
+func (s *Session) RefreshStaleModels(ctx context.Context) map[string]error {
+	errs := map[string]error{}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, provider := range s.Providers() {
+		p := provider
+		c, err := s.clientFor(p)
+		if err != nil {
+			continue
+		}
+		lister, ok := c.(margo.ModelLister)
+		if !ok {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := s.catalog.RefreshIfStale(ctx, p, lister); err != nil {
+				mu.Lock()
+				errs[p] = err
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	return errs
 }
 
 // Chat is a non-streaming multi-turn completion.
@@ -210,10 +301,10 @@ func (s *Session) Stream(ctx context.Context, id string, req ChatRequest) (<-cha
 	if err != nil {
 		return nil, err
 	}
-	if err := s.registerCancel(ctx, id); err != nil {
+	runCtx, err := s.registerCancel(ctx, id)
+	if err != nil {
 		return nil, err
 	}
-	runCtx, _ := s.ctxFor(id)
 
 	in, err := c.Stream(runCtx, toMargoRequest(req.System, req.Messages, req.Options, req.Attachments))
 	if err != nil {
@@ -269,14 +360,19 @@ func (s *Session) StreamAgent(ctx context.Context, id string, req AgentRequest) 
 	if err != nil {
 		return nil, err
 	}
-	if err := s.registerCancel(ctx, id); err != nil {
+	runCtx, err := s.registerCancel(ctx, id)
+	if err != nil {
 		return nil, err
 	}
-	runCtx, _ := s.ctxFor(id)
 
+	// A persisted grant is only as good as the current policy: a tool
+	// that has since joined NoAlwaysApproveTools must prompt again even
+	// though the front-end still has it on the pre-authorised list.
 	approvedThisRun := make(map[string]bool, len(req.AutoApprove))
 	for _, n := range req.AutoApprove {
-		approvedThisRun[n] = true
+		if agent.AllowsAlwaysApprove(n) {
+			approvedThisRun[n] = true
+		}
 	}
 	var approvedMu sync.Mutex
 
@@ -343,18 +439,26 @@ func (s *Session) Cancel(id string) {
 	}
 }
 
-// registerCancel reserves a cancel slot for the given id. Returns an error
-// if the id is already taken.
-func (s *Session) registerCancel(parent context.Context, id string) error {
+// registerCancel reserves a cancel slot for the given id and returns the
+// derived context the run should use. Errors if the id is already taken.
+//
+// The context comes back from inside the critical section rather than
+// from a follow-up lookup, because the two-step version raced: a Cancel
+// landing between the register and the lookup deleted the entry, the
+// lookup returned a nil context, and that nil reached the provider
+// client where the first ctx.Done() panicked. Pressing send and cancel
+// in quick succession was enough to hit it. Cancellation still
+// propagates through the returned context once the map entry is gone.
+func (s *Session) registerCancel(parent context.Context, id string) (context.Context, error) {
 	ctx, cancel := context.WithCancel(parent)
 	s.cancelsMu.Lock()
 	defer s.cancelsMu.Unlock()
 	if _, exists := s.cancels[id]; exists {
 		cancel()
-		return fmt.Errorf("stream id %q already in use", id)
+		return nil, fmt.Errorf("stream id %q already in use", id)
 	}
 	s.cancels[id] = runHandle{ctx: ctx, cancel: cancel}
-	return nil
+	return ctx, nil
 }
 
 // releaseCancel drops the slot and cancels the derived context. Safe to
@@ -367,16 +471,4 @@ func (s *Session) releaseCancel(id string) {
 	if ok {
 		h.cancel()
 	}
-}
-
-// ctxFor returns the derived context for a registered id. The second
-// return is false when the id is unknown (run already ended).
-func (s *Session) ctxFor(id string) (context.Context, bool) {
-	s.cancelsMu.Lock()
-	defer s.cancelsMu.Unlock()
-	h, ok := s.cancels[id]
-	if !ok {
-		return nil, false
-	}
-	return h.ctx, true
 }

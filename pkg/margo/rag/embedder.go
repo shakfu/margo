@@ -1,7 +1,7 @@
 // Package rag holds the retrieval-augmented-generation building
 // blocks: an Embedder for turning text into vectors, a VectorStore
 // for persisting and querying them, and (in later slices) loaders /
-// chunkers / orchestrators that use both. See REVIEW.md §7.1.d.
+// chunkers / orchestrators that use both.
 //
 // 7.1.d.1 ships only the Embedder and an OpenAI implementation;
 // later sub-slices add the rest.

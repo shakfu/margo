@@ -8,10 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	sdk "github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
-
 	"github.com/shakfu/margo/pkg/margo"
+	"github.com/shakfu/margo/pkg/margo/providers/openaicompat"
 )
 
 // newTestClient constructs an OpenRouter-shaped Client pointed at a
@@ -19,15 +17,13 @@ import (
 // (HTTP-Referer, X-Title) so TestSendsIdentityHeaders below can assert
 // they survive when WithBaseURL gets layered on top.
 func newTestClient(serverURL string) *Client {
-	return &Client{
-		sdk: sdk.NewClient(
-			option.WithAPIKey("test-key"),
-			option.WithBaseURL(serverURL),
-			option.WithHeader("HTTP-Referer", "https://github.com/shakfu/margo"),
-			option.WithHeader("X-Title", "margo"),
-		),
-		defaultModel: "deepseek/deepseek-v3.2",
-	}
+	return &Client{openaicompat.New(openaicompat.Options{
+		Name:         "openrouter",
+		APIKey:       "test-key",
+		BaseURL:      serverURL,
+		DefaultModel: defaultModel,
+		Headers:      identityHeaders,
+	})}
 }
 
 // TestSendsIdentityHeaders is the load-bearing OpenRouter-specific
@@ -46,8 +42,8 @@ func TestSendsIdentityHeaders(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id": "c", "object": "chat.completion", "model": "deepseek/deepseek-v3.2",
 			"choices": []map[string]any{{
-				"index": 0,
-				"message": map[string]any{"role": "assistant", "content": "ok"},
+				"index":         0,
+				"message":       map[string]any{"role": "assistant", "content": "ok"},
 				"finish_reason": "stop",
 			}},
 			"usage": map[string]int{"prompt_tokens": 1, "completion_tokens": 1},
@@ -81,8 +77,8 @@ func TestCompleteParsesResponse(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id": "c", "object": "chat.completion", "model": "deepseek/deepseek-v3.2",
 			"choices": []map[string]any{{
-				"index": 0,
-				"message": map[string]any{"role": "assistant", "content": "Hello via OpenRouter"},
+				"index":         0,
+				"message":       map[string]any{"role": "assistant", "content": "Hello via OpenRouter"},
 				"finish_reason": "stop",
 			}},
 			"usage": map[string]int{"prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9},
@@ -121,8 +117,8 @@ func TestDefaultModelUsedWhenRequestModelEmpty(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id": "c", "object": "chat.completion", "model": "deepseek/deepseek-v3.2",
 			"choices": []map[string]any{{
-				"index": 0,
-				"message": map[string]any{"role": "assistant", "content": "ok"},
+				"index":         0,
+				"message":       map[string]any{"role": "assistant", "content": "ok"},
 				"finish_reason": "stop",
 			}},
 			"usage": map[string]int{"prompt_tokens": 1, "completion_tokens": 1},

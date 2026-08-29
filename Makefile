@@ -9,31 +9,45 @@ BUILD_DIR  := build/bin
 CLI_BIN    := $(BUILD_DIR)/margo-cli
 TUI_BIN    := $(BUILD_DIR)/margo-tui
 
+# Wails v2.11.0 pins golang.org/x/tools v0.30.0, which cannot read the
+# export data Go 1.27 writes. Every wails subcommand that analyses the
+# module then dies with:
+#
+#   internal error: package "errors" without types was imported from ...
+#
+# Pin the toolchain for wails targets only; go build / test / vet run on
+# whatever Go is installed. A `toolchain` directive in go.mod does not
+# help here — it sets a minimum, so a newer local Go still wins.
+#
+# Raise this when wails ships a release with a newer x/tools.
+WAILS_GOTOOLCHAIN ?= go1.26.2
+WAILS      := GOTOOLCHAIN=$(WAILS_GOTOOLCHAIN) wails
+
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "Targets:\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 # ---------- Wails app ----------
 
 dev: ## Run Wails app in dev mode (live reload)
-	wails dev
+	$(WAILS) dev
 
 build: ## Build production Wails app
-	wails build
+	$(WAILS) build
 
 build-debug: ## Build Wails app with debug symbols + devtools
-	wails build -debug -devtools
+	$(WAILS) build -debug -devtools
 
 build-universal: ## Build macOS universal binary (arm64 + amd64)
-	wails build -platform darwin/universal
+	$(WAILS) build -platform darwin/universal
 
 package: ## Build and package (e.g. .app bundle on macOS)
-	wails build -clean
+	$(WAILS) build -clean
 
 run: build ## Build then launch the app
 	@if [ "$$(uname)" = "Darwin" ]; then open $(BUILD_DIR)/$(BINARY).app; else $(BUILD_DIR)/$(BINARY); fi
 
 bindings: ## Regenerate frontend/wailsjs Go<->JS bindings
-	wails generate module
+	$(WAILS) generate module
 
 # ---------- CLI ----------
 
@@ -79,8 +93,12 @@ cover: ## Run tests with coverage report
 	go test -cover -coverprofile=coverage.out ./...
 	go tool cover -func=coverage.out | tail -1
 
-lint: ## Run golangci-lint (requires golangci-lint installed)
+lint: ## Run golangci-lint (requires golangci-lint built against this Go version)
 	@command -v golangci-lint >/dev/null || { echo "golangci-lint not installed: https://golangci-lint.run/usage/install/"; exit 1; }
+	@# golangci-lint typechecks with the stdlib it was compiled against.
+	@# A binary older than the local toolchain reports every stdlib
+	@# import as "could not load export data" — upgrade it, don't chase
+	@# the errors. `go vet` and CI cover the same ground meanwhile.
 	golangci-lint run ./...
 
 # ---------- Frontend ----------
@@ -118,3 +136,4 @@ doctor: ## Verify required toolchain (go, wails, npm)
 	@echo "wails: $$(wails version 2>/dev/null || echo MISSING)"
 	@echo "node:  $$(node --version 2>/dev/null || echo MISSING)"
 	@echo "npm:   $$(npm --version 2>/dev/null || echo MISSING)"
+	@echo "wails builds with GOTOOLCHAIN=$(WAILS_GOTOOLCHAIN) (see Makefile)"

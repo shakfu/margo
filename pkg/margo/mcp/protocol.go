@@ -186,9 +186,9 @@ func TextContent(s string) Content { return Content{Type: "text", Text: s} }
 // client sends. Centralised here so the test suite can refer to them
 // without hardcoding strings.
 const (
-	MethodInitialize         = "initialize"
-	MethodInitialized        = "notifications/initialized"
-	MethodToolsList          = "tools/list"
-	MethodToolsCall          = "tools/call"
-	MethodToolsListChanged   = "notifications/tools/list_changed"
+	MethodInitialize       = "initialize"
+	MethodInitialized      = "notifications/initialized"
+	MethodToolsList        = "tools/list"
+	MethodToolsCall        = "tools/call"
+	MethodToolsListChanged = "notifications/tools/list_changed"
 )

@@ -17,7 +17,7 @@ import (
 const chromemCollectionName = "documents"
 
 // ChromemStore is a VectorStore backed by chromem-go.
-// (TODO §6.6.A; REVIEW.md §7.1.d.2.)
+// (TODO §6.6.A.)
 //
 // Pure Go, in-process, persisted as a .gob file under baseDir.
 // chromem-go auto-flushes synchronously on every write, so Persist is

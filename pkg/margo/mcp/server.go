@@ -64,8 +64,8 @@ type Server struct {
 
 	mu           sync.RWMutex
 	status       ServerStatus
-	statusErr    error      // last error that drove a status transition (e.g. crash cause)
-	tools        []Tool     // last fetched tool catalog
+	statusErr    error  // last error that drove a status transition (e.g. crash cause)
+	tools        []Tool // last fetched tool catalog
 	startedAt    time.Time
 	exitWaitDone chan struct{} // closed when cmd.Wait returns
 

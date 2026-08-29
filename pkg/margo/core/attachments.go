@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/shakfu/margo/internal/pathsafe"
 )
 
 // AttachmentStore manages on-disk storage of chat attachments. Bytes in,
@@ -84,13 +86,9 @@ func (s *AttachmentStore) Load(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	abs, err := filepath.Abs(path)
+	abs, err := pathsafe.Contained(root, path)
 	if err != nil {
-		return nil, fmt.Errorf("abs: %w", err)
-	}
-	rel, err := filepath.Rel(root, abs)
-	if err != nil || strings.HasPrefix(rel, "..") || strings.Contains(rel, "..") {
-		return nil, fmt.Errorf("path outside attachments root")
+		return nil, fmt.Errorf("path outside attachments root: %w", err)
 	}
 	raw, err := os.ReadFile(abs)
 	if err != nil {

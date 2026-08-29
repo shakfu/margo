@@ -18,6 +18,28 @@ var ReadOnlyTools = map[string]bool{
 	"search_knowledge": true,
 }
 
+// NoAlwaysApproveTools is the set of tools whose approval may not be
+// made permanent. A user can approve an individual call, but "Always"
+// is not offered and a stale persisted grant is ignored.
+//
+// The criterion is "one approval cannot stand in for the next": the
+// tool's risk lives in its arguments, not its identity. quarto_render
+// writes a model-authored file and, when execution is enabled, runs
+// model-authored code — approving one document says nothing about the
+// next one. Compare web_fetch, which is capped, read-only, and cannot
+// touch the filesystem, so a blanket grant is a defensible trade.
+var NoAlwaysApproveTools = map[string]bool{
+	"quarto_render": true,
+}
+
+// AllowsAlwaysApprove reports whether "Always approve" may be offered
+// and honoured for the named tool. Consulted both when a decision comes
+// back from the user and when a caller supplies a pre-authorised list,
+// so a grant persisted before a tool joined the set stops working.
+func AllowsAlwaysApprove(name string) bool {
+	return !NoAlwaysApproveTools[name]
+}
+
 // ErrPermissionDenied is returned by the middleware when the user denies a
 // tool invocation. Surfaces as a tool_result with isError=true through the
 // existing ToolCallbackHandler.OnError path.

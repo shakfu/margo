@@ -10,23 +10,20 @@ import (
 	"strings"
 	"testing"
 
-	sdk "github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
-
 	"github.com/shakfu/margo/pkg/margo"
+	"github.com/shakfu/margo/pkg/margo/providers/openaicompat"
 )
 
 // newTestClient builds a Client wired to a test http server. Bypasses
 // New() because tests need to inject WithBaseURL; the package's
 // public surface keeps API keys mandatory.
 func newTestClient(serverURL string) *Client {
-	return &Client{
-		sdk: sdk.NewClient(
-			option.WithAPIKey("test-key"),
-			option.WithBaseURL(serverURL),
-		),
-		defaultModel: "gpt-5.4-nano",
-	}
+	return openaicompat.New(openaicompat.Options{
+		Name:         "openai",
+		APIKey:       "test-key",
+		BaseURL:      serverURL,
+		DefaultModel: defaultModel,
+	})
 }
 
 // jsonReply writes a JSON object as the response.
@@ -148,8 +145,8 @@ func TestCompleteSendsImagePart(t *testing.T) {
 		jsonReply(w, map[string]any{
 			"id": "c", "object": "chat.completion", "model": "gpt-5.4-nano",
 			"choices": []map[string]any{{
-				"index": 0,
-				"message": map[string]any{"role": "assistant", "content": "ok"},
+				"index":         0,
+				"message":       map[string]any{"role": "assistant", "content": "ok"},
 				"finish_reason": "stop",
 			}},
 			"usage": map[string]int{"prompt_tokens": 1, "completion_tokens": 1},

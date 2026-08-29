@@ -24,17 +24,17 @@ type model struct {
 	provider string
 	modelID  string
 
-	history     []core.Message // committed turns (user+assistant)
-	current     strings.Builder // accumulating in-flight assistant text
-	input       textinput.Model
-	transcript  viewport.Model
-	streaming   bool
-	streamID    string
-	streamCh    <-chan core.Event
-	cancelFn    context.CancelFunc
-	lastError   string
-	width       int
-	height      int
+	history    []core.Message  // committed turns (user+assistant)
+	current    strings.Builder // accumulating in-flight assistant text
+	input      textinput.Model
+	transcript viewport.Model
+	streaming  bool
+	streamID   string
+	streamCh   <-chan core.Event
+	cancelFn   context.CancelFunc
+	lastError  string
+	width      int
+	height     int
 }
 
 // eventMsg wraps a core.Event so it can travel as a tea.Msg.

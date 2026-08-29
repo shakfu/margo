@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +22,7 @@ func TestQuartoRenderArgValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := runQuartoRender(context.Background(), tc.args, "")
+			_, err := runQuartoRender(context.Background(), tc.args, QuartoOptions{})
 			if err == nil || !strings.Contains(err.Error(), tc.errLike) {
 				t.Fatalf("got err=%v, want substring %q", err, tc.errLike)
 			}
@@ -43,7 +44,7 @@ func TestQuartoRenderHTML(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	out, err := runQuartoRender(context.Background(), quartoArgs{Input: src, To: "html"}, "")
+	out, err := runQuartoRender(context.Background(), quartoArgs{Input: src, To: "html"}, QuartoOptions{OutputDir: dir})
 	if err != nil {
 		t.Fatalf("render: %v\n%s", err, out)
 	}
@@ -86,7 +87,7 @@ func TestQuartoRenderCreateAndRender(t *testing.T) {
 		Input:   dst,
 		Content: src,
 		To:      "html",
-	}, ""); err != nil {
+	}, QuartoOptions{OutputDir: dir}); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 
@@ -98,7 +99,7 @@ func TestQuartoRenderCreateAndRender(t *testing.T) {
 		t.Fatalf("expected presentation.html: %v", err)
 	}
 
-	out, err := runQuartoRender(context.Background(), quartoArgs{Input: dst, To: "html"}, "")
+	out, err := runQuartoRender(context.Background(), quartoArgs{Input: dst, To: "html"}, QuartoOptions{OutputDir: dir})
 	if err != nil {
 		t.Fatalf("re-render: %v\n%s", err, out)
 	}
@@ -121,7 +122,7 @@ func TestQuartoRenderTitleSlug(t *testing.T) {
 
 	dir := t.TempDir()
 	src := "---\ntitle: \"How to Boil an Egg\"\nformat: html\n---\n\nbody\n"
-	out, err := runQuartoRender(context.Background(), quartoArgs{Content: src, To: "html"}, dir)
+	out, err := runQuartoRender(context.Background(), quartoArgs{Content: src, To: "html"}, QuartoOptions{OutputDir: dir})
 	if err != nil {
 		t.Fatalf("render: %v\n%s", err, out)
 	}
@@ -136,11 +137,109 @@ func TestQuartoRenderTitleSlug(t *testing.T) {
 
 	// Second render of the same title — confirm uniquePath kicks in so we
 	// don't silently overwrite the first artifact.
-	out2, err := runQuartoRender(context.Background(), quartoArgs{Content: src, To: "html"}, dir)
+	out2, err := runQuartoRender(context.Background(), quartoArgs{Content: src, To: "html"}, QuartoOptions{OutputDir: dir})
 	if err != nil {
 		t.Fatalf("second render: %v\n%s", err, out2)
 	}
 	if !strings.Contains(out2, "how-to-boil-an-egg-2") {
 		t.Errorf("expected -2 suffix on collision; got:\n%s", out2)
+	}
+}
+
+// TestQuartoRenderRejectsEscapingInput is the regression net for the
+// arbitrary-write hole: before containment, a model-supplied `input`
+// pointing anywhere on the filesystem had `content` written to it
+// verbatim, before quarto was ever consulted.
+func TestQuartoRenderRejectsEscapingInput(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "pwned.qmd")
+
+	_, err := runQuartoRender(context.Background(), quartoArgs{
+		Input:   outside,
+		Content: "---\ntitle: x\n---\n",
+		To:      "html",
+	}, QuartoOptions{OutputDir: root})
+	if err == nil {
+		t.Fatal("expected containment error, got nil")
+	}
+	if !errors.Is(err, ErrPathEscapesRoot) {
+		t.Fatalf("got %v, want ErrPathEscapesRoot", err)
+	}
+	if _, statErr := os.Stat(outside); statErr == nil {
+		t.Fatalf("file was written outside the root: %s", outside)
+	}
+}
+
+// Relative traversal is the same hole spelled differently.
+func TestQuartoRenderRejectsTraversalInput(t *testing.T) {
+	root := t.TempDir()
+	_, err := runQuartoRender(context.Background(), quartoArgs{
+		Input:   filepath.Join(root, "..", "escape.qmd"),
+		Content: "---\ntitle: x\n---\n",
+	}, QuartoOptions{OutputDir: root})
+	if !errors.Is(err, ErrPathEscapesRoot) {
+		t.Fatalf("got %v, want ErrPathEscapesRoot", err)
+	}
+}
+
+func TestQuartoRenderRejectsEscapingOutputDir(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "doc.qmd")
+	if err := os.WriteFile(src, []byte("---\ntitle: t\n---\n\nhi\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := runQuartoRender(context.Background(), quartoArgs{
+		Input:     src,
+		OutputDir: "../../elsewhere",
+	}, QuartoOptions{OutputDir: root})
+	if !errors.Is(err, ErrPathEscapesRoot) {
+		t.Fatalf("got %v, want ErrPathEscapesRoot", err)
+	}
+}
+
+// A path inside the root must still be accepted, or containment has
+// simply broken the tool.
+func TestQuartoRenderAcceptsContainedInput(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "nested", "doc.qmd")
+
+	_, err := runQuartoRender(context.Background(), quartoArgs{
+		Input:   target,
+		Content: "---\ntitle: x\n---\n",
+	}, QuartoOptions{OutputDir: root})
+	// Without quarto installed the call fails at exec, not at
+	// containment — either way the write must have happened.
+	if err != nil && errors.Is(err, ErrPathEscapesRoot) {
+		t.Fatalf("contained path was rejected: %v", err)
+	}
+	if _, statErr := os.Stat(target); statErr != nil {
+		t.Fatalf("contained write did not land: %v", statErr)
+	}
+}
+
+func TestContainedPath(t *testing.T) {
+	root := t.TempDir()
+	cases := []struct {
+		name      string
+		candidate string
+		wantErr   bool
+	}{
+		{"direct child", filepath.Join(root, "a.qmd"), false},
+		{"nested child", filepath.Join(root, "x", "y", "a.qmd"), false},
+		{"parent", filepath.Dir(root), true},
+		{"traversal", filepath.Join(root, "..", "a.qmd"), true},
+		{"sibling prefix", root + "-sibling/a.qmd", true},
+		{"absolute elsewhere", "/etc/passwd", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := containedPath(root, tc.candidate)
+			if tc.wantErr && !errors.Is(err, ErrPathEscapesRoot) {
+				t.Fatalf("got %v, want ErrPathEscapesRoot", err)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
 	}
 }

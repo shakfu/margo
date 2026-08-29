@@ -17,8 +17,6 @@ export function DeleteKnowledgeSource(arg1:string,arg2:string):Promise<void>;
 
 export function ExportChatMarkdown(arg1:core.ChatExport):Promise<string>;
 
-export function Greet(arg1:string):Promise<string>;
-
 export function IndexPath(arg1:string,arg2:string):Promise<core.IndexResult>;
 
 export function KnowledgeSources(arg1:string):Promise<Array<core.KnowledgeSource>>;
@@ -40,6 +38,8 @@ export function PickKnowledgePath(arg1:boolean):Promise<string>;
 export function PickWorkspaceDir():Promise<string>;
 
 export function Providers():Promise<Array<string>>;
+
+export function RefreshModels(arg1:string):Promise<Array<string>>;
 
 export function RemoveMCPServer(arg1:string):Promise<void>;
 

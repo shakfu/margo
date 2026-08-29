@@ -3,10 +3,14 @@
   // Sampling parameters, Thinking. Extracted from SettingsPanel.svelte
   // so the parent shrinks to a thin tabs shell. Owns its own collapsible
   // section state; reads/writes route through writeKey based on `mode`.
-  import { settings, effectiveSettings, type WorkspaceOverrides } from '../store';
+  import { settings, effectiveSettings, rememberModel, modelForProvider, type WorkspaceOverrides } from '../store';
   import { createSelect, createCollapsible, melt } from '@melt-ui/svelte';
   import { get } from 'svelte/store';
+  import { RefreshModels } from '../../../wailsjs/go/main/App.js';
   import { writeKey, type SettingsScope } from './writeKey';
+  import { createEventDispatcher } from 'svelte';
+
+  const dispatch = createEventDispatcher<{ modelsRefreshed: { provider: string } }>();
 
   export let providers: string[] = [];
   export let models: string[] = [];
@@ -36,8 +40,11 @@
     const cur = mode === 'workspace' ? get(effectiveSettings).provider : get(settings).provider;
     if (s.value === cur) return;
     write('provider', s.value);
-    // Provider change invalidates model since model lists are per-provider.
-    write('model', '');
+    // Model lists are per-provider, so the current pick is invalid.
+    // Restore what the user last used on the incoming provider; the
+    // `models` prop arrives asynchronously, so an empty result here
+    // just defers to the reactive fallback below.
+    write('model', modelForProvider(s.value, models, get(settings).lastModelByProvider));
   });
   const provSource = mode === 'workspace' ? effectiveSettings : settings;
   provSource.subscribe(s => {
@@ -62,6 +69,8 @@
     const cur = mode === 'workspace' ? get(effectiveSettings).model : get(settings).model;
     if (s.value === cur) return;
     write('model', s.value);
+    const provider = mode === 'workspace' ? get(effectiveSettings).provider : get(settings).provider;
+    rememberModel(provider, s.value);
   });
   const modSource = mode === 'workspace' ? effectiveSettings : settings;
   modSource.subscribe(s => {
@@ -72,9 +81,31 @@
   });
 
   // When the models prop arrives, ensure the effective model is still
-  // valid; otherwise reset to the provider's default.
+  // valid. Prefer the provider's remembered pick; fall back to the
+  // catalog default only when that model is gone from the catalog.
   $: if (models.length > 0 && display && !models.includes(display.model)) {
-    write('model', models[0]);
+    write('model', modelForProvider(display.provider, models, $settings.lastModelByProvider));
+  }
+
+  // Catalog refresh. The Go side caches per provider with a 24h TTL and
+  // warms it at startup; this is the manual override for "the provider
+  // shipped something an hour ago".
+  let refreshing = false;
+  let refreshError = '';
+  async function refreshModels() {
+    const provider = display?.provider;
+    if (!provider || refreshing) return;
+    refreshing = true;
+    refreshError = '';
+    try {
+      await RefreshModels(provider);
+      // The parent owns the `models` prop; tell it to re-read.
+      dispatch('modelsRefreshed', { provider });
+    } catch (e) {
+      refreshError = String(e);
+    } finally {
+      refreshing = false;
+    }
   }
 
   // Collapsible sections.
@@ -140,6 +171,15 @@
           <div class="select-item {$isModSelected(m) ? 'bg-accent' : ''}" use:melt={$modSelOpt({ value: m, label: m })}>{m}</div>
         {/each}
       </div>
+    {/if}
+    <div class="flex flex-row items-center gap-2 mt-1">
+      <button class="mini-btn" on:click={refreshModels} disabled={busy || refreshing || !display?.provider}>
+        {refreshing ? 'Refreshing…' : 'Refresh list'}
+      </button>
+      <span class="text-fg-faint text-[0.72rem]">{models.length} model{models.length === 1 ? '' : 's'}</span>
+    </div>
+    {#if refreshError}
+      <div class="text-[0.72rem] text-error-fg mt-1">{refreshError}</div>
     {/if}
   </div>
 </section>

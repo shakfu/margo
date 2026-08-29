@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/shakfu/margo/pkg/margo/agent"
 )
 
 // PermissionDecision is the user's response to a tool-permission prompt.
@@ -82,7 +84,10 @@ func (b *PermissionBroker) gate(emit func(id, name, args string), approvedSet ma
 		case <-gctx.Done():
 			return false, gctx.Err()
 		case d := <-ch:
-			if d.Always && d.Approved {
+			// "Always" is dropped for tools whose risk lives in their
+			// arguments rather than their identity — approving one
+			// invocation must not pre-approve the next.
+			if d.Always && d.Approved && agent.AllowsAlwaysApprove(name) {
 				approvedMu.Lock()
 				approvedSet[name] = true
 				approvedMu.Unlock()

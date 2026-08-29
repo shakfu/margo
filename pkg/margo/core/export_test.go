@@ -111,8 +111,8 @@ func TestCompactOneLineTruncates(t *testing.T) {
 
 func TestHumanSize(t *testing.T) {
 	cases := map[int64]string{
-		512:           "512 B",
-		2048:          "2.0 KB",
+		512:             "512 B",
+		2048:            "2.0 KB",
 		5 * 1024 * 1024: "5.0 MB",
 	}
 	for in, want := range cases {

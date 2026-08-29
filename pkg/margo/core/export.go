@@ -12,16 +12,16 @@ import (
 // Fields are deliberately denormalized (PersonaName / AgentName as
 // strings rather than ids) so the renderer needs no lookup tables.
 type ChatExport struct {
-	Title       string             `json:"title"`
-	Provider    string             `json:"provider"`
-	Model       string             `json:"model"`
-	PersonaName string             `json:"personaName,omitempty"`
-	AgentName   string             `json:"agentName,omitempty"`
-	CreatedAt   string             `json:"createdAt,omitempty"` // ISO 8601 or any human string
-	UpdatedAt   string             `json:"updatedAt,omitempty"`
-	TokensIn    int                `json:"tokensIn,omitempty"`
-	TokensOut   int                `json:"tokensOut,omitempty"`
-	Messages    []ExportMessage    `json:"messages"`
+	Title       string          `json:"title"`
+	Provider    string          `json:"provider"`
+	Model       string          `json:"model"`
+	PersonaName string          `json:"personaName,omitempty"`
+	AgentName   string          `json:"agentName,omitempty"`
+	CreatedAt   string          `json:"createdAt,omitempty"` // ISO 8601 or any human string
+	UpdatedAt   string          `json:"updatedAt,omitempty"`
+	TokensIn    int             `json:"tokensIn,omitempty"`
+	TokensOut   int             `json:"tokensOut,omitempty"`
+	Messages    []ExportMessage `json:"messages"`
 }
 
 // ExportMessage is one turn in the chat. Content is rendered verbatim

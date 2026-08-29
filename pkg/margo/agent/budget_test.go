@@ -118,3 +118,70 @@ func TestBudgetForModelFallback(t *testing.T) {
 		t.Errorf("unknown model: got %d, want fallback %d", got, defaultContextWindow)
 	}
 }
+
+// TestEstimateCountsAttachmentBytes is the regression net for the
+// budget hole: a turn carrying a large attachment used to estimate at
+// roughly four tokens, so the rewriter never trimmed and the provider
+// rejected the request instead.
+func TestEstimateCountsAttachmentBytes(t *testing.T) {
+	text := margo.Message{Role: margo.RoleUser, Content: "describe this"}
+	withImage := margo.Message{
+		Role:    margo.RoleUser,
+		Content: "describe this",
+		Parts: []margo.Part{
+			{Kind: margo.PartText, Text: "describe this"},
+			{Kind: margo.PartImage, MimeType: "image/png", Data: make([]byte, 3*1024*1024)},
+		},
+	}
+
+	bare := estimateMargoTokens(text)
+	loaded := estimateMargoTokens(withImage)
+	if loaded <= bare {
+		t.Fatalf("attachment added %d tokens to the estimate; want a large increase", loaded-bare)
+	}
+	if loaded < 1000 {
+		t.Errorf("3 MB image estimated at %d tokens, which is implausibly low", loaded)
+	}
+}
+
+func TestEstimatePartTokens(t *testing.T) {
+	// A document is capped at the extraction limit, so a huge PDF
+	// cannot dominate the estimate without bound.
+	huge := margo.Part{Kind: margo.PartDocument, MimeType: "application/pdf", Data: make([]byte, 50*1024*1024)}
+	if got, want := estimatePartTokens(huge), margo.MaxExtractedDocChars/4; got != want {
+		t.Errorf("document estimate = %d, want the %d cap", got, want)
+	}
+
+	// Even a one-byte image costs the floor.
+	tiny := margo.Part{Kind: margo.PartImage, Data: []byte{0x1}}
+	if got := estimatePartTokens(tiny); got != minImageTokens {
+		t.Errorf("tiny image estimate = %d, want the %d floor", got, minImageTokens)
+	}
+
+	if got := estimatePartTokens(margo.Part{Kind: margo.PartText, Text: "abcdefgh"}); got != 2 {
+		t.Errorf("text estimate = %d, want 2", got)
+	}
+}
+
+// With attachments counted, an over-budget history actually trims.
+func TestRewriteMargoForBudgetTrimsAttachmentHeavyHistory(t *testing.T) {
+	img := func() margo.Message {
+		return margo.Message{
+			Role:    margo.RoleUser,
+			Content: "look",
+			Parts: []margo.Part{
+				{Kind: margo.PartImage, MimeType: "image/png", Data: make([]byte, 2*1024*1024)},
+			},
+		}
+	}
+	msgs := []margo.Message{img(), img(), img(), {Role: margo.RoleUser, Content: "and now?"}}
+
+	got := RewriteMargoForBudget(msgs, "", 8000)
+	if len(got) >= len(msgs) {
+		t.Fatalf("nothing was trimmed: %d messages in, %d out", len(msgs), len(got))
+	}
+	// The user's latest ask must survive.
+	if got[len(got)-1].Content != "and now?" {
+		t.Errorf("final turn was dropped: %+v", got[len(got)-1])
+	}
+}

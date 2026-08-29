@@ -14,6 +14,8 @@ import (
 
 	"github.com/cloudwego/eino/components/tool"
 	toolutils "github.com/cloudwego/eino/components/tool/utils"
+
+	"github.com/shakfu/margo/internal/pathsafe"
 )
 
 // outputCreatedRe matches quarto's "Output created: <path>" line. The path
@@ -96,6 +98,15 @@ func DefaultOutputDir() (string, error) {
 	return dir, nil
 }
 
+// ErrPathEscapesRoot is the tool-facing alias for pathsafe.ErrEscapesRoot.
+// Kept so callers and tests in this package match on one name.
+var ErrPathEscapesRoot = pathsafe.ErrEscapesRoot
+
+// containedPath confines a model-supplied path to root.
+func containedPath(root, candidate string) (string, error) {
+	return pathsafe.Contained(root, candidate)
+}
+
 // quartoFormats is the allowlist of output formats accepted by the tool.
 // Restricting this prevents the model from passing arbitrary strings into
 // `--to`, which quarto would otherwise forward to pandoc unchecked.
@@ -132,20 +143,38 @@ type quartoArgs struct {
 	OutputDir string `json:"output_dir,omitempty" jsonschema:"description=Optional directory for the rendered output, relative to the input's directory. When omitted quarto writes alongside the input."`
 }
 
+// QuartoOptions configures QuartoRenderTool.
+type QuartoOptions struct {
+	// OutputDir is the only directory the tool may write into. Every
+	// path the model supplies is resolved against it and rejected when
+	// it escapes. Pass "" to fall back to a fresh os.MkdirTemp
+	// directory (used by tests); the sandbox root is then that temp
+	// directory, so containment holds either way.
+	OutputDir string
+
+	// Execute enables Quarto's computational cells (`{python}`, `{r}`,
+	// …). Off by default: a `.qmd` body is model-authored input, and
+	// executing it is arbitrary code execution on the user's machine.
+	// When false the tool passes `--no-execute`, which renders the
+	// source of code cells without running them.
+	Execute bool
+}
+
 // QuartoRenderTool renders a quarto document to the requested format using
 // the local `quarto` CLI. Only register this tool when QuartoAvailable()
 // returns true; margo does not bundle the binary.
 //
-// outputDir is the directory used by the create-and-render path when the
-// caller (model) supplies `content` without `input`. Pass "" to fall back
-// to a fresh os.MkdirTemp directory (mainly useful for tests).
-func QuartoRenderTool(outputDir string) tool.InvokableTool {
+// Both the create-and-render write target and the `output_dir` argument
+// are confined to opts.OutputDir. Without that confinement a model could
+// name any path on the filesystem as `input` and have the tool write
+// model-authored bytes there before quarto ever runs.
+func QuartoRenderTool(opts QuartoOptions) tool.InvokableTool {
 	fn := func(ctx context.Context, a quartoArgs) (string, error) {
-		return runQuartoRender(ctx, a, outputDir)
+		return runQuartoRender(ctx, a, opts)
 	}
 	t, err := toolutils.InferTool(
 		"quarto_render",
-		"Creates and/or renders a Quarto document to the requested output format using the local `quarto` CLI. Two usage modes:\n\n1. RENDER EXISTING: pass `input` pointing to an existing `.qmd` / `.md` / `.ipynb` file (or quarto project directory). Leave `content` empty.\n2. CREATE-AND-RENDER: pass `content` with the full Quarto source (YAML frontmatter + markdown body). The tool writes it to `input` (or a temp path if `input` is omitted) and then renders. Use this mode whenever the user asks you to *make* or *generate* a document — there is no separate file-write tool, so the model must supply the source via `content`.\n\nQuarto documents use the `.qmd` extension and start with a YAML frontmatter block delimited by `---` lines that declares the title and (optionally) a `format:` map. The `format:` map keys output formats to per-format option blocks; each format takes its own keys, e.g. for HTML:\n\n---\ntitle: \"My document\"\nauthor: \"the author\"\nformat:\n  html:\n    toc: true\n    html-math-method: katex\n---\n\nfor PDF:\n\n---\ntitle: \"My document\"\nformat:\n  pdf:\n    toc: true\n    number-sections: true\n    colorlinks: true\n---\n\nMultiple formats may coexist under the same `format:` key. If the document's YAML already pins a format (or set of formats), omit the `to` argument so quarto uses what the author specified. Pass `to` only when the user explicitly asks for a different target. Supports html, pdf, docx, pptx, revealjs, beamer, latex, typst, and other pandoc targets. Returns quarto's stdout/stderr followed by an `Output file: <abs-path>` line and a `Markdown link to use verbatim in your reply: [<basename>](file://<abs-path>)` line. When telling the user where their rendered document is, paste that markdown link verbatim — do NOT replace it with a bare filename, bold text, or a relative-path link, none of which are clickable in margo's UI. Files generated via the create-and-render path land in `~/Documents/Margo/outputs/` so the user can find them in Finder/Explorer.",
+		"Creates and/or renders a Quarto document to the requested output format using the local `quarto` CLI. Two usage modes:\n\n1. RENDER EXISTING: pass `input` pointing to an existing `.qmd` / `.md` / `.ipynb` file (or quarto project directory). Leave `content` empty.\n2. CREATE-AND-RENDER: pass `content` with the full Quarto source (YAML frontmatter + markdown body). The tool writes it to `input` (or a temp path if `input` is omitted) and then renders. Use this mode whenever the user asks you to *make* or *generate* a document — there is no separate file-write tool, so the model must supply the source via `content`.\n\nQuarto documents use the `.qmd` extension and start with a YAML frontmatter block delimited by `---` lines that declares the title and (optionally) a `format:` map. The `format:` map keys output formats to per-format option blocks; each format takes its own keys, e.g. for HTML:\n\n---\ntitle: \"My document\"\nauthor: \"the author\"\nformat:\n  html:\n    toc: true\n    html-math-method: katex\n---\n\nfor PDF:\n\n---\ntitle: \"My document\"\nformat:\n  pdf:\n    toc: true\n    number-sections: true\n    colorlinks: true\n---\n\nMultiple formats may coexist under the same `format:` key. If the document's YAML already pins a format (or set of formats), omit the `to` argument so quarto uses what the author specified. Pass `to` only when the user explicitly asks for a different target. Supports html, pdf, docx, pptx, revealjs, beamer, latex, typst, and other pandoc targets. Returns quarto's stdout/stderr followed by an `Output file: <abs-path>` line and a `Markdown link to use verbatim in your reply: [<basename>](file://<abs-path>)` line. When telling the user where their rendered document is, paste that markdown link verbatim — do NOT replace it with a bare filename, bold text, or a relative-path link, none of which are clickable in margo's UI. Files generated via the create-and-render path land in `~/Documents/Margo/outputs/` so the user can find them in Finder/Explorer.\n\nPATH RULES: `input` and `output_dir` must stay inside that outputs directory. Absolute paths elsewhere, and `..` segments, are rejected — write the document under the outputs directory and it will render. CODE CELLS: computational cells are NOT executed by default; their source is rendered as-is. Do not rely on cell output appearing in the result.",
 		fn,
 	)
 	if err != nil {
@@ -154,7 +183,7 @@ func QuartoRenderTool(outputDir string) tool.InvokableTool {
 	return t
 }
 
-func runQuartoRender(ctx context.Context, a quartoArgs, outputDir string) (string, error) {
+func runQuartoRender(ctx context.Context, a quartoArgs, opts QuartoOptions) (string, error) {
 	input := strings.TrimSpace(a.Input)
 	content := a.Content
 	if input == "" && strings.TrimSpace(content) == "" {
@@ -168,21 +197,31 @@ func runQuartoRender(ctx context.Context, a quartoArgs, outputDir string) (strin
 		return "", fmt.Errorf("unsupported format %q (allowed: html, pdf, docx, pptx, odt, rtf, epub, revealjs, beamer, latex, markdown, gfm, asciidoc, typst, ipynb, jats, mediawiki, commonmark)", format)
 	}
 
+	// Establish the sandbox root before touching any model-supplied path.
+	// An empty OutputDir means "tests / no configured root": mint a temp
+	// directory and confine to that, so there is no unconfined branch.
+	root := opts.OutputDir
+	if root == "" {
+		tmp, err := os.MkdirTemp("", "margo-quarto-*")
+		if err != nil {
+			return "", fmt.Errorf("create temp dir: %w", err)
+		}
+		root = tmp
+	} else if err := os.MkdirAll(root, 0o755); err != nil {
+		return "", fmt.Errorf("create output dir: %w", err)
+	}
+
 	// CREATE-AND-RENDER: materialize content to disk before invoking quarto.
 	if strings.TrimSpace(content) != "" {
 		if input == "" {
-			dir := outputDir
-			if dir == "" {
-				tmp, err := os.MkdirTemp("", "margo-quarto-*")
-				if err != nil {
-					return "", fmt.Errorf("create temp dir: %w", err)
-				}
-				dir = tmp
-			} else if err := os.MkdirAll(dir, 0o755); err != nil {
-				return "", fmt.Errorf("create output dir: %w", err)
-			}
-			input = uniquePath(dir, slugFromContent(content), ".qmd")
-		} else if err := os.MkdirAll(filepath.Dir(input), 0o755); err != nil {
+			input = uniquePath(root, slugFromContent(content), ".qmd")
+		}
+		abs, err := containedPath(root, input)
+		if err != nil {
+			return "", fmt.Errorf("input %q: %w (documents must be written under %s)", input, err, root)
+		}
+		input = abs
+		if err := os.MkdirAll(filepath.Dir(input), 0o755); err != nil {
 			return "", fmt.Errorf("create input parent dir: %w", err)
 		}
 		if err := os.WriteFile(input, []byte(content), 0o644); err != nil {
@@ -190,17 +229,35 @@ func runQuartoRender(ctx context.Context, a quartoArgs, outputDir string) (strin
 		}
 	}
 
-	absInput, err := filepath.Abs(input)
+	// RENDER EXISTING also stays inside the root: quarto writes its
+	// output next to the input, so an unconfined input is an unconfined
+	// write even when the tool itself writes nothing.
+	absInput, err := containedPath(root, input)
 	if err != nil {
-		return "", fmt.Errorf("resolve input path: %w", err)
+		return "", fmt.Errorf("input %q: %w (renderable documents must live under %s)", input, err, root)
 	}
 	if _, err := os.Stat(absInput); err != nil {
 		return "", fmt.Errorf("input not found: %w", err)
 	}
 
 	cmdArgs := []string{"render", absInput, "--to", format}
+	if !opts.Execute {
+		// Model-authored source is not trusted to run. Rendering the
+		// cell source without evaluating it keeps the document useful.
+		cmdArgs = append(cmdArgs, "--no-execute")
+	}
 	if dir := strings.TrimSpace(a.OutputDir); dir != "" {
-		cmdArgs = append(cmdArgs, "--output-dir", dir)
+		// output_dir is documented as relative to the input's directory;
+		// resolve it that way, then confine like every other path.
+		candidate := dir
+		if !filepath.IsAbs(candidate) {
+			candidate = filepath.Join(filepath.Dir(absInput), candidate)
+		}
+		outDir, err := containedPath(root, candidate)
+		if err != nil {
+			return "", fmt.Errorf("output_dir %q: %w (must stay under %s)", dir, err, root)
+		}
+		cmdArgs = append(cmdArgs, "--output-dir", outDir)
 	}
 
 	runCtx, cancel := context.WithTimeout(ctx, quartoRenderTimeout)

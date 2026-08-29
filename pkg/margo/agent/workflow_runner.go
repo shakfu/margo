@@ -2,13 +2,10 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"time"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/shakfu/margo/pkg/margo"
@@ -52,22 +49,7 @@ func (WorkflowRunner) Run(
 	gate PermissionGate,
 	emit func(StepEvent),
 ) error {
-	if emit == nil {
-		emit = func(StepEvent) {}
-	}
-	ctx = WithStepEmitter(ctx, emit)
-
-	middlewares := []compose.ToolMiddleware{abortOnCtxCancel}
-	if gate != nil {
-		middlewares = append([]compose.ToolMiddleware{permissionMiddleware(gate)}, middlewares...)
-	}
-
-	// Single adapter shared across stages; each ChatModelAgent
-	// calls WithTools on it to bind whichever tool surface it
-	// wants. Attachments are stamped onto the final user message
-	// once and ride through to every stage via the kit's
-	// cross-agent message history.
-	adapter := NewAdapter(c, defaults).WithFinalUserAttachments(attachments)
+	run := prepareRun(ctx, c, defaults, attachments, gate, emit)
 
 	stages := []struct {
 		name        string
@@ -103,74 +85,28 @@ func (WorkflowRunner) Run(
 	}
 
 	subAgents := make([]adk.Agent, 0, len(stages))
-	for _, s := range stages {
-		toolsConfig := adk.ToolsConfig{}
-		if len(s.tools) > 0 {
-			toolsConfig = adk.ToolsConfig{
-				ToolsNodeConfig: compose.ToolsNodeConfig{
-					Tools:               s.tools,
-					ToolCallMiddlewares: middlewares,
-				},
-			}
-		}
-		a, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-			Name:        s.name,
-			Description: s.description,
-			Instruction: s.instruction,
-			Model:       adapter,
-			ToolsConfig: toolsConfig,
+	for _, st := range stages {
+		a, err := adk.NewChatModelAgent(run.ctx, &adk.ChatModelAgentConfig{
+			Name:        st.name,
+			Description: st.description,
+			Instruction: st.instruction,
+			Model:       run.adapter,
+			ToolsConfig: run.toolsConfig(st.tools),
 		})
 		if err != nil {
-			return fmt.Errorf("workflow: new %s agent: %w", s.name, err)
+			return fmt.Errorf("workflow: new %s agent: %w", st.name, err)
 		}
 		subAgents = append(subAgents, a)
 	}
 
-	entry, err := adk.NewSequentialAgent(ctx, &adk.SequentialAgentConfig{
+	entry, err := adk.NewSequentialAgent(run.ctx, &adk.SequentialAgentConfig{
 		Name:        "margo-workflow",
-		Description: "Three-stage drafter → critic → refiner writing pipeline.",
+		Description: "Three-stage drafter -> critic -> refiner writing pipeline.",
 		SubAgents:   subAgents,
 	})
 	if err != nil {
 		return fmt.Errorf("workflow: assemble sequential: %w", err)
 	}
 
-	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		EnableStreaming: true,
-		Agent:           entry,
-	})
-
-	started := time.Now()
-	var firstToken time.Time
-	usage := margo.Usage{}
-
-	iter := runner.Run(ctx, input)
-	for {
-		ev, ok := iter.Next()
-		if !ok {
-			break
-		}
-		if ev == nil {
-			continue
-		}
-		if ev.Err != nil {
-			if errors.Is(ev.Err, context.Canceled) || errors.Is(ev.Err, context.DeadlineExceeded) {
-				return ev.Err
-			}
-			emit(StepEvent{Kind: StepError, Text: ev.Err.Error()})
-			return ev.Err
-		}
-		if err := bridgeAgentEvent(ev, emit, &firstToken, &usage); err != nil {
-			return err
-		}
-	}
-
-	now := time.Now()
-	usage.TotalMs = now.Sub(started).Milliseconds()
-	if !firstToken.IsZero() {
-		usage.FirstTokenMs = firstToken.Sub(started).Milliseconds()
-	}
-	u := usage
-	emit(StepEvent{Kind: StepDone, Usage: &u})
-	return nil
+	return runADKAgent(run.ctx, entry, input, run.emit)
 }

@@ -163,6 +163,11 @@ type ToolMetadata struct {
 	Description  string `json:"description"`
 	IsReadOnly   bool   `json:"isReadOnly"`
 	IsStreamable bool   `json:"isStreamable"`
+	// AllowsAlways is false for tools whose approval may not be made
+	// permanent; front-ends hide the "Always" button for those. The
+	// Go side enforces the same rule, so a front-end that ignores this
+	// gains nothing.
+	AllowsAlways bool `json:"allowsAlways"`
 }
 
 // ChatRequest is the input to Session.Chat / Session.Stream.

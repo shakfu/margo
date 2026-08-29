@@ -78,6 +78,13 @@ A chat is where the other concepts meet. Each chat belongs to exactly one worksp
 
 A **workspace** is a named context for chats. Each workspace has its own chat history, its own knowledge index (see below), its own default persona, its own set of enabled tools, and optionally its own settings overrides (model, temperature, system prompt). The active workspace narrows the chat list, routes the active knowledge-source list, and supplies the tool palette agents see — switching workspaces effectively swaps the entire conversational context.
 
+Settings overrides have two scopes, which is worth knowing before you wonder why a change did not stick:
+
+- In a **named workspace**, changes made in the right-hand settings pane are stored on that workspace and persist across restarts.
+- In the **Default** workspace, the same changes are session-scoped. Default is treated as a scratch layer over your global defaults, so a temperature or system-prompt tweak there lasts until you quit. Use the Cmd+, dialog to change the durable global value.
+
+The model is the exception to that rule. It is recorded per provider and re-applied when the app starts, so a model choice survives a restart in either scope, and switching provider and back restores what you last used with it.
+
 Personas may be **global** (visible in every workspace) or **workspace-scoped** (visible only when that workspace is active). Built-in personas are always global.
 
 ## Knowledge sources

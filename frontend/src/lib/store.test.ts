@@ -163,3 +163,152 @@ describe('loadSettings — legacy agent → persona migration (§9.4)', () => {
     expect(s.personas.some(p => p.id === 'builtin-time-aware')).toBe(false);
   });
 });
+
+describe('per-provider model memory', () => {
+  test('modelForProvider prefers the remembered model', async () => {
+    const { modelForProvider } = await freshStore();
+    const remembered = { openai: 'gpt-5.5', anthropic: 'claude-opus-4-7' };
+    expect(modelForProvider('openai', ['gpt-5.4-nano', 'gpt-5.5'], remembered)).toBe('gpt-5.5');
+  });
+
+  test('modelForProvider falls back to the catalog default when the memory is stale', async () => {
+    const { modelForProvider } = await freshStore();
+    // The remembered model is no longer offered — a retired model, or a
+    // catalog refresh that dropped it.
+    const remembered = { openai: 'gpt-4-retired' };
+    expect(modelForProvider('openai', ['gpt-5.4-nano', 'gpt-5.5'], remembered)).toBe('gpt-5.4-nano');
+  });
+
+  test('modelForProvider handles an unknown provider and an empty catalog', async () => {
+    const { modelForProvider } = await freshStore();
+    expect(modelForProvider('mystery', ['a', 'b'], {})).toBe('a');
+    expect(modelForProvider('openai', [], { openai: 'x' })).toBe('');
+  });
+
+  test('loadSettings seeds the memory from a pre-upgrade single model field', async () => {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+      provider: 'anthropic',
+      model: 'claude-opus-4-7',
+      workspaces: [{ id: DEFAULT_WORKSPACE_ID, name: 'Default', createdAt: 0, updatedAt: 0 }],
+      activeWorkspaceId: DEFAULT_WORKSPACE_ID,
+    }));
+    const { loadSettings } = await freshStore();
+    const s = loadSettings();
+    expect(s.lastModelByProvider.anthropic).toBe('claude-opus-4-7');
+  });
+
+  test('loadSettings does not clobber an existing memory entry', async () => {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5',
+      lastModelByProvider: { anthropic: 'claude-opus-4-7' },
+      workspaces: [{ id: DEFAULT_WORKSPACE_ID, name: 'Default', createdAt: 0, updatedAt: 0 }],
+      activeWorkspaceId: DEFAULT_WORKSPACE_ID,
+    }));
+    const { loadSettings } = await freshStore();
+    expect(loadSettings().lastModelByProvider.anthropic).toBe('claude-opus-4-7');
+  });
+
+  test('loadSettings repairs a malformed memory field', async () => {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+      lastModelByProvider: 'not-an-object',
+      workspaces: [{ id: DEFAULT_WORKSPACE_ID, name: 'Default', createdAt: 0, updatedAt: 0 }],
+      activeWorkspaceId: DEFAULT_WORKSPACE_ID,
+    }));
+    const { loadSettings } = await freshStore();
+    expect(loadSettings().lastModelByProvider).toEqual({});
+  });
+
+  test('a fresh install starts with an empty memory', async () => {
+    const { loadSettings } = await freshStore();
+    expect(loadSettings().lastModelByProvider).toEqual({});
+  });
+});
+
+// The reported bug, end to end: pick a model in the Default workspace,
+// restart, watch it revert to the catalog's first entry.
+//
+// This exercises the real chain rather than the pure helper — persisted
+// settings, the session-scoped override path, and the effectiveSettings
+// projection — because the fault was in how those compose, not in any
+// one of them.
+describe('remembered model survives a restart', () => {
+  const persistedAfterPickingLuna = {
+    provider: 'openai',
+    // Session-scoped picks in the Default workspace never reach this
+    // field, so it still holds whatever was last written globally.
+    model: 'gpt-5.4-nano',
+    lastModelByProvider: { openai: 'gpt-5.6-luna' },
+    workspaces: [{ id: DEFAULT_WORKSPACE_ID, name: 'Default', createdAt: 0, updatedAt: 0 }],
+    activeWorkspaceId: DEFAULT_WORKSPACE_ID,
+  };
+
+  test('the memory survives the reload even though settings.model does not', async () => {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(persistedAfterPickingLuna));
+    const { loadSettings } = await freshStore();
+    const s = loadSettings();
+    expect(s.lastModelByProvider.openai).toBe('gpt-5.6-luna');
+    // This is the stale value the picker used to snap back to.
+    expect(s.model).toBe('gpt-5.4-nano');
+  });
+
+  test('a fresh session starts on the stale model and is then restored', async () => {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(persistedAfterPickingLuna));
+    const store = await freshStore();
+    const { get } = await import('svelte/store');
+
+    // Session overrides start empty on every launch, so the effective
+    // model is the stale one. This is the reverted state the user saw.
+    expect(get(store.effectiveSettings).model).toBe('gpt-5.4-nano');
+
+    // The catalog arrives and contains the remembered model.
+    const catalog = ['gpt-5.4-nano', 'gpt-5.4-mini', 'gpt-5.6-luna'];
+    const want = store.modelToRestore(
+      'openai',
+      catalog,
+      get(store.settings).lastModelByProvider,
+      get(store.effectiveSettings).model,
+    );
+    expect(want).toBe('gpt-5.6-luna');
+
+    // App.svelte applies it through the same path a user pick takes.
+    store.setEffectiveOverride('model', want);
+    expect(get(store.effectiveSettings).model).toBe('gpt-5.6-luna');
+
+    // And it is now a no-op, so it cannot fight a later in-session pick.
+    expect(
+      store.modelToRestore('openai', catalog, get(store.settings).lastModelByProvider, get(store.effectiveSettings).model),
+    ).toBe('');
+  });
+
+  test('a cold start with only the seed leaves the selection alone', async () => {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(persistedAfterPickingLuna));
+    const store = await freshStore();
+    const { get } = await import('svelte/store');
+
+    // Before the live fetch lands, Models() returns the embedded seed,
+    // which has no gpt-5.6-luna. Restoring a fallback here would
+    // overwrite the memory and recreate the bug.
+    const seedOnly = ['gpt-5.4-nano', 'gpt-5.4-mini', 'gpt-5.4'];
+    expect(
+      store.modelToRestore('openai', seedOnly, get(store.settings).lastModelByProvider, 'gpt-5.4-nano'),
+    ).toBe('');
+    expect(get(store.settings).lastModelByProvider.openai).toBe('gpt-5.6-luna');
+  });
+
+  test('an in-session pick updates the memory, so the next restart restores it', async () => {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(persistedAfterPickingLuna));
+    const store = await freshStore();
+    const { get } = await import('svelte/store');
+
+    store.rememberModel('openai', 'gpt-5.5-pro');
+    store.setEffectiveOverride('model', 'gpt-5.5-pro');
+    expect(get(store.settings).lastModelByProvider.openai).toBe('gpt-5.5-pro');
+
+    // Simulate the next launch: overrides gone, memory intact.
+    const catalog = ['gpt-5.4-nano', 'gpt-5.5-pro', 'gpt-5.6-luna'];
+    expect(
+      store.modelToRestore('openai', catalog, get(store.settings).lastModelByProvider, 'gpt-5.4-nano'),
+    ).toBe('gpt-5.5-pro');
+  });
+});

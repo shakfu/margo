@@ -9,12 +9,21 @@ import (
 
 // toMargoMessages translates the public Message slice into the provider-
 // facing margo.Message slice. Unknown role strings collapse to user.
+//
+// "system" maps through rather than collapsing, matching
+// toSchemaMessages below. Both provider adapters already route a
+// RoleSystem entry to the request's system field; collapsing it to user
+// silently turned a system instruction into something the model reads
+// as the user talking.
 func toMargoMessages(in []Message) []margo.Message {
 	out := make([]margo.Message, len(in))
 	for i, m := range in {
 		role := margo.RoleUser
-		if m.Role == "assistant" {
+		switch m.Role {
+		case "assistant":
 			role = margo.RoleAssistant
+		case "system":
+			role = margo.RoleSystem
 		}
 		out[i] = margo.Message{Role: role, Content: m.Content}
 	}

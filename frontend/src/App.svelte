@@ -1,10 +1,19 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { createDialog, melt } from '@melt-ui/svelte';
-  import { Providers, Models, Chat, StreamChat, StreamAgent, CancelStream, Tools, OutputDir, OpenPath, RespondPermission, StartupWorkspaceDir, SetActiveWorkspace, SaveAttachment, ExportChatMarkdown } from '../wailsjs/go/main/App.js';
+  import { createDialog, createPopover, melt } from '@melt-ui/svelte';
+  import { Providers, Models, Chat, StreamChat, StreamAgent, CancelStream, Tools, ToolsMetadata, OutputDir, OpenPath, RespondPermission, StartupWorkspaceDir, SetActiveWorkspace, SaveAttachment, LoadAttachment, ExportChatMarkdown } from '../wailsjs/go/main/App.js';
   import { EventsOn, EventsOff, BrowserOpenURL } from '../wailsjs/runtime/runtime.js';
   import { mathjax } from './lib/mathjax';
   import { renderMarkdownStreaming, setHighlightTheme } from './lib/markdown';
+  import { subscribeStream } from './lib/stream';
+
+  // Cost breakdown popover. The header carries the total; the split by
+  // model sits behind a click because most chats use one model and have
+  // nothing to show.
+  const {
+    elements: { trigger: costTrigger, content: costContent },
+    states: { open: costOpen },
+  } = createPopover({ positioning: { placement: 'bottom' } });
   import {
     chats,
     activeChat,
@@ -30,11 +39,14 @@
     activeWorkspace,
     setActiveWorkspace,
     isMultimodal,
-    hasCost,
-    costFor,
+    costBreakdown,
     formatCost,
+    modelToRestore,
+    setEffectiveOverride,
     type Usage,
-    type AgentStep
+    type AgentStep,
+    type Message,
+    type StoredAttachment
   } from './lib/store';
   import ChatList from './lib/ChatList.svelte';
   import SettingsPanel from './lib/SettingsPanel.svelte';
@@ -114,25 +126,53 @@
   // SettingsPanel still binds to the global provider; this fetch is
   // about the list shown for outbound chat.
   $: if ($effectiveSettings.provider) {
-    Models($effectiveSettings.provider).then(m => { models = m; });
+    reloadModels($effectiveSettings.provider);
   }
+
+  function reloadModels(provider: string) {
+    if (!provider) return;
+    Models(provider).then(m => { models = m; });
+  }
+
+  // Re-apply the remembered model once the provider's catalog is known.
+  //
+  // Recording the pick is not enough: in the Default workspace model
+  // changes are session-scoped by design, so they never reach persisted
+  // settings, and the only other reader was a repair branch that fires
+  // solely when the current model has vanished from the catalog. The
+  // result was a memory written on every pick and read on none.
+  //
+  // Latched per provider so this runs once when the catalog arrives and
+  // never contends with a later in-session pick — and a pick updates the
+  // memory anyway, which makes the restore a no-op.
+  const restoredProviders = new Set<string>();
+  $: {
+    const p = $effectiveSettings.provider;
+    if (p && !restoredProviders.has(p)) {
+      const want = modelToRestore(p, models, $settings.lastModelByProvider, $effectiveSettings.model);
+      if (want) {
+        restoredProviders.add(p);
+        setEffectiveOverride('model', want);
+      }
+    }
+  }
+
+  // Tools whose approval may not be made permanent — quarto_render and
+  // anything else the Go side marks allowsAlways=false. The prompt
+  // hides "Always" for these; Go enforces the same rule regardless.
+  let noAlwaysTools = new Set<string>();
+  $: canAlwaysApprove = (name: string) => !noAlwaysTools.has(name);
 
   // Context usage for the active chat. Uses the *effective* model so a
   // workspace override of the model picks the right context window.
   $: ctxWindow = contextWindowFor($effectiveSettings.model, $modelCatalog);
   $: ctxUsed = ($activeChat?.tokensIn ?? 0) + ($activeChat?.tokensOut ?? 0);
-  // Running USD cost for the active chat. Sums input + output tokens
-  // accumulated across the conversation against the effective model's
-  // per-MTok rates from the catalog. Hidden when the model has no
-  // declared rates — see hasCost / costFor in store.ts for the
-  // present-vs-unknown distinction.
-  $: chatCost = costFor(
-    $effectiveSettings.model,
-    $activeChat?.tokensIn ?? 0,
-    $activeChat?.tokensOut ?? 0,
-    $modelCatalog,
-  );
-  $: showCost = hasCost($effectiveSettings.model, $modelCatalog) && ctxUsed > 0;
+  // Running USD cost for the active chat, priced per turn against the
+  // model that produced it. The header shows only the total; the
+  // per-model split lives behind it, since a single-model chat (the
+  // common case) has nothing to break down.
+  $: costs = costBreakdown($activeChat?.messages ?? [], $modelCatalog);
+  $: showCost = costs.entries.length > 0 || costs.unrecordedTurns > 0;
   // Gate: attachments are pending but the *effective* model isn't on
   // the multimodal allowlist. Disables send + surfaces an inline warning.
   // Only image attachments need a multimodal-capable model. PDFs and
@@ -183,6 +223,15 @@
     // catalog is the source of truth for context-window math and the
     // multimodal allowlist (previously hand-mirrored in store.ts).
     void initModelCatalog();
+    // Reconcile persisted "Always" grants against current policy: a
+    // tool that has since become ineligible must prompt again.
+    ToolsMetadata().then(metas => {
+      noAlwaysTools = new Set(metas.filter(m => !m.allowsAlways).map(m => m.name));
+      settings.update(s => ({
+        ...s,
+        autoApproveTools: (s.autoApproveTools ?? []).filter(t => !noAlwaysTools.has(t)),
+      }));
+    }).catch(() => {});
 
     try {
       providers = await Providers();
@@ -212,6 +261,13 @@
     } catch (_) {}
 
     document.addEventListener('click', handleExternalLinkClick, true);
+    // The Go side warms provider catalogs in the background at startup;
+    // this fires once they settle so the picker and the cost meter pick
+    // up anything the embedded seed did not have.
+    EventsOn('margo:models:refreshed', () => {
+      initModelCatalog();
+      reloadModels($effectiveSettings.provider);
+    });
 
     // Listen for the Margo › Settings… menu item (Cmd+,). Wails fires
     // the event from app.go::openSettings.
@@ -287,6 +343,41 @@
         error = `Failed to read "${file.name}": ${String(e)}`;
       }
     }
+  }
+
+  // loadPriorAttachments rehydrates every stored attachment on earlier
+  // turns, newest first, stopping once the batch would get unreasonably
+  // large. The cap exists because a long chat can accumulate more bytes
+  // than any context window holds; the budget rewriter on the Go side
+  // then trims turns, but there is no reason to ship the bytes across
+  // the IPC boundary just to have them dropped.
+  const MAX_REFED_ATTACHMENTS = 8;
+  const MAX_REFED_BYTES = 24 * 1024 * 1024;
+
+  async function loadPriorAttachments(
+    priorMessages: Message[],
+  ): Promise<{ name: string; mimeType: string; data: string }[]> {
+    const stored: StoredAttachment[] = [];
+    for (let i = priorMessages.length - 1; i >= 0; i--) {
+      for (const a of priorMessages[i].attachments ?? []) {
+        stored.push(a);
+      }
+    }
+    const out: { name: string; mimeType: string; data: string }[] = [];
+    let bytes = 0;
+    for (const a of stored.slice(0, MAX_REFED_ATTACHMENTS)) {
+      if (bytes + a.size > MAX_REFED_BYTES) break;
+      try {
+        const data = await LoadAttachment(a.path);
+        out.push({ name: a.name, mimeType: a.mimeType, data });
+        bytes += a.size;
+      } catch (_) {
+        // Blob gone (user cleared storage, moved the profile). Skip it.
+      }
+    }
+    // Restore chronological order: oldest first, matching how the user
+    // added them.
+    return out.reverse();
   }
 
   function fileToBase64(file: File): Promise<string> {
@@ -461,6 +552,18 @@
     }));
     scrollToBottom();
 
+    // Re-read attachments from earlier turns off disk. Without this the
+    // model saw a document exactly once: history carries role+content
+    // only, so a follow-up question about an attached PDF arrived with
+    // no PDF and read as the model having forgotten it.
+    //
+    // Failures are per-file and non-fatal — a blob the user deleted from
+    // disk should not block the turn, and the note tells the model why
+    // the document is missing rather than letting it hallucinate one.
+    const priorAttachments = await loadPriorAttachments(
+      ($activeChat?.messages ?? []).slice(0, -1),
+    );
+
     // §9.4 retired bundled Agent records. The active role is now just
     // a persona (voice) plus, optionally, a slash-command runner
     // (behavior) — picked per-turn in the parseSlash step above.
@@ -476,9 +579,10 @@
       : availableTools;
     // Snapshot pending attachments and clear immediately — re-using the
     // same array after a send would leak across messages.
-    const sendAttachments = attachments.map(a => ({
-      name: a.name, mimeType: a.mimeType, data: a.data,
-    }));
+    const sendAttachments = [
+      ...priorAttachments,
+      ...attachments.map(a => ({ name: a.name, mimeType: a.mimeType, data: a.data })),
+    ];
     clearAttachments();
 
     if (!$settings.streaming) {
@@ -489,6 +593,10 @@
           content: resp.text,
           thinking: resp.thinking || undefined,
           usage: resp.usage as Usage,
+          // resp.model is what the provider actually served, which can
+          // differ from what we asked for (OpenRouter routes).
+          provider: $effectiveSettings.provider,
+          model: resp.model || $effectiveSettings.model,
         });
         if (resp.usage) setLastUsage(chat.id, resp.usage as Usage);
       } catch (e) {
@@ -500,69 +608,42 @@
       return;
     }
 
-    appendMessage(chat.id, { role: 'assistant', content: '' });
+    appendMessage(chat.id, {
+      role: 'assistant',
+      content: '',
+      provider: $effectiveSettings.provider,
+      model: $effectiveSettings.model,
+    });
     const id = newStreamId();
     activeStreamId = id;
     cancelling = false;
-    const base = `margo:stream:${id}`;
     const targetChatId = chat.id;
 
-    EventsOn(`${base}:chunk`, (payload: { kind: string; text?: string; name?: string; arguments?: string; result?: string; isError?: boolean; permissionId?: string; chunk?: string; hits?: Array<{ path: string; doc?: string; score: number; snippet?: string }> }) => {
-      switch (payload.kind) {
-        case 'thinking':
-          appendThinkingToLast(targetChatId, payload.text ?? '');
-          break;
-        case 'tool_call':
-          appendStepToLast(targetChatId, {
-            kind: 'tool_call',
-            name: payload.name ?? '',
-            arguments: payload.arguments ?? '',
-          });
-          break;
-        case 'tool_stream':
-          appendStepStream(targetChatId, payload.name ?? '', payload.chunk ?? '');
-          break;
-        case 'tool_retrieve':
-          setStepHits(targetChatId, payload.name ?? '', payload.hits ?? []);
-          break;
-        case 'tool_result':
-          updateLastStepResult(
-            targetChatId,
-            payload.name ?? '',
-            payload.result ?? '',
-            !!payload.isError,
-          );
-          break;
-        case 'permission':
-          appendStepToLast(targetChatId, {
-            kind: 'permission',
-            name: payload.name ?? '',
-            arguments: payload.arguments ?? '',
-            permissionId: payload.permissionId,
-            permissionStatus: 'pending',
-          });
-          break;
-        case 'text':
-        default:
-          appendToLast(targetChatId, payload.text ?? '');
-          break;
-      }
-      scrollToBottom();
-    });
-    EventsOn(`${base}:error`, (msg: string) => {
-      error = msg;
-      busy = false;
-      activeStreamId = '';
-      cancelling = false;
-      EventsOff(`${base}:chunk`, `${base}:error`, `${base}:done`);
-    });
-    EventsOn(`${base}:done`, (payload: { usage: Usage | null }) => {
-      if (payload?.usage) setLastUsage(targetChatId, payload.usage);
-      busy = false;
-      activeStreamId = '';
-      cancelling = false;
-      EventsOff(`${base}:chunk`, `${base}:error`, `${base}:done`);
-      scrollToBottom();
+    const teardown = subscribeStream(id, targetChatId, {
+      on: EventsOn,
+      off: (...topics: string[]) => EventsOff(topics[0], ...topics.slice(1)),
+      actions: {
+        appendText: appendToLast,
+        appendThinking: appendThinkingToLast,
+        appendStep: appendStepToLast,
+        appendStepStream,
+        setStepHits,
+        updateStepResult: updateLastStepResult,
+        setUsage: setLastUsage,
+      },
+      onChunk: scrollToBottom,
+      onError: (msg) => {
+        error = msg;
+        busy = false;
+        activeStreamId = '';
+        cancelling = false;
+      },
+      onDone: () => {
+        busy = false;
+        activeStreamId = '';
+        cancelling = false;
+        scrollToBottom();
+      },
     });
 
     try {
@@ -578,7 +659,7 @@
       busy = false;
       activeStreamId = '';
       cancelling = false;
-      EventsOff(`${base}:chunk`, `${base}:error`, `${base}:done`);
+      teardown();
     }
   }
 
@@ -603,7 +684,7 @@
   ) {
     const approved = decision !== 'deny';
     const always = decision === 'always';
-    if (always) {
+    if (always && canAlwaysApprove(toolName)) {
       const cur = $settings.autoApproveTools ?? [];
       if (!cur.includes(toolName)) {
         settings.update(s => ({ ...s, autoApproveTools: [...cur, toolName] }));
@@ -727,10 +808,50 @@
         <span class="badge">{$effectiveSettings.provider || 'no provider'}</span>
         {#if $effectiveSettings.model}<span class="badge">{$effectiveSettings.model}</span>{/if}
         {#if showCost}
-          <span
-            class="badge"
-            title="Approximate USD cost for this chat. Excludes prompt-cache discounts and assumes the uncached rate from models.json — overestimates rather than underestimates."
-          >{formatCost(chatCost)}</span>
+          <button
+            class="badge cursor-pointer hover:bg-hover-bg"
+            use:melt={$costTrigger}
+            title="Approximate USD cost for this chat, priced per turn against the model that produced it. Excludes prompt-cache discounts and assumes the uncached rate, so it overestimates rather than underestimates. Click for the per-model split."
+          >
+            {formatCost(costs.total)}{costs.partial ? '+' : ''}
+            {#if costs.multiProvider}
+              <span class="text-fg-faint ml-1">{costs.entries.length} models, {new Set(costs.entries.map(e => e.provider)).size} providers</span>
+            {:else if costs.multiModel}
+              <span class="text-fg-faint ml-1">{costs.entries.length} models</span>
+            {/if}
+          </button>
+          {#if $costOpen}
+            <div use:melt={$costContent} class="z-50 rounded border border-border bg-bg-elev shadow-lg p-2 min-w-[19rem] text-[0.78rem]">
+              <div class="font-semibold mb-1.5">Cost by model</div>
+              {#if costs.entries.length === 0}
+                <div class="text-fg-muted">No priced turns yet.</div>
+              {/if}
+              {#each costs.entries as e (e.provider + e.model)}
+                <div class="flex items-baseline gap-2 py-0.5">
+                  <span class="flex-1 font-[family-name:var(--font-mono)] break-all">
+                    {e.model}
+                    {#if costs.multiProvider && e.provider}
+                      <span class="text-fg-faint">({e.provider})</span>
+                    {/if}
+                  </span>
+                  <span class="text-fg-faint whitespace-nowrap">
+                    {e.tokensIn.toLocaleString()} in / {e.tokensOut.toLocaleString()} out
+                  </span>
+                  <span class="w-16 text-right whitespace-nowrap">
+                    {#if e.priced}{formatCost(e.cost)}{:else}<span class="text-fg-faint" title="No rates declared for this model in the catalog">no rate</span>{/if}
+                  </span>
+                </div>
+              {/each}
+              {#if costs.unrecordedTurns > 0}
+                <div class="text-fg-faint mt-1.5 pt-1.5 border-t border-border">
+                  {costs.unrecordedTurns} earlier turn{costs.unrecordedTurns === 1 ? '' : 's'} predate per-model tracking and cannot be priced.
+                </div>
+              {/if}
+              {#if costs.partial}
+                <div class="text-fg-faint mt-1">Total is a floor: some turns have no rate.</div>
+              {/if}
+            </div>
+          {/if}
         {/if}
         {#if $effectiveSettings.thinkEnabled}<span class="badge badge-active">thinking</span>{/if}
         <button
@@ -777,11 +898,15 @@
                             class="px-2 py-0.5 text-[0.75rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg"
                             on:click={() => respondPermission(step.permissionId ?? '', step.name, 'approve')}
                           >Approve</button>
-                          <button
-                            class="px-2 py-0.5 text-[0.75rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg"
-                            on:click={() => respondPermission(step.permissionId ?? '', step.name, 'always')}
-                            title="Auto-approve this tool in future runs"
-                          >Always</button>
+                          {#if canAlwaysApprove(step.name)}
+                            <button
+                              class="px-2 py-0.5 text-[0.75rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg"
+                              on:click={() => respondPermission(step.permissionId ?? '', step.name, 'always')}
+                              title="Auto-approve this tool in future runs"
+                            >Always</button>
+                          {:else}
+                            <span class="text-fg-faint text-[0.72rem]" title="This tool writes files or runs code, so each call is approved on its own.">approved per call</span>
+                          {/if}
                           <button
                             class="px-2 py-0.5 text-[0.75rem] rounded border border-error-border bg-error-bg text-error-fg cursor-pointer hover:opacity-90"
                             on:click={() => respondPermission(step.permissionId ?? '', step.name, 'deny')}
@@ -982,7 +1107,7 @@
 
   <aside class="overflow-hidden min-w-0" aria-hidden={!$settings.showRight}>
     {#if $settings.showRight}
-      <SettingsPanel mode="workspace" {providers} {models} {busy} {outputDir} onReset={resetApp} />
+      <SettingsPanel mode="workspace" {providers} {models} {busy} {outputDir} onReset={resetApp} on:modelsRefreshed={(e) => reloadModels(e.detail.provider)} />
     {/if}
   </aside>
 </div>
@@ -1009,7 +1134,7 @@
         >×</button>
       </div>
       <div class="flex-1 overflow-y-auto">
-        <SettingsPanel mode="global" {providers} {models} {busy} {outputDir} onReset={resetApp} />
+        <SettingsPanel mode="global" {providers} {models} {busy} {outputDir} onReset={resetApp} on:modelsRefreshed={(e) => reloadModels(e.detail.provider)} />
       </div>
     </div>
   {/if}

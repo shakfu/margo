@@ -10,21 +10,21 @@ import (
 // Fields:
 //
 //   - ID              provider-native model identifier (matches the
-//                     wire-level model parameter).
+//     wire-level model parameter).
 //   - ContextTokens   input-token context window. Used by
-//                     agent/budget.go for history-rewrite decisions.
+//     agent/budget.go for history-rewrite decisions.
 //   - Multimodal      true if the model accepts image input. Gates the
-//                     front-end's image-attachment affordance.
+//     front-end's image-attachment affordance.
 //   - CostPerMTokIn   optional USD price per million input tokens.
-//                     Pointer so nil ≠ &0 — a free-tier model
-//                     (rate set to zero) is distinguishable from an
-//                     unknown-rate model (rate omitted entirely).
-//                     The front-end hides the cost meter for chats on
-//                     unknown-rate models rather than showing $0.00,
-//                     which would be misleading.
+//     Pointer so nil ≠ &0 — a free-tier model
+//     (rate set to zero) is distinguishable from an
+//     unknown-rate model (rate omitted entirely).
+//     The front-end hides the cost meter for chats on
+//     unknown-rate models rather than showing $0.00,
+//     which would be misleading.
 //   - CostPerMTokOut  optional USD price per million output tokens.
 //   - PricedAt        optional ISO date for when costs were last
-//                     verified. Helps reviewers spot stale data.
+//     verified. Helps reviewers spot stale data.
 type Model struct {
 	ID             string   `json:"id"`
 	ContextTokens  int      `json:"contextTokens"`
@@ -79,12 +79,8 @@ func (c Catalog) ModelIDs(provider string) []string {
 // across all providers. Returns 0 when the model is unknown so callers
 // can apply their own fallback (BudgetForModel does this).
 func (c Catalog) ContextWindow(id string) int {
-	for _, ms := range c {
-		for _, m := range ms {
-			if m.ID == id {
-				return m.ContextTokens
-			}
-		}
+	if m, ok := c.find(id); ok {
+		return m.ContextTokens
 	}
 	return 0
 }
@@ -93,14 +89,8 @@ func (c Catalog) ContextWindow(id string) int {
 // Unknown models return false (conservative default; the front-end uses
 // this to decide whether to expose attachment affordances).
 func (c Catalog) IsMultimodal(id string) bool {
-	for _, ms := range c {
-		for _, m := range ms {
-			if m.ID == id {
-				return m.Multimodal
-			}
-		}
-	}
-	return false
+	m, ok := c.find(id)
+	return ok && m.Multimodal
 }
 
 // HasCost reports whether the named model has both input and output
@@ -108,14 +98,8 @@ func (c Catalog) IsMultimodal(id string) bool {
 // distinguish "free-tier zero" from "rate unknown" — both manifest as
 // a zero result from Cost() but only the former is meaningful.
 func (c Catalog) HasCost(id string) bool {
-	for _, ms := range c {
-		for _, m := range ms {
-			if m.ID == id {
-				return m.CostPerMTokIn != nil && m.CostPerMTokOut != nil
-			}
-		}
-	}
-	return false
+	m, ok := c.find(id)
+	return ok && m.CostPerMTokIn != nil && m.CostPerMTokOut != nil
 }
 
 // Cost returns the USD cost of a token-count usage against the named
@@ -131,18 +115,28 @@ func (c Catalog) HasCost(id string) bool {
 // rate. Real-world cost may be lower for prompt-cached workloads;
 // the meter overestimates, which is the safer error to display.
 func (c Catalog) Cost(id string, inputTokens, outputTokens int) float64 {
+	m, ok := c.find(id)
+	if !ok || m.CostPerMTokIn == nil || m.CostPerMTokOut == nil {
+		return 0
+	}
+	in := float64(inputTokens) / 1_000_000 * (*m.CostPerMTokIn)
+	out := float64(outputTokens) / 1_000_000 * (*m.CostPerMTokOut)
+	return in + out
+}
+
+// find resolves an id, preferring the process-wide active catalog so
+// callers holding a snapshot of the embedded seed still see live
+// context windows and prices. Falls back to scanning the receiver.
+func (c Catalog) find(id string) (Model, bool) {
+	if m, ok := LookupModel(id); ok {
+		return m, true
+	}
 	for _, ms := range c {
 		for _, m := range ms {
-			if m.ID != id {
-				continue
+			if m.ID == id {
+				return m, true
 			}
-			if m.CostPerMTokIn == nil || m.CostPerMTokOut == nil {
-				return 0
-			}
-			in := float64(inputTokens) / 1_000_000 * (*m.CostPerMTokIn)
-			out := float64(outputTokens) / 1_000_000 * (*m.CostPerMTokOut)
-			return in + out
 		}
 	}
-	return 0
+	return Model{}, false
 }

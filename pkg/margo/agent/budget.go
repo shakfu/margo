@@ -11,12 +11,13 @@ import (
 // that haven't yet been declared in pkg/margo/models.json.
 const defaultContextWindow = 128_000
 
-// BudgetForModel returns the input-token budget for the given model id,
-// reading from margo.DefaultCatalog (the embedded models.json). Falls
-// back to defaultContextWindow when the model is unknown.
+// BudgetForModel returns the input-token budget for the given model id.
+// Reads through margo.LookupModel so a catalog fetched from the provider
+// at runtime wins over the embedded models.json — a model added after
+// the binary was built still gets its real context window.
 func BudgetForModel(model string) int {
-	if w := margo.DefaultCatalog.ContextWindow(model); w > 0 {
-		return w
+	if m, ok := margo.LookupModel(model); ok && m.ContextTokens > 0 {
+		return m.ContextTokens
 	}
 	return defaultContextWindow
 }
@@ -170,13 +171,56 @@ func RewriteMargoForBudget(msgs []margo.Message, systemPrompt string, budget int
 	return nil
 }
 
+// imageBytesPerToken approximates an image's prompt cost from its
+// encoded size. Providers price images by pixel count, which we would
+// have to decode the image to learn; encoded size is the proxy that is
+// free to compute. Deliberately aggressive — over-estimating trims a
+// turn early, under-estimating overflows the request at the provider.
+const imageBytesPerToken = 750
+
+// minImageTokens is the floor for any image. Even a tiny icon costs a
+// provider more than its byte count suggests.
+const minImageTokens = 100
+
+// estimateMargoTokens approximates a message's prompt cost, including
+// its attachments. Counting only Content was the original bug: a turn
+// carrying a 5 MB PDF estimated at about 4 tokens, so the rewriter
+// decided a request that could not fit was comfortably under budget.
 func estimateMargoTokens(m margo.Message) int {
 	n := len(m.Content) / 4
+	for _, p := range m.Parts {
+		n += estimatePartTokens(p)
+	}
 	for _, tc := range m.ToolCalls {
 		n += (len(tc.Name) + len(tc.Arguments)) / 4
 		n += 8
 	}
 	return n + 4
+}
+
+// estimatePartTokens approximates one structured content part.
+func estimatePartTokens(p margo.Part) int {
+	switch p.Kind {
+	case margo.PartText:
+		return len(p.Text) / 4
+	case margo.PartImage:
+		n := len(p.Data) / imageBytesPerToken
+		if n < minImageTokens {
+			return minImageTokens
+		}
+		return n
+	case margo.PartDocument:
+		// Providers without a native document block get extracted text,
+		// which margo caps at MaxExtractedDocChars. Raw bytes over-count
+		// a compressed PDF, and the cap bounds the over-count.
+		size := len(p.Data)
+		if size > margo.MaxExtractedDocChars {
+			size = margo.MaxExtractedDocChars
+		}
+		return size / 4
+	default:
+		return 0
+	}
 }
 
 func estimateTotalMargo(msgs []margo.Message) int {

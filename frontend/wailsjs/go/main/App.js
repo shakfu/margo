@@ -26,10 +26,6 @@ export function ExportChatMarkdown(arg1) {
   return window['go']['main']['App']['ExportChatMarkdown'](arg1);
 }
 
-export function Greet(arg1) {
-  return window['go']['main']['App']['Greet'](arg1);
-}
-
 export function IndexPath(arg1, arg2) {
   return window['go']['main']['App']['IndexPath'](arg1, arg2);
 }
@@ -72,6 +68,10 @@ export function PickWorkspaceDir() {
 
 export function Providers() {
   return window['go']['main']['App']['Providers']();
+}
+
+export function RefreshModels(arg1) {
+  return window['go']['main']['App']['RefreshModels'](arg1);
 }
 
 export function RemoveMCPServer(arg1) {

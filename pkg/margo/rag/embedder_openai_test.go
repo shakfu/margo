@@ -143,4 +143,3 @@ func looksNormalized(v []float32) bool {
 	mag := math.Sqrt(float64(sum))
 	return mag > 0.95 && mag < 1.05
 }
-

@@ -184,6 +184,7 @@ export namespace core {
 	    description: string;
 	    isReadOnly: boolean;
 	    isStreamable: boolean;
+	    allowsAlways: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new ToolMetadata(source);
@@ -195,6 +196,7 @@ export namespace core {
 	        this.description = source["description"];
 	        this.isReadOnly = source["isReadOnly"];
 	        this.isStreamable = source["isStreamable"];
+	        this.allowsAlways = source["allowsAlways"];
 	    }
 	}
 

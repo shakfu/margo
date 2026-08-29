@@ -17,13 +17,13 @@ import (
 // goes to serverIn and whose stdout reads from serverOut, so the wire
 // flow is identical to a real subprocess.
 type fakeServer struct {
-	t          *testing.T
-	serverIn   *io.PipeReader // server reads requests from here
-	serverOut  *io.PipeWriter // server writes responses to here
-	handlers   map[string]func(params json.RawMessage) (any, *RPCError)
-	notified   chan string // method names of received notifications
-	doneRead   chan struct{}
-	closeOnce  sync.Once
+	t         *testing.T
+	serverIn  *io.PipeReader // server reads requests from here
+	serverOut *io.PipeWriter // server writes responses to here
+	handlers  map[string]func(params json.RawMessage) (any, *RPCError)
+	notified  chan string // method names of received notifications
+	doneRead  chan struct{}
+	closeOnce sync.Once
 }
 
 // newFakeServerPair builds the four pipes a Client+fakeServer pair
@@ -33,7 +33,7 @@ type fakeServer struct {
 //	client.stdout ◀──pipe──  server.out  (server writes responses)
 func newFakeServerPair(t *testing.T) (clientStdin io.WriteCloser, clientStdout io.ReadCloser, srv *fakeServer) {
 	t.Helper()
-	srvInR, clientStdinW := io.Pipe() // client writes → server reads
+	srvInR, clientStdinW := io.Pipe()   // client writes → server reads
 	clientStdoutR, srvOutW := io.Pipe() // server writes → client reads
 
 	srv = &fakeServer{

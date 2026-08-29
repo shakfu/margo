@@ -59,11 +59,11 @@ type sseFrame struct{ event, data string }
 func TestCompleteParsesTextAndUsage(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		jsonReply(w, map[string]any{
-			"id":      "msg_01",
-			"type":    "message",
-			"role":    "assistant",
-			"model":   "claude-haiku-4-5",
-			"content": []map[string]any{{"type": "text", "text": "Hello world"}},
+			"id":          "msg_01",
+			"type":        "message",
+			"role":        "assistant",
+			"model":       "claude-haiku-4-5",
+			"content":     []map[string]any{{"type": "text", "text": "Hello world"}},
 			"stop_reason": "end_turn",
 			"usage":       map[string]int{"input_tokens": 42, "output_tokens": 3},
 		})
@@ -143,9 +143,9 @@ func TestCompleteSendsMultimodalParts(t *testing.T) {
 		_ = json.Unmarshal(body, &captured)
 		jsonReply(w, map[string]any{
 			"id": "msg", "type": "message", "role": "assistant", "model": "claude-haiku-4-5",
-			"content": []map[string]any{{"type": "text", "text": "ok"}},
+			"content":     []map[string]any{{"type": "text", "text": "ok"}},
 			"stop_reason": "end_turn",
-			"usage": map[string]int{"input_tokens": 1, "output_tokens": 1},
+			"usage":       map[string]int{"input_tokens": 1, "output_tokens": 1},
 		})
 	}))
 	defer srv.Close()

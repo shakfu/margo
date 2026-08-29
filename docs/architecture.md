@@ -1,6 +1,6 @@
 # Architecture
 
-A contributor-facing tour of margo's code. This is the "where does what live, and why" reference; for the user-facing taxonomy (persona, agent, tool, workspace), see `docs/concepts.md`. For strategic context (audience, platform thesis, prioritised opportunities), see `REVIEW.md`.
+A contributor-facing tour of margo's code. This is the "where does what live, and why" reference; for the user-facing taxonomy (persona, agent, tool, workspace), see `docs/concepts.md`. For strategic context and the prioritised backlog, see `TODO.md`.
 
 This document is grounded in real file paths and is kept current with the code; if you find a divergence, treat the code as canonical and update this file.
 
@@ -398,9 +398,9 @@ API keys go in `.env` at the repo root. Required for the provider you intend to 
 
 - The user-facing taxonomy (persona vs agent vs tool vs workspace). See `docs/concepts.md`.
 
-- Strategic direction, audience question, prioritised refactors. See `REVIEW.md`.
+- Strategic direction, audience question, prioritised refactors. See `TODO.md`.
 
-- Per-package design rationale (e.g. why hand-roll MCP rather than wrap a third-party SDK). See `REVIEW.md` and the package-level Go docs.
+- Per-package design rationale (e.g. why hand-roll MCP rather than wrap a third-party SDK). See the package-level Go docs and `CHANGELOG.md`.
 
 - Slash command catalog. See `frontend/src/lib/slash.ts`.
 

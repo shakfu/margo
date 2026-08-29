@@ -134,7 +134,7 @@ func TestHardSplit_MultiByteSafe(t *testing.T) {
 	// Each rune is 3 bytes in UTF-8; a naive byte-cut would bisect
 	// codepoints. Verify hardSplit returns valid UTF-8 only.
 	text := strings.Repeat("日本語", 20) // 60 runes, 180 bytes
-	parts := hardSplit(text, 10)       // 10 runes per piece
+	parts := hardSplit(text, 10)      // 10 runes per piece
 	for i, p := range parts {
 		if len([]rune(p)) > 10 {
 			t.Errorf("parts[%d] runes=%d, want <= 10", i, len([]rune(p)))

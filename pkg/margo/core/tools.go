@@ -25,14 +25,16 @@ type toolCtor func(*Session) tool.BaseTool
 // ready after Session construction is picked up without re-registering.
 var builtinTools = func() map[string]toolCtor {
 	m := map[string]toolCtor{
-		"current_time":     func(*Session) tool.BaseTool { return agent.CurrentTimeTool() },
-		"web_fetch":        func(*Session) tool.BaseTool { return agent.WebFetchTool() },
+		"current_time": func(*Session) tool.BaseTool { return agent.CurrentTimeTool() },
+		"web_fetch": func(s *Session) tool.BaseTool {
+			return agent.WebFetchTool(agent.WebFetchOptions{AllowPrivateNetwork: s.allowPrivateNetwork})
+		},
 		"search_knowledge": func(s *Session) tool.BaseTool { return agent.SearchKnowledgeTool(s.workspaces.ActiveIndexer()) },
 	}
 	if agent.QuartoAvailable() {
 		dir, _ := agent.DefaultOutputDir()
-		m["quarto_render"] = func(*Session) tool.BaseTool {
-			return agent.QuartoRenderTool(dir)
+		m["quarto_render"] = func(s *Session) tool.BaseTool {
+			return agent.QuartoRenderTool(agent.QuartoOptions{OutputDir: dir, Execute: s.quartoExecute})
 		}
 	}
 	return m
@@ -76,6 +78,7 @@ func (s *Session) ToolsMetadata(ctx context.Context) []ToolMetadata {
 			Description:  desc,
 			IsReadOnly:   agent.ReadOnlyTools[name],
 			IsStreamable: streamable,
+			AllowsAlways: agent.AllowsAlwaysApprove(name),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -92,6 +95,7 @@ func (s *Session) ToolsMetadata(ctx context.Context) []ToolMetadata {
 			Description:  desc,
 			IsReadOnly:   false,
 			IsStreamable: false,
+			AllowsAlways: agent.AllowsAlwaysApprove(nt.Qualified),
 		})
 	}
 	sort.Slice(mcpEntries, func(i, j int) bool { return mcpEntries[i].Name < mcpEntries[j].Name })

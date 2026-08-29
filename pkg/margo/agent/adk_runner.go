@@ -10,7 +10,6 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/shakfu/margo/pkg/margo"
@@ -37,25 +36,9 @@ func (ReactRunner) Run(
 	gate PermissionGate,
 	emit func(StepEvent),
 ) error {
-	if emit == nil {
-		emit = func(StepEvent) {}
-	}
-	// Tools that publish auxiliary structured events (search_knowledge
-	// → StepRetrieve) reach the emitter via this context stash; same
-	// mechanism as the legacy StreamReact path.
-	ctx = WithStepEmitter(ctx, emit)
+	run := prepareRun(ctx, c, defaults, attachments, gate, emit)
 
-	middlewares := []compose.ToolMiddleware{abortOnCtxCancel}
-	if gate != nil {
-		middlewares = append([]compose.ToolMiddleware{permissionMiddleware(gate)}, middlewares...)
-	}
-
-	// Stitch attachments onto the final user message via the same
-	// adapter helper the legacy path uses. The adapter is then
-	// handed to ChatModelAgent as model.ToolCallingChatModel.
-	adapter := NewAdapter(c, defaults).WithFinalUserAttachments(attachments)
-
-	// Budget rewriter (§6.3) — moved from
+	// Budget rewriter (6.3) — moved from
 	// `react.AgentConfig.MessageRewriter` to `BeforeChatModel`
 	// middleware under ADK. Algorithm unchanged: trim oldest turns
 	// until the estimated input-token count fits under
@@ -74,7 +57,7 @@ func (ReactRunner) Run(
 		},
 	}
 
-	agentImpl, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+	agentImpl, err := adk.NewChatModelAgent(run.ctx, &adk.ChatModelAgentConfig{
 		Name:        "margo-react",
 		Description: "ReAct loop wired to a margo provider client",
 		// Instruction is intentionally empty — the system prompt
@@ -82,57 +65,15 @@ func (ReactRunner) Run(
 		// it to the provider), and stamping it again here would
 		// double-feed it through ChatModelAgent's defaultGenModelInput.
 		Instruction: "",
-		Model:       adapter,
-		ToolsConfig: adk.ToolsConfig{
-			ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools:               tools,
-				ToolCallMiddlewares: middlewares,
-			},
-		},
+		Model:       run.adapter,
+		ToolsConfig: run.toolsConfig(tools),
 		Middlewares: []adk.AgentMiddleware{budgetMiddleware},
 	})
 	if err != nil {
 		return fmt.Errorf("adk: new chat model agent: %w", err)
 	}
 
-	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		EnableStreaming: true,
-		Agent:           agentImpl,
-	})
-
-	started := time.Now()
-	var firstToken time.Time
-	usage := margo.Usage{}
-
-	iter := runner.Run(ctx, input)
-	for {
-		ev, ok := iter.Next()
-		if !ok {
-			break
-		}
-		if ev == nil {
-			continue
-		}
-		if ev.Err != nil {
-			if errors.Is(ev.Err, context.Canceled) || errors.Is(ev.Err, context.DeadlineExceeded) {
-				return ev.Err
-			}
-			emit(StepEvent{Kind: StepError, Text: ev.Err.Error()})
-			return ev.Err
-		}
-		if err := bridgeAgentEvent(ev, emit, &firstToken, &usage); err != nil {
-			return err
-		}
-	}
-
-	now := time.Now()
-	usage.TotalMs = now.Sub(started).Milliseconds()
-	if !firstToken.IsZero() {
-		usage.FirstTokenMs = firstToken.Sub(started).Milliseconds()
-	}
-	u := usage
-	emit(StepEvent{Kind: StepDone, Usage: &u})
-	return nil
+	return runADKAgent(run.ctx, agentImpl, input, run.emit)
 }
 
 // bridgeAgentEvent translates one ADK event into zero or more

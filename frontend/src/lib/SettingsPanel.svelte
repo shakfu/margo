@@ -55,7 +55,7 @@
 
   <!-- Models tab -->
   <div use:melt={$tabsContent('models')}>
-    <ProviderSettings {providers} {models} {busy} {mode} />
+    <ProviderSettings {providers} {models} {busy} {mode} on:modelsRefreshed />
   </div>
 
   <!-- Roles tab -->

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -345,5 +346,26 @@ func (c *Client) Stream(ctx context.Context, req margo.Request) (<-chan margo.Ch
 		u := usage
 		out <- margo.Chunk{Usage: &u}
 	}()
+	return out, nil
+}
+
+// ListModels enumerates the models the account can reach. Anthropic's
+// endpoint reports the context window and the image/PDF capability
+// flags, so every field margo's catalog declares except price comes
+// straight off the wire.
+func (c *Client) ListModels(ctx context.Context) ([]margo.Model, error) {
+	out := []margo.Model{}
+	pager := c.sdk.Models.ListAutoPaging(ctx, sdk.ModelListParams{})
+	for pager.Next() {
+		m := pager.Current()
+		out = append(out, margo.Model{
+			ID:            string(m.ID),
+			ContextTokens: int(m.MaxInputTokens),
+			Multimodal:    m.Capabilities.ImageInput.Supported,
+		})
+	}
+	if err := pager.Err(); err != nil {
+		return nil, fmt.Errorf("anthropic: list models: %w", err)
+	}
 	return out, nil
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/shakfu/margo/internal/config"
+	"github.com/shakfu/margo/internal/pathsafe"
 	"github.com/shakfu/margo/pkg/margo"
 	"github.com/shakfu/margo/pkg/margo/agent"
 	"github.com/shakfu/margo/pkg/margo/core"
@@ -68,6 +69,15 @@ func NewApp() *App {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	// Warm the model catalogs off the UI thread. A provider that is
+	// slow, down, or rate-limited leaves the cached (or embedded)
+	// catalog in place, so nothing here can block or break startup.
+	go func() {
+		for provider, err := range a.session.RefreshStaleModels(ctx) {
+			runtime.LogWarningf(ctx, "model catalog refresh failed for %s: %v", provider, err)
+		}
+		runtime.EventsEmit(ctx, "margo:models:refreshed")
+	}()
 }
 
 // shutdown is the Wails OnShutdown hook. Wired in main.go so MCP
@@ -76,11 +86,6 @@ func (a *App) startup(ctx context.Context) {
 // child processes around — easy to miss in dev, painful in prod.
 func (a *App) shutdown(ctx context.Context) {
 	a.session.Shutdown()
-}
-
-// Greet is the stock Wails template method, retained for reference.
-func (a *App) Greet(name string) string {
-	return fmt.Sprintf("Hello %s, It's show time!", name)
 }
 
 // Providers returns the list of providers that have an API key configured.
@@ -94,6 +99,16 @@ func (a *App) Models(provider string) []string { return a.session.Models(provide
 // hand-mirrored CONTEXT_WINDOWS / MULTIMODAL_MODELS lists in store.ts
 // and read the same source of truth as Go.
 func (a *App) ModelsCatalog() margo.Catalog { return a.session.Catalog() }
+
+// RefreshModels re-fetches one provider's model catalog and returns the
+// refreshed id list. The frontend calls this from the Models tab's
+// refresh control. An error leaves the previous catalog in place.
+func (a *App) RefreshModels(provider string) ([]string, error) {
+	if err := a.session.RefreshModels(a.ctx, provider); err != nil {
+		return nil, err
+	}
+	return a.session.Models(provider), nil
+}
 
 // ChatMessage mirrors core.Message for JSON binding to the frontend.
 type ChatMessage struct {
@@ -294,21 +309,47 @@ func (a *App) Tools() []string { return a.session.Tools() }
 // ToolsMetadata returns one ToolMetadata per registered tool, sorted by name.
 func (a *App) ToolsMetadata() []ToolMetadata { return a.session.ToolsMetadata(a.ctx) }
 
+// openableRoots lists the directories OpenPath will hand to the OS.
+// Both are places margo itself writes: rendered artifacts and stored
+// attachments. Every legitimate file:// link the app produces points
+// inside one of them.
+func (a *App) openableRoots() []string {
+	roots := []string{}
+	if dir, err := agent.DefaultOutputDir(); err == nil {
+		roots = append(roots, dir)
+	}
+	if dir, err := a.session.Attachments().Root(); err == nil {
+		roots = append(roots, dir)
+	}
+	return roots
+}
+
 // OpenPath asks the host OS to open the given local path in its default
 // application. Used for file:// links emitted by tools — Wails'
 // BrowserOpenURL rejects non-http(s)/mailto schemes.
+//
+// The path is confined to margo's own output and attachment directories.
+// Rendered markdown can carry a model-authored file:// link, and handing
+// an arbitrary path to `open` executes whatever the OS associates with
+// it; a click should not be able to reach outside what margo wrote.
 func (a *App) OpenPath(path string) error {
 	if path == "" {
 		return fmt.Errorf("empty path")
 	}
+	abs, err := pathsafe.ContainedInAny(a.openableRoots(), path)
+	if err != nil {
+		return fmt.Errorf("refusing to open %s: outside margo's output and attachment directories", path)
+	}
 	var cmd *exec.Cmd
 	switch goruntime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", path)
+		cmd = exec.Command("open", abs)
 	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", "", path)
+		// The empty string is the window title `start` expects before
+		// the target, so a path is never parsed as one.
+		cmd = exec.Command("cmd", "/c", "start", "", abs)
 	default:
-		cmd = exec.Command("xdg-open", path)
+		cmd = exec.Command("xdg-open", abs)
 	}
 	return cmd.Start()
 }

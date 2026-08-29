@@ -49,11 +49,11 @@ const (
 // Field semantics by Kind:
 //   - PartText:     Text holds the part's text. MimeType / Data ignored.
 //   - PartImage:    MimeType is e.g. "image/png" / "image/jpeg"; Data is
-//                   the raw image bytes. Providers base64-encode as needed.
+//     the raw image bytes. Providers base64-encode as needed.
 //   - PartDocument: MimeType is the document type (e.g. "application/pdf",
-//                   "text/markdown"); Data is the raw bytes. Anthropic
-//                   accepts PDFs natively; other providers extract text
-//                   on the Go side and inline it as a text part.
+//     "text/markdown"); Data is the raw bytes. Anthropic
+//     accepts PDFs natively; other providers extract text
+//     on the Go side and inline it as a text part.
 //
 // Name is the original filename, surfaced in the extracted-text wrapper
 // (`<file name="...">`) so the model can distinguish multiple docs.
@@ -164,4 +164,17 @@ type Client interface {
 	Name() string
 	Complete(ctx context.Context, req Request) (Response, error)
 	Stream(ctx context.Context, req Request) (<-chan Chunk, error)
+}
+
+// ModelLister is implemented by providers that can enumerate their own
+// models at runtime. It is deliberately separate from Client: listing is
+// optional, and a provider that cannot do it should not be forced to
+// return a stub. Callers type-assert.
+//
+// Implementations return what the endpoint actually knows. Fields the
+// provider does not report are left zero — OpenAI's /v1/models, for
+// instance, returns identifiers and nothing else — and the caller fills
+// them from the embedded catalog. See Catalog.MergeLive.
+type ModelLister interface {
+	ListModels(ctx context.Context) ([]Model, error)
 }

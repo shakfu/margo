@@ -12,10 +12,10 @@ import (
 
 func TestParseQualified(t *testing.T) {
 	cases := []struct {
-		in                 string
-		wantServer         string
-		wantTool           string
-		wantOK             bool
+		in         string
+		wantServer string
+		wantTool   string
+		wantOK     bool
 	}{
 		{"mcp:fs:read", "fs", "read", true},
 		{"mcp:github:search_repos", "github", "search_repos", true},
