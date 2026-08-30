@@ -489,6 +489,32 @@ Opens up data-science / scripting / "code interpreter"-class use cases that LLM-
 
 **Why:** the biggest single feature delta vs. generic chat clients. Should land after MCP per-workspace scoping (§10.2) so the sandbox can be MCP-served rather than baked into core.
 
+#### 10.15.A monty-go — timeboxed spike (third path)
+
+[`fugue-labs/monty-go`](https://github.com/fugue-labs/monty-go) (MIT) wraps [`pydantic/monty`](https://github.com/pydantic/monty) — a Python *subset* interpreter written in Rust, compiled to WebAssembly and run under wazero. The 2.9 MB `.wasm` ships via `go:embed`. API: `runner.Execute(ctx, code, inputs, opts)` with `WithExternalFunc`, `WithOsCallFunc`, `WithLimits`, `WithPrintFunc`.
+
+**Why it beats both paths above, on constraints we already enforce:**
+
+- **Zero CGo.** wazero is pure Go. This is the criterion that ruled out bleve and sqlite-vec (see 6.6.C). Docker and bwrap keep CGo but break "works on a fresh install".
+
+- **No install-time dependency.** `quarto_render` gates on `exec.LookPath` and is therefore absent for most users; a Monty tool registers unconditionally.
+
+- **It can qualify for `ReadOnlyTools`.** With no `WithExternalFunc` and no `WithOsCallFunc`, execution has no observable effect outside the agent loop — the criterion in `agent/permission.go`. No approval prompt per call. Docker cannot claim this, so every arithmetic call would prompt.
+
+- **Pause/resume enables CodeAct.** `WithExternalFunc` lets model-written Python call back into Go. Exposing `core.builtinTools` as Python functions collapses N sequential tool calls into one program — orchestration the ReAct loop cannot express, and the strongest available answer to the §6 dependency-weight complaint.
+
+**Objections:**
+
+- **Subset, not Python.** No pip, by design — no numpy or pandas, ever. That removes the data-science half of the payoff above. The model will write `import numpy` and fail; mitigation is tool-description discipline of the kind `tools_quarto.go` already uses.
+
+- **Dependency maturity.** 8 commits, one vendor, pinned to upstream `v0.0.11`. Vendoring wazero plus the wasm into `pkg/margo/agent/sandbox/` is a defensible alternative that keeps the API under our control and treats monty-go as reference.
+
+- **Weight.** +2.9 MB wasm plus wazero on a 44 MB binary. Marginal, but the same "took a dep, used 10% of it" trap as §6.
+
+**Not exclusive with the MCP path.** Split: Monty as an always-present, auto-approved, no-side-effect compute tool; a CPython MCP server (10.2) as the opt-in heavy path for real data work with full stdlib and pip.
+
+**Spike scope.** `run_python` over monty-go, no external funcs, `WithLimits` set aggressively. Measure binary delta and confirm the tool qualifies for `ReadOnlyTools`. Phase two, only if phase one lands: expose `builtinTools` via `WithExternalFunc`. If the subset limitation bites during testing, the result is a few days spent and a clear starting point for the MCP path.
+
 ### P3 — ergonomics, hygiene, and deferred decisions
 
 #### 10.16 Daemon mode (`cmd/margod`)
