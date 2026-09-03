@@ -27,6 +27,14 @@ jobs:
             exit 1
           fi
 
+      # frontend/dist is gitignored, so the //go:embed all:frontend/dist
+      # directive in main.go matches nothing in a fresh checkout and every
+      # go command fails to build the root package. Vet and test never read
+      # the bundle, so a placeholder directory is enough; the real assets
+      # only matter to `wails build`.
+      - name: stub embedded frontend assets
+        run: mkdir -p frontend/dist && touch frontend/dist/.gitkeep
+
       - name: go vet
         run: go vet ./...
 
