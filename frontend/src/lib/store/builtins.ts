@@ -79,7 +79,7 @@ export const BUILTIN_AGENTS: Agent[] = [];
 // — they don't reach for tools that may not be installed (quarto), and
 // avoid overriding the global model/provider since those depend on
 // what the user has configured. Add per-template overrides only when
-// they're load-bearing for the use case.
+// they're structural for the use case.
 //
 // "Empty" is omitted: the manage dialog renders "Empty workspace" as
 // the no-template option directly.

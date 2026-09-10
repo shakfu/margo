@@ -143,7 +143,7 @@ func TestE2EFilesystemServerListTools(t *testing.T) {
 // invokes read_file, and asserts the content comes back verbatim in
 // the response's first text block.
 //
-// This is the load-bearing test for the MCP MVP: if it passes, the
+// This is the structural test for the MCP MVP: if it passes, the
 // wire protocol is good enough that a model invoking an MCP tool
 // will receive the right bytes back. If it fails, anything else we
 // build on top is suspect.

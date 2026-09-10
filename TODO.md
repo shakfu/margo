@@ -612,7 +612,9 @@ The concrete gap: the reactive in `App.svelte` that re-applies the remembered mo
 Three shapes:
 
 - Leave it. Default is a scratch layer; the Cmd+, dialog sets durable values. Now documented in `docs/concepts.md` and the README, so at least it no longer surprises.
+
 - Extend the model's restore treatment to the other keys. More special cases.
+
 - Give Default a real persisted `overrides` table like any other workspace. Removes the special case entirely, and makes a temperature tweak sticky — which is a product decision about what "Default" means, not a bug fix.
 
 **Why:** the third option is the only one that ends the asymmetry, and it is the one that changes behaviour users may rely on. Decide deliberately rather than drifting into it.
@@ -622,7 +624,9 @@ Three shapes:
 `/v1/models` returns identifiers and nothing else, so the overlay in `models.json` supplies everything else. After the 0.2.0 pricing pass, 57 of 65 live models are priced. Still open:
 
 - Rate-unknown: `gpt-4`, `gpt-4-turbo`, `gpt-3.5-turbo-16k`, `gpt-3.5-turbo-instruct-0914`, and the four `*-chat-latest` aliases. None appear on the pricing page.
+
 - Context windows are the 128k fallback for every OpenAI entry. The pricing page's Context column is a pricing tier (`<272K`, `Short only`), not a maximum, so it was deliberately not used. Under-stating the window trims conversations early rather than overflowing them, which is the safe direction, but it is wrong for the 1M-context families.
+
 - `multimodal` is false for everything not in the curated seed, so the image-attachment affordance is hidden on models that support it.
 
 **Why:** each is a one-file edit to `models.json` once the real numbers are in hand. The cache invalidates itself on any edit (fingerprint, §11 note below), so no version bump is needed.
@@ -644,6 +648,7 @@ Three shapes:
 Two tools cannot read the export data Go 1.27 emits, both because they embed an older `golang.org/x/tools`:
 
 - Wails v2.11.0 — worked around by `WAILS_GOTOOLCHAIN=go1.26.2` in the Makefile. Drop the pin when Wails ships a release with newer x/tools.
+
 - golangci-lint — not fixable from the repo; the binary needs rebuilding against a Go at least as new as the local toolchain, or `make lint` reports every stdlib import as unloadable.
 
 #### 11.7 `App.svelte` is 691 lines
@@ -657,4 +662,5 @@ Down from 1,310 after `Topbar`, `Composer` and `MessageList` came out. What rema
 ### Notes for the next review
 
 - **CHANGELOG entry budget.** Six entries in the 0.2.0 section run well past the one-paragraph guidance in `CLAUDE.md`. They are now a released record and should not be retro-edited; apply the budget as entries are written instead.
+
 - **The catalog cache invalidates itself.** Cache files carry a fingerprint of the provider's `models.json` slice alongside a format version, so editing a rate, model or window retires the caches built from it. The manual counter alone was forgotten within an hour of being written — do not reintroduce that pattern.

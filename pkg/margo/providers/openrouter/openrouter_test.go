@@ -26,7 +26,7 @@ func newTestClient(serverURL string) *Client {
 	})}
 }
 
-// TestSendsIdentityHeaders is the load-bearing OpenRouter-specific
+// TestSendsIdentityHeaders is the structural OpenRouter-specific
 // test: the New() constructor adds HTTP-Referer and X-Title which
 // OpenRouter uses for app attribution. If a future SDK upgrade reorders
 // option application or drops headers on stream requests, OpenRouter

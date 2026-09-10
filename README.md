@@ -150,9 +150,13 @@ Flags: `-provider`, `-model`, `-prompt`, `-system`, `-stream`, `-list`, `-refres
 margo runs model-authored instructions against your machine, so a few things are deliberately restrictive:
 
 - **Tool calls are gated.** Anything that is not read-only prompts before running. "Always approve" is offered per tool and persisted, except for tools whose risk lives in their arguments (`quarto_render`) — those are approved one call at a time.
+
 - **`quarto_render` is sandboxed.** Both the document it writes and its `--output-dir` are confined to `~/Documents/Margo/outputs/`. Computational cells are not executed unless `core.Config.QuartoExecute` is set.
+
 - **`web_fetch` refuses non-public addresses.** Loopback, LAN, link-local (including cloud metadata endpoints), and CGNAT are blocked at dial time, on the initial request and on every redirect. Lift with `core.Config.AllowPrivateNetwork`.
+
 - **`OpenPath` is confined** to margo's output and attachment directories, so a model-authored `file://` link cannot open arbitrary paths.
+
 - **API keys never reach the frontend.** They load from the environment and stay in the Go process.
 
 ## Useful Make targets
@@ -183,7 +187,9 @@ CI runs `gofmt -l`, `go vet`, `go test -race`, `svelte-check`, and `vitest` on e
 Everything lands under `build/bin/`:
 
 - `build/bin/margo.app` (macOS) / `margo` (Linux) / `margo.exe` (Windows) — desktop app
+
 - `build/bin/margo-cli` — headless CLI
+
 - `build/bin/margo-tui` — terminal UI
 
 `frontend/dist/` is the Vite build output that Wails embeds via `//go:embed all:frontend/dist`. `build/bin/`, `frontend/dist/`, and `frontend/node_modules/` are gitignored. The vendored MathJax bundle (`frontend/public/mathjax/`) is committed.
