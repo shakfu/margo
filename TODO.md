@@ -8,7 +8,7 @@
 
 - [ ] 10.1 Variant scaffolding (`Settings.uiTier`)
 - [ ] 10.2 Per-workspace MCP server scoping #agent
-- [ ] 10.3 OpenRouter live model fetch #agent
+- [x] 10.3 OpenRouter live model fetch #agent
 - [ ] 10.4 Ollama / local model support #agent
   New `pkg/margo/providers/ollama/ollama.go`. Implements `margo.Client` against `localhost:11434`'s OpenAI-compatible endpoint (the existing `openai-go/v3` SDK works with `option.WithBaseURL`). Register in `core.Session.clientFor`.
 - [ ] 10.5 First-run wizard
@@ -61,7 +61,7 @@
 
 - [ ] 11.5 Untested packages #agent
   `internal/config` (30 lines) and both `cmd/` binaries sit at 0%. `margo-cli` became testable in 0.2.0 when `run()` was split from `main()`; `margo-tui` has not had the same treatment.
-- [ ] 11.6 Toolchain pins to retire
-- [ ] 11.7 `App.svelte` is 691 lines
+- [ ] 11.6 `make lint` reports 25 issues
+- [ ] 11.7 `App.svelte` is 694 lines
 - [ ] 11.8 `frontend/package.json` carries its own version
 

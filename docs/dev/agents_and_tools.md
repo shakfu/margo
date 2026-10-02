@@ -1,46 +1,79 @@
 # Agents and Tools
 
-This document explains margo's agent layer — how it's wired, how to add a new tool, and how to introduce a new agent type. The orchestration sits on top of [CloudWeGo Eino](https://github.com/cloudwego/eino); margo provides the adapter, the registry, and the UI surface, while Eino handles the graph execution and the ReAct loop.
+This document covers margo's agent layer: how a run flows from the UI to Eino's Agent Development Kit (ADK), how to add a tool, and how to add a runner. Orchestration runs on [CloudWeGo Eino](https://github.com/cloudwego/eino) ADK (`github.com/cloudwego/eino/adk`). margo supplies the model adapter, the tool and runner registries, the permission gate, and the event bridge to the UI.
 
-For the user-facing conceptual model — what an *agent* is in relation to personas, tools, workspaces, and chats — see [`docs/concepts.md`](../concepts.md). In this document "agent" refers specifically to the **control-loop** half of that model: the thing that picks tools, invokes them, and decides when the run is done. The companion document [`personas_and_agents.md`](personas_and_agents.md) covers the persona/agent record types and how the chat layer selects between them.
+"Agent" here means the control loop: the code that picks tools, invokes them, and decides when the run ends. For how agents relate to personas, tools, workspaces and chats, see [`docs/concepts.md`](../concepts.md). For the persona and agent record types, see [`personas_and_agents.md`](personas_and_agents.md).
 
 ## Architecture overview
 
 ```
-                                +-------------------------+
-        UI (App.svelte)         |  role picker (Default / |
-              |                 |  Persona / Agent)       |
-              |                 |  step rendering         |
-              v                 +-------------------------+
-   StreamAgent(id, ...)  -- Wails binding (app.go)
-              |
-              v
-   agent.StreamReact(ctx, client, defaults, tools, input, emit)
-              |
-              v
-   Eino: react.NewAgent --- ToolCallingChatModel  ---> agent.Adapter
-                       \--- ToolsNode (tools)    ---> tool.InvokableTool
-                       \--- callbacks            ---> emit StepEvent
+Svelte (stream.ts, MessageList.svelte)
+   |  StreamAgent(id, provider, ..., toolNames, autoApprove, attachments, runnerType)
+   v
+app.go  App.StreamAgent ---- emits margo:stream:<id>:{chunk,done,error}
+   |
+   v
+core.Session.StreamAgent     (pkg/margo/core/session.go)
+   |  buildTools(names)        builtinTools + MCP tools (core/tools.go)
+   |  permissions.gate(...)    PermissionBroker (core/permission.go)
+   v
+agent.RunByType(runnerType, ...)          (pkg/margo/agent/runner.go)
+   |
+   v
+Runner.Run: prepareRun -> assemble adk.Agent -> runADKAgent
+   |           |                                  |
+   |           +- Adapter (margo.Client as        +- adk.Runner event loop
+   |           |  ToolCallingChatModel; trims     +- bridgeAgentEvent -> StepEvent
+   |           |  to the budget, meters usage)    +- meter total -> StepDone.Usage
+   |           +- tool middleware:
+   |              errors as results, permission,
+   |              abortOnCtxCancel
+   v
+StepEvent -> core.Event -> Wails payload -> stream.ts -> store/chats.ts
 ```
 
-Three layers:
+Four layers:
 
-1. **`pkg/margo` provider layer.** `margo.Client.Stream/Complete` carry a `Request.Tools []ToolDef` field; provider implementations (anthropic, openai, openrouter) translate this into native function-calling parameters and surface assistant tool calls back as `Response.ToolCalls` (non-stream) or `Chunk{Kind: ChunkToolCall, ToolCall: *ToolCall}` (stream). Tool results travel back as `Message{Role: RoleTool, ToolCallID, Content}`.
+1. **Provider layer (`pkg/margo`, `pkg/margo/providers`).** `margo.Request.Tools` carries tool definitions. Providers translate them to native function calling and return calls as `Response.ToolCalls` or `Chunk{Kind: ChunkToolCall}`. Tool results go back as `Message{Role: RoleTool, ToolCallID, Content}`.
 
-2. **`pkg/margo/agent` Eino bridge.** `Adapter` makes any `margo.Client` look like an Eino `model.ToolCallingChatModel`. `WithTools` returns a new immutable instance with tools captured. `StreamReact` instantiates `react.NewAgent` against the adapter, registers tool callbacks, and forwards the agent's final-answer stream to a caller-supplied `emit` function as `StepEvent` values.
+2. **Agent layer (`pkg/margo/agent`).** `Adapter` presents any `margo.Client` as an Eino `model.ToolCallingChatModel`. A `Runner` assembles an ADK agent around it. `runADKAgent` drives the agent and converts its events to `StepEvent`s.
 
-3. **Wails surface (`app.go`) and frontend.** `StreamAgent` resolves tool names from a Go-side registry (`builtinTools`), runs `agent.StreamReact` in a goroutine, and emits each `StepEvent` over the existing `margo:stream:<id>:chunk` event channel as an `AgentStepEvent` payload. The frontend dispatches by `payload.kind` and renders steps inline above the assistant content.
+3. **Session layer (`pkg/margo/core`).** `Session.StreamAgent` resolves tool names, builds the permission gate, registers the run for cancellation, calls `agent.RunByType`, and converts `StepEvent` to `core.Event`. The desktop app, `margo-tui` and `margo-cli` all use it.
+
+4. **Desktop surface (`app.go`, `frontend/`).** `App.StreamAgent` emits each `core.Event` on `margo:stream:<id>:chunk`. `frontend/src/lib/stream.ts` dispatches on `payload.kind`.
+
+## Runners
+
+A runner is one control-loop strategy. All three implement `agent.Runner` and share `prepareRun` and `runADKAgent` (`adk_common.go`).
+
+| Type | Slash command | File | ADK construct | Tools |
+| ---- | ------------- | ---- | ------------- | ----- |
+| `react` (default) | `/agent <task>` | `adk_runner.go` | one `adk.ChatModelAgent` | all enabled |
+| `plan` | `/agent-plan <task>` | `plan_runner.go` | `planexecute` planner, executor, replanner; at most 10 iterations | executor only |
+| `workflow` | `/agent-workflow <task>` | `workflow_runner.go` | `adk.NewSequentialAgent` over drafter, critic, refiner | drafter only |
+
+`RunByType` resolves the type through `runnerRegistry`. An empty type means `react`. An unknown type returns an error before any work starts.
+
+`prepareRun` does the setup every runner needs:
+
+- stores the emitter in the context, so tools can call `PublishStep`
+- builds the tool middleware, outermost first: `toolErrorsAsResults`, `permissionMiddleware(gate)` (when the gate is non-nil), `abortOnCtxCancel`
+- creates the `Adapter`, attaches the turn's image and document attachments to the final user message, and sets the context budget (`WithBudget`)
+
+`runADKAgent` runs the agent with `EnableStreaming: true` and passes every event to `bridgeAgentEvent`. It finishes with one `StepDone`.
+
+`agent.StreamReact`, `agent.React`, `agent.Chat` and `agent.ChatStream` (`agent.go`, `stream.go`) are compatibility wrappers. `StreamReact` calls `ReactRunner`. Nothing outside tests calls them (see notes 11.4 in `notes.md`). New code should call `RunByType`.
 
 ## Adding a tool
 
-Tools are Eino `tool.InvokableTool` values registered into a Go-side map. The model sees them via the JSON Schema inferred from your input struct; the agent loop invokes them by JSON-decoding arguments and JSON-encoding results.
+A tool is an Eino `tool.BaseTool`. The model sees the JSON Schema derived from its input type. The runtime decodes the model's JSON arguments and encodes the result.
 
-### 1. Define and register the tool
+### 1. Define the tool
 
-Tools live in `pkg/margo/agent/agent.go` next to the existing `CurrentTimeTool`. The fastest path uses `tool/utils.InferTool`, which generates the parameter JSON Schema from your input struct's tags.
+Put it in `pkg/margo/agent/tools_<name>.go`. `toolutils.InferTool` derives the schema from the input struct's tags.
 
 ```go
-// pkg/margo/agent/agent.go
+// pkg/margo/agent/tools_readfile.go
 
 func ReadFileTool() tool.InvokableTool {
     type args struct {
@@ -48,7 +81,7 @@ func ReadFileTool() tool.InvokableTool {
     }
     t, err := toolutils.InferTool(
         "read_file",
-        "Read a UTF-8 text file from disk and return its contents. Use this when the user asks about a specific file's content.",
+        "Read a UTF-8 text file and return its contents. Use when the user asks about a specific file.",
         func(ctx context.Context, in args) (string, error) {
             b, err := os.ReadFile(in.Path)
             if err != nil {
@@ -58,240 +91,206 @@ func ReadFileTool() tool.InvokableTool {
         },
     )
     if err != nil {
-        panic(err) // bad reflection on args type — fix at dev time
+        panic(err) // bad reflection on args; fix at dev time
     }
     return t
 }
 ```
 
-Then add it to the registry in `app.go`. The registry value is a `toolCtor` (`func(*App) tool.BaseTool`) so tools can close over per-`App` state (e.g. the active workspace's RAG indexer for `search_knowledge`). Stateless tools accept the argument and ignore it:
+### 2. Register it
+
+Add a constructor to `builtinTools` in `pkg/margo/core/tools.go`. The constructor takes the `*Session`, so a tool can read run-time state such as the active workspace's indexer. Stateless tools ignore it.
 
 ```go
-// app.go
-
-type toolCtor func(*App) tool.BaseTool
-
-var builtinTools = map[string]toolCtor{
-    "current_time":     func(*App) tool.BaseTool { return agent.CurrentTimeTool() },
-    "web_fetch":        func(*App) tool.BaseTool { return agent.WebFetchTool() },
-    "search_knowledge": func(a *App) tool.BaseTool { return agent.SearchKnowledgeTool(a.activeIndexer()) },
-    "read_file":        func(*App) tool.BaseTool { return agent.ReadFileTool() },
-}
+// pkg/margo/core/tools.go, inside builtinTools
+"read_file": func(*Session) tool.BaseTool { return agent.ReadFileTool() },
 ```
 
-That's it for the backend. `App.Tools()` already returns the registry's keys, and `App.StreamAgent` already resolves names against `builtinTools`, calling each constructor with the `*App` so the tool can read whichever per-run state it needs. The frontend's `availableTools` will pick up the new name on next mount, and any agent whose allowlist includes it will be able to call it through the role picker.
+Tools that depend on an external binary register conditionally. `quarto_render` registers only when `agent.QuartoAvailable()` is true at start-up.
 
-### 2. Argument schema conventions
+`Session.Tools` and `Session.ToolsMetadata` read the registry, so the frontend's tool picker shows the new name without further changes.
 
-`InferTool` reads the input struct via reflection and JSON-Schema tags from `eino-contrib/jsonschema`. Useful tags:
+### 3. Set its permission policy
 
-| Tag                                              | Effect                              |
-| ------------------------------------------------ | ----------------------------------- |
-| `json:"name"`                                    | Field name in the JSON payload.     |
-| `json:"name,omitempty"`                          | Field is optional.                  |
-| `jsonschema:"description=..."`                   | Documented for the model.           |
-| `jsonschema:"required"`                          | Force-mark as required.             |
-| `jsonschema:"enum=a,enum=b"`                     | Restrict to a string enum.          |
-| `jsonschema:"minimum=0,maximum=100"`             | Numeric bounds.                     |
+Decide both questions in `pkg/margo/agent/permission.go`:
 
-If `InferTool` reflection isn't enough (e.g. you need `oneOf`, `anyOf`, `$defs`, recursive types), build the schema manually with `schema.NewParamsOneOfByJSONSchema(...)` and use `tool/utils.NewTool` instead.
+- **Is it read-only?** A tool with no side effects outside the run goes in `ReadOnlyTools` and never prompts. Anything that touches the filesystem, network, shell or persistent state stays out.
+- **Can one approval cover the next call?** If the risk is in the arguments rather than the tool's identity, add it to `NoAlwaysApproveTools`. The UI then offers no "Always", and a stored grant is ignored. `quarto_render` is listed because it writes, and can run, model-authored documents.
 
-### 3. Tool execution semantics
+Do not add a write-capable tool to `ReadOnlyTools` to reduce prompts. The prompt is the trust boundary. "Always" already removes repeat prompts where that is safe.
 
-* **Context.** The first argument to your function is the request `ctx`. Honour it: long-running tools should select on `ctx.Done()` so a `CancelStream` from the UI surfaces promptly. (See TODO #4 — the cancel race today comes from tools that ignore ctx.)
+### 4. Argument schema tags
 
-* **Errors.** Returning a non-nil error sends an `error` step event to the UI (rendered red) and the model receives no tool result for that call. To send the model a soft-failure message it can recover from, return an explanatory string with `nil` error.
+`InferTool` reads struct tags through `eino-contrib/jsonschema`:
 
-* **Result format.** The return value is JSON-encoded. For free-form text, return a `string`. For structured results, return a struct — the model sees the JSON, which is usually fine for tool-use loops.
+| Tag | Effect |
+| --- | ------ |
+| `json:"name"` | Field name in the JSON payload. |
+| `json:"name,omitempty"` | Field is optional. |
+| `jsonschema:"description=..."` | Description shown to the model. |
+| `jsonschema:"required"` | Mark as required. |
+| `jsonschema:"enum=a,enum=b"` | Restrict to a string enum. |
+| `jsonschema:"minimum=0,maximum=100"` | Numeric bounds. |
 
-* **Side effects.** Tools run on the Go side with full process privileges. Validate inputs (paths, URLs) defensively when the user is driving the model.
+For `oneOf`, `anyOf`, `$defs` or recursive types, build the schema with `schema.NewParamsOneOfByJSONSchema(...)` and use `toolutils.NewTool`.
 
-### 4. Streaming tools
+### 5. Execution semantics
 
-For tools whose output is naturally a stream (e.g. tailing a log, running a subprocess), implement `tool.StreamableTool` instead. Use `tool/utils.InferStreamTool` (analogous to `InferTool`). The agent's `ToolsNode` will pump chunks back into the conversation. UI rendering of streaming tool output is not yet implemented in `App.svelte` — see TODO #6.4 for the streaming-tool work (mid-loop text streaming, TODO #6.1, is already done).
+- **Context.** Honour `ctx`. `abortOnCtxCancel` stops waiting for an invokable tool when the run is cancelled, but the tool's goroutine keeps running until the tool itself checks `ctx`.
+- **Errors.** Return an error when the call fails. `toolErrorsAsResults` sends it to the model as the call's result (`Error: ...`), so the model can retry or answer without the tool, and the UI shows the result in red. A denial gets a fixed message that asks the model not to retry. A streaming tool that fails mid-stream keeps its partial output, followed by the error text (`recoverStream`).
+- **Result format.** Return a `string` for text. A struct is JSON-encoded, and the model sees that JSON.
+- **Side effects.** Tools run with full process privileges. Validate paths and URLs; the model chooses them.
 
-### 5. Multi-modal results
+### 6. Streaming tools and structured side events
 
-For tools that return images / files / structured payloads, implement `tool.EnhancedInvokableTool` (returns `*schema.ToolResult`). The current margo UI flattens results to text, so multi-modal output requires extending `AgentStep` and the renderer in `App.svelte` first.
+- **Streaming output.** Implement `tool.StreamableTool`, e.g. with `toolutils.InferStreamTool`. Each chunk arrives as `StepToolStream`, followed by one `StepToolResult` with the concatenated output. The UI appends chunks to the open call (`appendStepStream` in `store/chats.ts`).
+- **Structured events.** A tool can call `agent.PublishStep(ctx, ev)` to send the UI more than its text result. `search_knowledge` publishes `StepRetrieve` with `RetrievalHit`s, which render as cards. The model still receives only the text result.
 
-## Adding an agent
+### 7. MCP tools
 
-The shipped agent is a single ReAct loop (`react.NewAgent`). Eino supports several other patterns; introduce them as new functions in `pkg/margo/agent/`.
+Tools from MCP servers are not in `builtinTools`. `buildTools` resolves names of the form `mcp:<server>:<tool>` against the MCP manager and wraps them with `mcp.AsEinoTool`. They are never read-only, so every call prompts until the user chooses "Always".
 
-### Pattern 1 — wrap a different Eino agent
+## Adding a runner
+
+A new runner is a new way of arranging ADK agents. Use the existing pieces.
 
 ```go
-// pkg/margo/agent/host.go
+// pkg/margo/agent/review_runner.go
 
-import (
-    "github.com/cloudwego/eino/flow/agent/multiagent/host"
-)
+type ReviewRunner struct{}
 
-func StreamHostAgent(
-    ctx context.Context,
-    c margo.Client,
-    defaults margo.Request,
-    specialists []*host.Specialist,
-    input []*schema.Message,
-    emit func(StepEvent),
+func (ReviewRunner) Run(
+    ctx context.Context, c margo.Client, defaults margo.Request,
+    tools []tool.BaseTool, input []*schema.Message, attachments []margo.Part,
+    gate PermissionGate, emit func(StepEvent),
 ) error {
-    adapter := NewAdapter(c, defaults)
-    a, err := host.NewMultiAgent(ctx, &host.MultiAgentConfig{
-        Host: host.Host{ChatModel: adapter, /* ... */},
-        Specialists: specialists,
+    run := prepareRun(ctx, c, defaults, attachments, gate, emit)
+    a, err := adk.NewChatModelAgent(run.ctx, &adk.ChatModelAgentConfig{
+        Name:        "reviewer",
+        Description: "Reviews code against the workspace conventions.",
+        Instruction: reviewPrompt,
+        Model:       run.adapter,
+        ToolsConfig: run.toolsConfig(tools),
     })
-    if err != nil { return err }
-    // ... same callback wiring + Stream consumption as StreamReact
+    if err != nil {
+        return fmt.Errorf("review: new agent: %w", err)
+    }
+    return run.runADKAgent(a, input)
 }
 ```
 
-Then expose it through a new Wails method on `App` (e.g. `StreamHost(...)`) following the `StreamAgent` template:
+Then:
 
-* Resolve any string identifiers (specialist names, tool names) from Go-side registries — never trust raw frontend payloads as Go values.
+1. Add a `RunnerType` constant and an entry in `runnerRegistry` (`runner.go`), or call `RegisterRunner` from `init()`.
+2. Add `/agent-<type>` to `SLASH_COMMANDS` in `frontend/src/lib/slash.ts` for autocomplete. The parser already routes any `/agent-<type>`.
 
-* Track the cancel func in `a.cancels[id]` so `CancelStream(id)` works.
+Rules:
 
-* Translate `StepEvent` → `AgentStepEvent` and emit on `margo:stream:<id>:chunk`.
-
-The frontend can either gain a third routing branch in `App.svelte`'s `send()` (alongside `StreamAgent` / `StreamChat`) or surface agent-type selection in the settings panel.
-
-### Pattern 2 — custom graph
-
-For workflows that don't map onto a pre-built Eino agent (e.g. a plan-then-execute loop, parallel sub-agents with a reducer), build a `compose.Graph` directly:
-
-```go
-g := compose.NewGraph[[]*schema.Message, *schema.Message]()
-g.AddChatModelNode("planner", plannerAdapter, ...)
-g.AddToolsNode("tools", toolsNode, ...)
-g.AddLambdaNode("reducer", reducerFn, ...)
-g.AddBranch(...)
-runner, _ := g.Compile(ctx)
-out, _ := runner.Stream(ctx, input)
-```
-
-Same callback pattern applies — register a `utils/callbacks.NewHandlerHelper().ChatModel(...).Tool(...).Handler()` and forward step events.
-
-### Pattern 3 — same agent, different adapter configuration
-
-Sometimes the new "agent" is just a ReAct loop with a different system prompt, different tool set, or a different default model. Don't fork `StreamReact` for these — let the caller supply the appropriate `margo.Request` defaults and tool slice. Reserve new functions for genuinely different orchestration shapes.
+- Always go through `prepareRun`. It installs the error, permission and cancellation middleware. A runner that builds its own `ToolsConfig` skips the permission prompt, and its tool errors abort the run.
+- Always finish with `runADKAgent`. It emits `StepDone` with summed usage and handles cancellation.
+- Pass `run.toolsConfig(nil)` for a stage that must not call tools. That yields an empty `ToolsConfig`.
+- Give every agent `run.adapter` (or a model derived from it with `WithTools`). The adapter carries the context budget; a separately built model does not trim.
+- If a run is only the ReAct loop with a different prompt or tool set, do not add a runner. Have the caller pass different `margo.Request` defaults and tools.
 
 ## Step-event protocol
 
-The contract between agent code and the UI is the `StepEvent` / `AgentStepEvent` pair:
+`agent.StepEvent` (`stream.go`) is the contract between runners and front-ends.
 
-| StepKind         | UI rendering                                    | Emitted by              |
-| ---------------- | ----------------------------------------------- | ----------------------- |
-| `StepText`       | Streaming text deltas in the assistant bubble.  | Agent's final-answer stream (final turn) **or** `ModelCallbackHandler.OnEndWithStreamOutput` for intermediate turns that also produced tool calls. See "Mid-loop text streaming" below. |
-| `StepToolCall`   | New monospace card: `→ name(args)`.              | `ToolCallbackHandler.OnStart`. |
-| `StepToolResult` | Pairs with last open call by name; appends `← result` (or red `← error` if `IsError`). | `ToolCallbackHandler.OnEnd / OnError`. |
-| `StepError`      | Red error banner; ends the run.                 | Stream-read errors.     |
-| `StepDone`       | Closes the bubble; populates the usage footer.  | End of `StreamReact`.   |
+| Kind | Meaning | UI rendering |
+| ---- | ------- | ------------ |
+| `text` | Assistant text delta, from any model call in the run. | Appended to the assistant bubble. |
+| `thinking` | Reasoning delta, for providers that report it. | Appended to the collapsible thinking block. |
+| `tool_call` | The model called `Name` with `Arguments`. | New step card: `→ name(args)`. |
+| `tool_stream` | A chunk of a streaming tool's output. | Appended to the open card. |
+| `tool_retrieve` | Structured hits published by a tool. | Hit cards on the open step. |
+| `tool_result` | The tool's text result; `IsError` marks a failed or denied call. | Appended to the matching card; red when `IsError`. |
+| `permission` | The gate is waiting on the user; carries `PermissionID`. | Card with Approve / Always / Deny. |
+| `error` | The run failed; no further events. | Error banner. |
+| `done` | The run finished; carries `Usage`. | Closes the bubble; fills the usage footer. |
 
-When you add a new step type (e.g. `StepThinking`, `StepBranch`, `StepRetry`):
+`permission` comes from the session's gate, not from `bridgeAgentEvent`. The gate emits it directly on the session's event channel.
 
-1. Extend `StepKind` in `pkg/margo/agent/stream.go`.
+### Ordering and mid-loop text streaming
 
-2. Extend `AgentStepEvent` in `app.go` and add a case in the `StreamAgent` translation switch.
+`bridgeAgentEvent` drains each model call's stream synchronously. Text and tool calls are emitted in arrival order, so a preamble ("Let me check the time.") appears before the tool call it introduces. Tool calls are de-duplicated by ID within one stream. ADK emits every model call as its own event, so text from intermediate turns streams without any special handling.
 
-3. Extend `AgentStep` in `frontend/src/lib/store.ts` and add the pairing/append helper if needed.
+### Adding a step kind
 
-4. Render the new kind in `App.svelte`'s step loop.
+1. Add the constant to `StepKind` in `pkg/margo/agent/stream.go` and emit it.
+2. Add an `EventKind` in `pkg/margo/core/types.go` and a case in the `StepEvent` switch in `Session.StreamAgent` (`core/session.go`).
+3. Extend `AgentStepEvent` in `app.go` if the kind carries new fields.
+4. Handle it in `routeChunk` in `frontend/src/lib/stream.ts`, add a helper in `store/chats.ts` if needed, and extend `StepKind` in `store/types.ts`.
+5. Render it in `MessageList.svelte`.
 
-Backwards compatibility: the frontend handler dispatches on `payload.kind` and falls through to text-append on unknown values, so new kinds added on the backend won't crash older frontends — they just won't render specially.
+`stream.ts` treats an unknown kind as text and appends `payload.text`. A newer backend therefore does not break an older frontend.
 
-## Mid-loop text streaming
+## Usage and cost
 
-Intermediate ReAct turns that emit both text ("Let me check the time first.") and tool calls would otherwise drop the text — eino's `react.Agent.Stream` only forwards the final turn. `StreamReact` registers a `utils/callbacks.ModelCallbackHandler.OnEndWithStreamOutput` handler that drains each model turn's output stream synchronously, accumulates `Message.Content`, and emits a single `StepText` event **only when the same turn also produced tool calls**. Synchronous draining guarantees the `StepText` lands before the same turn's `StepToolCall` events from the downstream tool node.
+The adapter counts usage itself (`WithUsageMeter`, set by `prepareRun`). It adds every model call's `margo.Usage`, from `Generate` or the final stream chunk, to one `usageTotal`, and `runADKAgent` puts the total on `StepDone`. Counting at the adapter, rather than from ADK events, includes calls that never surface as events: `planexecute`'s planner and replanner calls were missed that way. Struct copies share the meter, so every agent derived with `WithTools` counts into the same total.
 
-The "tool calls present?" gate is also the dedup mechanism for the final turn: if a turn has no tool calls, the model handler stays silent and the outer agent stream delivers the text. **This breaks if a future model emits both text and tool calls in the *final* turn**: the model handler would emit the text, and (depending on whether eino decides to surface that turn through the agent stream) the outer reader could emit it again. Today's ReAct loop does not surface final-turn-with-tool-calls text through the outer stream so the gate is correct in practice, but the assumption is structural — flag this if you change the ReAct loop, the `StreamToolCallChecker`, or move to a different agent topology.
-
-A custom `StreamToolCallChecker` (`streamHasToolCall` in `stream.go`) replaces eino's default `firstChunkStreamToolCallChecker`, which only inspects the first content chunk and so misclassifies "text-first, then tool call" turns (typical for Claude) as terminal. The custom checker scans the entire stream for any `ToolCalls` entry. Without it, the React loop ends after the first model turn whenever the model emits a preamble before its tool call — silently breaking both mid-loop streaming and tool invocation in production.
+The run's cost is the sum of each call's provider-billed cost (OpenRouter's `usage.cost`), set only when every call reported one. Otherwise it is nil, and the frontend estimates the turn from tokens and catalog rates. Coverage: `TestAgentUsageSumsModelCalls`, `TestAgentUsageCostUnknownIfAnyCallUnreported`, `TestPlanExecuteRunnerCountsEveryModelCall`.
 
 ## Cancellation
 
-`StreamReact` honours its parent `context.Context`. Two layers cooperate:
+`Session.StreamAgent` registers the run's context under its id; `Session.Cancel(id)` cancels it.
 
-1. **Model side.** The adapter forwards `ctx` to `margo.Client.Stream`, which threads it into the provider's HTTP client. Cancelling the context aborts the in-flight HTTP read; the provider closes its chunk channel and the adapter's stream reader returns EOF.
+- **Model calls.** The adapter passes `ctx` to `margo.Client.Stream`, which aborts the HTTP request.
+- **Invokable tools.** `abortOnCtxCancel` runs each call in a goroutine and returns `ctx.Err()` when the context ends. At most one goroutine leaks per abandoned call, until the tool checks `ctx`.
+- **Streamable tools.** `abortOnCtxCancel` checks `ctx` only before the call starts. Cancelling mid-stream depends on the tool.
+- **Permission prompts.** The gate selects on `ctx.Done()`, so a pending prompt unblocks on cancel.
+- **Reporting.** `runADKAgent` returns the context error without emitting `StepError`. Pressing stop is not a failure.
 
-2. **Tool side.** `abortOnCtxCancel` (in `stream.go`) is registered as a `compose.ToolMiddleware` on the ReAct ToolsNode. Each invokable tool call is run in a goroutine that races against `ctx.Done()`. On cancel, the middleware returns `ctx.Err()` immediately and the React loop unwinds — the underlying tool goroutine keeps running until the tool itself observes ctx (worst case: one leaked goroutine per abandoned call). Without this middleware, a slow tool that ignores ctx would block the entire React loop until the tool completes.
-
-UI feedback: `App.svelte` flips a `cancelling` flag the moment the user clicks cancel and disables the button + relabels it "cancelling…" until the run's `:done` or `:error` event arrives. The flag is cleared on every new stream start so it doesn't bleed between runs. Coverage: `TestStreamReactCancelMidTool` uses a 5-second sleep tool that ignores ctx and asserts that `StreamReact` returns within 2 seconds of cancel with `context.Canceled`.
+Coverage: `TestStreamReactCancelMidTool` runs a tool that sleeps for 5 seconds and ignores `ctx`. It asserts that the run returns `context.Canceled` within 2 seconds.
 
 ## Context-window management
 
-Long conversations would otherwise overflow the model's context window and error out mid-stream. `pkg/margo/agent/budget.go` ships a coarse budget-aware rewriter that runs at two layers:
+`pkg/margo/agent/budget.go` trims history to fit the model's context window:
 
-1. **Agent path** (`StreamReact`): registered as `react.AgentConfig.MessageRewriter`. Eino calls it before each model call inside the ReAct loop, so accumulated tool results that push the conversation over budget mid-loop get trimmed too — not just the entry-point history.
+- **Agent runs.** The `Adapter` trims each model call's messages with `RewriteForBudget` before sending (`WithBudget`, set by `prepareRun`). Every runner and every stage is covered, including the `planexecute` agents, which accept no ADK handlers. Tool results that accumulate mid-run are trimmed too. ADK keeps the full history in its state; only what is sent is trimmed. Coverage: `TestReactRunnerAppliesBudget`, `TestWorkflowRunnerAppliesBudget`, and `TestAdapterBudgetSurvivesDerivation` (the budget must survive `WithTools`, which ADK uses to derive each agent's model).
+- **Plain chat.** `RewriteMargoForBudget` runs once in `toMargoRequest` (`core/conv.go`). There is no loop.
 
-2. **Plain chat path** (`App.StreamChat` / `App.Chat`): rewritten once in `toMargoRequest` via `RewriteMargoForBudget`. There's no loop, so one pass at the request boundary suffices.
+The algorithm estimates tokens as `len(content)/4` plus a small per-tool-call overhead. There is no real tokenizer, which keeps the binary CGo-free. It drops the oldest turns until the estimate fits under 75% of the budget. A turn is a user or assistant message plus the tool messages that follow it, so a tool result never loses its tool call. The system prompt and the final turn are always kept.
 
-Both layers share the same algorithm: estimate token cost as `len(content)/4` plus small per-tool-call overhead (no real tokenizer — keeping the binary CGo-free and small), trim oldest *turns* until estimated total fits under `budget * 0.75` (25% reserve for the model's response). A "turn" is User-or-Assistant + any subsequent Tool messages, so a tool result is never orphaned from its assistant tool_call. The system prompt at index 0 is always preserved; the final turn is always preserved (even if it alone exceeds budget — the caller's request will then fail at the provider, but discarding the user's actual ask is a worse outcome).
-
-`BudgetForModel(model)` mirrors `frontend/src/lib/store.ts::CONTEXT_WINDOWS` by hand. Add new models in both places. Unknown models fall back to a conservative 128k. Coverage: `TestRewriteForBudget*` and `TestRewriteMargoForBudget` in `budget_test.go`.
+`BudgetForModel` reads the context window through `margo.LookupModel`: the live provider catalog first, then the embedded `models.json`. Unknown models get 128,000 tokens.
 
 ## Tool permission prompts
 
-State-mutating tools (anything that touches the filesystem, network, shell, or any persistent state) are gated behind a user-approval prompt before the underlying call runs. Read-only tools auto-approve via an explicit allowlist (`agent.ReadOnlyTools`) so benign metadata lookups like `current_time` don't accumulate noisy prompts.
+1. `prepareRun` places `permissionMiddleware(gate)` between `toolErrorsAsResults` and `abortOnCtxCancel`. The middleware skips tools in `ReadOnlyTools`. For any other tool it calls the gate; `(false, nil)` returns `ErrPermissionDenied`, which `toolErrorsAsResults` turns into a result for the model.
+2. `Session.StreamAgent` builds the gate from its `PermissionBroker` (`core/permission.go`). The gate mints an id, emits a `permission` event and blocks on the decision channel or `ctx.Done()`.
+3. The frontend shows Approve / Always / Deny and calls `App.RespondPermission`, which calls `PermissionBroker.Respond`.
+4. **Always** approves the tool for the rest of the run. The frontend also adds it to `Settings.autoApproveTools` and sends that list with every later run. Both steps drop tools for which `AllowsAlwaysApprove` is false, including grants stored before a tool joined `NoAlwaysApproveTools`.
 
-The pipeline:
-
-1. `StreamReact` accepts an optional `PermissionGate` and registers `permissionMiddleware(gate)` ahead of `abortOnCtxCancel` in the `ToolsConfig.ToolCallMiddlewares` slice. The middleware fires before each non-read-only invocation; if `gate` returns `(false, nil)` it returns `ErrPermissionDenied`, which surfaces as a `tool_result` with `IsError=true` through the existing tool callback handler.
-
-2. `app.go::StreamAgent` builds the gate per run. The gate emits a `permission` step event carrying a unique `permissionId`, registers a channel in `App.permissions` keyed by that id, and blocks on either the channel or `ctx.Done()`.
-
-3. The frontend (`App.svelte`) renders the permission step as a monospace card with Approve / Always / Deny buttons. On click, it calls the new `App.RespondPermission(id, approved, always)` Wails method, which delivers the decision via the registered channel.
-
-4. **Always** elevates the tool to "auto-approve for the rest of this run" on the Go side AND adds it to `Settings.autoApproveTools` in the frontend's `localStorage`. The list is forwarded to `StreamAgent` on every subsequent run, so the prompt doesn't reappear until the user removes the entry.
-
-Cancellation: the gate's `select { case <-ctx.Done(): ... case d := <-ch: ... }` honours stream cancellation, so a hung permission prompt unblocks promptly when the user clicks Cancel. Coverage: `permission_test.go::TestPermissionGate*` (approve/deny paths, read-only auto-approval, cancellation while pending).
-
-When you add a new tool, decide explicitly whether it's read-only:
-
-- **Read-only** (no side effects): add the tool name to `agent.ReadOnlyTools` so users aren't prompted.
-
-- **State-mutating**: leave it out of `ReadOnlyTools`; the prompt fires by default. Users can pre-authorise via the Always button.
-
-Anti-patterns: don't add a write-capable tool to `ReadOnlyTools` to "reduce friction" — the prompt is the trust boundary, and the Always button already gives users a one-click escape after the first prompt.
+Coverage: `permission_test.go` (approve and deny paths, read-only bypass, cancellation while pending, failures returned to the model) and `TestStreamAgentDropsIneligibleAutoApprovals` in `core/session_test.go`.
 
 ## Provider parity
 
-All three first-party providers (`anthropic`, `openai`, `openrouter`) implement tool calling. The wire shapes differ:
+All three providers implement tool calling. The wire shapes differ:
 
-| Provider     | Tool def       | Tool call response          | Tool result back        |
-| ------------ | -------------- | --------------------------- | ----------------------- |
-| OpenAI/OpenRouter | `ChatCompletionFunctionTool{shared.FunctionDefinitionParam}` | `Choice.Message.ToolCalls[]` | `sdk.ToolMessage(content, callID)` |
-| Anthropic    | `ToolUnionParam{OfTool: &ToolParam{InputSchema: ...}}` | `ToolUseBlock` in `msg.Content` | `tool_result` blocks inside a `user` message; consecutive `RoleTool` margo messages **must** batch into one Anthropic message |
+| Provider | Tool definition | Tool calls in the response | Tool result sent back |
+| -------- | --------------- | -------------------------- | --------------------- |
+| OpenAI | `ChatCompletionFunctionTool{shared.FunctionDefinitionParam}` | `Choice.Message.ToolCalls[]` | `sdk.ToolMessage(content, callID)` |
+| OpenRouter | `CreateChatFunctionToolChatFunctionToolFunction(...)` (OpenRouter Go SDK) | `ChatChoice.Message.ToolCalls[]` | `CreateChatMessagesTool(ChatToolMessage{ToolCallID: ...})` |
+| Anthropic | `ToolUnionParam{OfTool: &ToolParam{InputSchema: ...}}` | `ToolUseBlock` in `msg.Content` | `tool_result` blocks in a `user` message; consecutive `RoleTool` messages must be batched into one Anthropic message |
 
-The provider files do these conversions (`toSDKTools` / `toAnthropicTool`, `toSDKMessage` / `toAnthropicMessages`). When adding a fourth provider, mirror the patterns there. The `agent.Adapter` is provider-agnostic — it only sees `margo.Request` / `margo.Response` / `margo.Chunk`.
+The conversions live in each provider package (`toSDKTools` / `toAnthropicTool`, `toSDKMessage` / `toAnthropicMessages`). The `Adapter` sees only `margo.Request`, `margo.Response` and `margo.Chunk`, so it needs no provider-specific code.
 
-## Tool-choice control
+## Tool choice
 
-`margo.Request.ToolChoice` is a string forwarded into each provider's native shape:
+`margo.Request.ToolChoice` maps to each provider's native field:
 
-| Value       | Meaning                                       |
-| ----------- | --------------------------------------------- |
-| `""`        | Provider default (usually `auto`).            |
-| `"auto"`    | Model decides whether to call any tool.       |
-| `"none"`    | Model is forbidden from calling tools.        |
-| `"required"`| Model must call at least one tool. (Anthropic uses `any`; same intent.) |
-| any other   | Force the model to call the named tool.       |
+| Value | Meaning |
+| ----- | ------- |
+| `""` | Provider default (usually `auto`). |
+| `"auto"` | The model decides. |
+| `"none"` | The model may not call tools. |
+| `"required"` | The model must call a tool. Anthropic's equivalent is `any`. |
+| any other | The model must call the named tool. |
 
-The agent layer doesn't expose this in the UI yet. To wire it up: add a string field to `ChatOptions` in `app.go`, plumb through to `agent.NewAdapter`'s `defaults.ToolChoice`, and surface a select in the settings panel.
+Nothing above the provider layer sets it. To expose it, add a field to `core.Options` and `ChatOptions` in `app.go`, copy it into the request in `toMargoRequest`, and add a control in the settings panel.
 
 ## Anti-patterns
 
-* **Don't fork the adapter per provider.** Provider-specific quirks belong in the provider package; the adapter must stay generic.
-
-* **Don't accept tool implementations from the frontend.** The Wails binding takes tool *names*; the Go side resolves them through `builtinTools`. This keeps the trust boundary at the Go layer.
-
-* **Don't bypass the registry.** Calling `agent.StreamReact` directly from a custom `cmd/` is fine, but anything that runs as part of the desktop app should go through `App.StreamAgent` so cancellation, event plumbing, and tool resolution all work consistently.
-
-* **Don't add "agent mode" to the system prompt.** Tool capability is controlled by the `Tools` slice on the request, not by prose. If you want the model to behave differently when tools are available, set a per-tool description that explains when to call it.
-
-## Related TODOs
-
-* TODO #4 — agent run cancellation race (ctx-aware tool wrappers).
-
-* TODO #5 / #6.1 — mid-loop text streaming via `ModelCallbackHandler.OnEndWithStreamOutput`. **Done.** See "Mid-loop text streaming" above.
-
-Both block making more tool-rich agent experiences feel polished; worth picking up before adding many new tools that do real work.
+- **Don't put provider quirks in the adapter.** They belong in the provider package. The adapter must stay generic.
+- **Don't accept tool implementations from the frontend.** The binding takes tool names; `buildTools` resolves them in Go. The trust boundary stays in Go.
+- **Don't bypass the session.** A `cmd/` binary may call `agent.RunByType` directly. Anything in the desktop app goes through `Session.StreamAgent`, so tool resolution, permissions and cancellation behave the same everywhere.
+- **Don't describe tool use in the system prompt.** The `Tools` slice controls what the model can call. To steer when it calls a tool, improve the tool's description.

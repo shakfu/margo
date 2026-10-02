@@ -13,8 +13,11 @@
         } catch (e) {}
       })();
 
-      // MathJax 3 config — must be set BEFORE the script loads.
+      // MathJax 4 config — must be set BEFORE the script loads.
       window.MathJax = {
+        // Glyph ranges and font extensions load from here, not the CDN.
+        // `make vendor-mathjax` populates it.
+        loader: { paths: { fonts: '/mathjax/fonts' } },
         tex: {
           inlineMath: [['$', '$'], ['\\(', '\\)']],
           displayMath: [['$$', '$$'], ['\\[', '\\]']],
@@ -30,7 +33,7 @@
         }
       };
     </script>
-    <script src="/mathjax/tex-svg-full.js" async></script>
+    <script src="/mathjax/tex-svg.js" async></script>
 </head>
 <body>
 <div id="app"></div>

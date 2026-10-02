@@ -242,3 +242,121 @@ func TestRunByTypeNilEmitTolerated(t *testing.T) {
 		t.Errorf("RunByType with nil emit: %v", err)
 	}
 }
+
+// runUsage drives a two-call ReAct run (tool call, then answer) where
+// each model call reports the given usage, and returns StepDone's usage.
+func runUsage(t *testing.T, first, second margo.Usage) *margo.Usage {
+	t.Helper()
+	echoTool, err := toolutils.InferTool("echo", "Echoes its input back.",
+		func(ctx context.Context, in struct {
+			Value string `json:"value"`
+		}) (string, error) {
+			return in.Value, nil
+		})
+	if err != nil {
+		t.Fatalf("InferTool: %v", err)
+	}
+	client := &scriptedClient{turns: [][]margo.Chunk{
+		{
+			{Kind: margo.ChunkToolCall, ToolCall: &margo.ToolCall{ID: "call_1", Name: "echo", Arguments: `{"value":"hi"}`}},
+			{Usage: &first},
+		},
+		{
+			{Kind: margo.ChunkText, Text: "done"},
+			{Usage: &second},
+		},
+	}}
+	var done *margo.Usage
+	err = ReactRunner{}.Run(context.Background(), client, margo.Request{Model: "test"},
+		[]tool.BaseTool{echoTool}, []*schema.Message{{Role: schema.User, Content: "echo hi"}},
+		nil, nil, func(ev StepEvent) {
+			if ev.Kind == StepDone {
+				done = ev.Usage
+			}
+		})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if done == nil {
+		t.Fatal("StepDone carried no usage")
+	}
+	return done
+}
+
+// TestAgentUsageSumsModelCalls: an agent run is billed for every model
+// call, not just the last one.
+func TestAgentUsageSumsModelCalls(t *testing.T) {
+	c1, c2 := 0.001, 0.002
+	got := runUsage(t,
+		margo.Usage{InputTokens: 100, OutputTokens: 10, Cost: &c1},
+		margo.Usage{InputTokens: 130, OutputTokens: 20, Cost: &c2},
+	)
+	if got.InputTokens != 230 || got.OutputTokens != 30 {
+		t.Errorf("tokens = %d in / %d out, want 230 / 30", got.InputTokens, got.OutputTokens)
+	}
+	if got.Cost == nil || *got.Cost < 0.003-1e-12 || *got.Cost > 0.003+1e-12 {
+		t.Errorf("cost = %v, want 0.003", got.Cost)
+	}
+}
+
+// TestAgentUsageCostUnknownIfAnyCallUnreported: a partial sum would
+// present an under-count as the bill, so the run's cost is left unset.
+func TestAgentUsageCostUnknownIfAnyCallUnreported(t *testing.T) {
+	c1 := 0.001
+	got := runUsage(t,
+		margo.Usage{InputTokens: 100, OutputTokens: 10, Cost: &c1},
+		margo.Usage{InputTokens: 130, OutputTokens: 20},
+	)
+	if got.InputTokens != 230 || got.OutputTokens != 30 {
+		t.Errorf("tokens = %d in / %d out, want 230 / 30", got.InputTokens, got.OutputTokens)
+	}
+	if got.Cost != nil {
+		t.Errorf("cost = %v, want nil", *got.Cost)
+	}
+}
+
+// TestAgentEmitsThinking: reasoning from a model call reaches the UI as
+// StepThinking, before that call's tool call.
+func TestAgentEmitsThinking(t *testing.T) {
+	echoTool, _ := toolutils.InferTool("echo", "Echoes.", func(ctx context.Context, in struct {
+		Value string `json:"value"`
+	}) (string, error) {
+		return in.Value, nil
+	})
+	client := &scriptedClient{turns: [][]margo.Chunk{
+		{
+			{Kind: margo.ChunkThinking, Text: "need "},
+			{Kind: margo.ChunkThinking, Text: "the echo"},
+			{Kind: margo.ChunkToolCall, ToolCall: &margo.ToolCall{ID: "c1", Name: "echo", Arguments: `{"value":"hi"}`}},
+		},
+		{{Kind: margo.ChunkText, Text: "done"}},
+	}}
+	var kinds []StepKind
+	var thinking strings.Builder
+	err := ReactRunner{}.Run(context.Background(), client, margo.Request{Model: "test"},
+		[]tool.BaseTool{echoTool}, []*schema.Message{{Role: schema.User, Content: "go"}}, nil, nil,
+		func(ev StepEvent) {
+			kinds = append(kinds, ev.Kind)
+			if ev.Kind == StepThinking {
+				thinking.WriteString(ev.Text)
+			}
+		})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if thinking.String() != "need the echo" {
+		t.Errorf("thinking = %q, want %q", thinking.String(), "need the echo")
+	}
+	first, call := -1, -1
+	for i, k := range kinds {
+		if k == StepThinking && first < 0 {
+			first = i
+		}
+		if k == StepToolCall && call < 0 {
+			call = i
+		}
+	}
+	if first < 0 || call < 0 || first > call {
+		t.Errorf("want thinking before the tool call, got %v", kinds)
+	}
+}

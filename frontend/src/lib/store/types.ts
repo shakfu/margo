@@ -11,6 +11,9 @@ export interface Usage {
   outputTokens: number;
   firstTokenMs: number;
   totalMs: number;
+  // USD the provider billed for the turn, when it reports one
+  // (OpenRouter). Absent means the cost must be estimated from tokens.
+  cost?: number;
 }
 
 export type StepKind = 'tool_call' | 'tool_result' | 'tool_stream' | 'tool_retrieve' | 'permission';

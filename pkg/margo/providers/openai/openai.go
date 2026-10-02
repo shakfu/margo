@@ -1,9 +1,9 @@
 // Package openai implements margo.Client against OpenAI's Chat
 // Completions API.
 //
-// The wire-format work lives in providers/openaicompat, which OpenRouter
-// shares. This package is the OpenAI-specific configuration: endpoint
-// default, model default, and the provider name core routes on.
+// The wire-format work lives in providers/openaicompat. This package is
+// the OpenAI-specific configuration: endpoint default, model default,
+// and the provider name core routes on.
 package openai
 
 import (

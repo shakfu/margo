@@ -1,17 +1,11 @@
 // Package openaicompat implements margo.Client against the OpenAI Chat
-// Completions wire format. Any provider speaking that format — OpenAI
-// itself, OpenRouter, and the various self-hosted gateways that emulate
-// it — differs only in base URL, default model, and identity headers,
-// so those are the only things Options carries.
+// Completions wire format. Any endpoint speaking that format — OpenAI
+// itself and the self-hosted gateways that emulate it — differs only in
+// base URL, default model, and identity headers, so those are the only
+// things Options carries.
 //
-// The package exists because the OpenRouter provider was previously a
-// verbatim copy of the OpenAI one. Two copies of an SSE decoder and a
-// tool-call fragment reassembler is two places for the same bug, and
-// only one of them had test coverage.
-//
-// Providers wrap this rather than re-export it, so `openai.New` and
-// `openrouter.New` keep their own package identity and their own
-// provider-specific tests.
+// OpenAI wraps it. OpenRouter used to, and now has its own SDK-based
+// provider in providers/openrouter.
 package openaicompat
 
 import (
@@ -32,7 +26,7 @@ import (
 // Options configures a Client.
 type Options struct {
 	// Name is what margo.Client.Name reports; it is the provider key
-	// used throughout core (`"openai"`, `"openrouter"`).
+	// used throughout core (e.g. `"openai"`).
 	Name string
 
 	// APIKey is the bearer credential.
@@ -45,8 +39,8 @@ type Options struct {
 	// DefaultModel is used when a Request leaves Model empty.
 	DefaultModel string
 
-	// Headers are sent on every request. OpenRouter uses HTTP-Referer
-	// and X-Title for app attribution; OpenAI needs none.
+	// Headers are sent on every request, e.g. app-attribution headers
+	// a gateway requires. OpenAI needs none.
 	Headers map[string]string
 
 	// ModelFilter, when set, decides which ids from ListModels reach

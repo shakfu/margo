@@ -127,12 +127,13 @@ func TestChatMapsResponse(t *testing.T) {
 }
 
 func TestStreamEmitsTextThenDoneWithUsage(t *testing.T) {
+	cost := 0.0011
 	s := newTestSession(t, map[string]*scriptedClient{
 		"openai": {name: "openai", chunks: []margo.Chunk{
 			{Kind: margo.ChunkText, Text: "he"},
 			{Kind: margo.ChunkThinking, Text: "reasoning"},
 			{Kind: margo.ChunkText, Text: "llo"},
-			{Usage: &margo.Usage{InputTokens: 7, OutputTokens: 9, TotalMs: 12}},
+			{Usage: &margo.Usage{InputTokens: 7, OutputTokens: 9, TotalMs: 12, Cost: &cost}},
 		}},
 	})
 
@@ -172,6 +173,9 @@ func TestStreamEmitsTextThenDoneWithUsage(t *testing.T) {
 	}
 	if done.Usage.InputTokens != 7 || done.Usage.OutputTokens != 9 || done.Usage.TotalMs != 12 {
 		t.Errorf("usage = %+v", done.Usage)
+	}
+	if done.Usage.Cost == nil || *done.Usage.Cost != cost {
+		t.Errorf("usage.Cost = %v, want %v", done.Usage.Cost, cost)
 	}
 }
 
@@ -405,6 +409,58 @@ func TestStreamAgentDropsIneligibleAutoApprovals(t *testing.T) {
 	// The filtering itself is asserted through the gate in
 	// permission_test.go; this test guards the wiring — a rejected
 	// name must not abort the run.
+}
+
+// The agent path converts usage field by field; the billed cost must
+// survive the copy.
+func TestStreamAgentCarriesUsageCost(t *testing.T) {
+	cost := 0.0007
+	s := newTestSession(t, map[string]*scriptedClient{
+		"openai": {name: "openai", chunks: []margo.Chunk{
+			{Kind: margo.ChunkText, Text: "hi"},
+			{Usage: &margo.Usage{InputTokens: 3, OutputTokens: 2, Cost: &cost}},
+		}},
+	})
+	ch, err := s.StreamAgent(context.Background(), "agent-cost", AgentRequest{ChatRequest: ChatRequest{Provider: "openai"}})
+	if err != nil {
+		t.Fatalf("StreamAgent: %v", err)
+	}
+	var usage *Usage
+	for ev := range ch {
+		if ev.Kind == EventDone {
+			usage = ev.Usage
+		}
+	}
+	if usage == nil || usage.InputTokens != 3 || usage.OutputTokens != 2 {
+		t.Fatalf("usage = %+v", usage)
+	}
+	if usage.Cost == nil || *usage.Cost != cost {
+		t.Errorf("usage.Cost = %v, want %v", usage.Cost, cost)
+	}
+}
+
+// Agent-run reasoning reaches front-ends as EventThinking, as it does on
+// the chat path.
+func TestStreamAgentForwardsThinking(t *testing.T) {
+	s := newTestSession(t, map[string]*scriptedClient{
+		"openai": {name: "openai", chunks: []margo.Chunk{
+			{Kind: margo.ChunkThinking, Text: "pondering"},
+			{Kind: margo.ChunkText, Text: "hi"},
+		}},
+	})
+	ch, err := s.StreamAgent(context.Background(), "agent-think", AgentRequest{ChatRequest: ChatRequest{Provider: "openai"}})
+	if err != nil {
+		t.Fatalf("StreamAgent: %v", err)
+	}
+	var thinking string
+	for ev := range ch {
+		if ev.Kind == EventThinking {
+			thinking += ev.Text
+		}
+	}
+	if thinking != "pondering" {
+		t.Errorf("thinking = %q, want %q", thinking, "pondering")
+	}
 }
 
 // These four are the regression net for a wiring bug that shipped past

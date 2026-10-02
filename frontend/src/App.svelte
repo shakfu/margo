@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { createDialog, melt } from '@melt-ui/svelte';
   import { Providers, Models, Chat, StreamChat, StreamAgent, CancelStream, Tools, ToolsMetadata, OutputDir, OpenPath, RespondPermission, StartupWorkspaceDir, SetActiveWorkspace, SaveAttachment, LoadAttachment, ExportChatMarkdown } from '../wailsjs/go/main/App.js';
   import { EventsOn, EventsOff, BrowserOpenURL } from '../wailsjs/runtime/runtime.js';
@@ -48,12 +48,12 @@
   import AttachmentThumb from './lib/AttachmentThumb.svelte';
   import { parseSlash, slugify, SLASH_COMMANDS } from './lib/slash';
 
-  let providers: string[] = [];
-  let models: string[] = [];
+  let providers: string[] = $state([]);
+  let models: string[] = $state([]);
   let availableTools: string[] = [];
-  let outputDir = '';
-  let input = '';
-  let busy = false;
+  let outputDir = $state('');
+  let input = $state('');
+  let busy = $state(false);
 
   // Settings dialog opened from the Margo › Settings… menu (Cmd+,).
   // Renders a second instance of SettingsPanel; the right-pane stays
@@ -70,37 +70,20 @@
     states: { open: settingsDlgOpen },
   } = createDialog({ role: 'dialog' });
 
-  let attachments: PendingAttachment[] = [];
-  let error = '';
-  let activeStreamId = '';
-  let cancelling = false;
-  let messagesEl: HTMLElement;
+  let attachments: PendingAttachment[] = $state([]);
+  let error = $state('');
+  let activeStreamId = $state('');
+  let cancelling = $state(false);
+  let messagesEl: HTMLElement | undefined = $state();
 
-  $: messages = $activeChat?.messages ?? [];
 
   // Push the active workspace id to Go so the search_knowledge tool can
-  // resolve which collection to query at invoke time. The reactive
-  // statement fires on any $settings change; the lastPushedWorkspaceId
-  // guard de-dupes so we only hit IPC on actual workspace switches.
+  // resolve which collection to query at invoke time. The effect fires
+  // on any $settings change; the lastPushedWorkspaceId guard de-dupes
+  // so we only hit IPC on actual workspace switches.
   let lastPushedWorkspaceId = '';
-  $: if ($settings.activeWorkspaceId && $settings.activeWorkspaceId !== lastPushedWorkspaceId) {
-    lastPushedWorkspaceId = $settings.activeWorkspaceId;
-    SetActiveWorkspace(lastPushedWorkspaceId).catch(() => {});
-  }
 
-  $: gridCols =
-    $settings.showLeft && $settings.showRight ? 'grid-cols-[280px_1fr_320px]' :
-    $settings.showLeft && !$settings.showRight ? 'grid-cols-[280px_1fr_0]' :
-    !$settings.showLeft && $settings.showRight ? 'grid-cols-[0_1fr_320px]' :
-    'grid-cols-[0_1fr_0]';
 
-  // Refresh model list when the *effective* provider changes — the
-  // active workspace may override it. The Models picker in
-  // SettingsPanel still binds to the global provider; this fetch is
-  // about the list shown for outbound chat.
-  $: if ($effectiveSettings.provider) {
-    reloadModels($effectiveSettings.provider);
-  }
 
   function reloadModels(provider: string) {
     if (!provider) return;
@@ -119,35 +102,12 @@
   // never contends with a later in-session pick — and a pick updates the
   // memory anyway, which makes the restore a no-op.
   const restoredProviders = new Set<string>();
-  $: {
-    const p = $effectiveSettings.provider;
-    if (p && !restoredProviders.has(p)) {
-      const want = modelToRestore(p, models, $settings.lastModelByProvider, $effectiveSettings.model);
-      if (want) {
-        restoredProviders.add(p);
-        setEffectiveOverride('model', want);
-      }
-    }
-  }
 
   // Tools whose approval may not be made permanent — quarto_render and
   // anything else the Go side marks allowsAlways=false. The prompt
   // hides "Always" for these; Go enforces the same rule regardless.
-  let noAlwaysTools = new Set<string>();
-  $: canAlwaysApprove = (name: string) => !noAlwaysTools.has(name);
+  let noAlwaysTools = $state(new Set<string>());
 
-  // Context usage for the active chat. Uses the *effective* model so a
-  // workspace override of the model picks the right context window.
-  $: ctxWindow = contextWindowFor($effectiveSettings.model, $modelCatalog);
-  $: ctxUsed = ($activeChat?.tokensIn ?? 0) + ($activeChat?.tokensOut ?? 0);
-  // Gate: attachments are pending but the *effective* model isn't on
-  // the multimodal allowlist. Disables send + surfaces an inline warning.
-  // Only image attachments need a multimodal-capable model. PDFs and
-  // other documents reach the model either natively (Anthropic) or via
-  // Go-side text extraction (OpenAI / OpenRouter), so they work
-  // regardless of vision support. (§7.5)
-  $: hasImageAttachment = attachments.some(a => a.mimeType.startsWith('image/'));
-  $: attachmentsBlocked = hasImageAttachment && !!$effectiveSettings.model && !isMultimodal($effectiveSettings.model, $modelCatalog);
 
   onMount(async () => {
     document.documentElement.classList.toggle('dark', $settings.theme === 'dark');
@@ -508,12 +468,6 @@
     }
   }
 
-  // Effective persona for the active chat — drives the dynamic
-  // assistant-bubble label. When set, the message header reads the
-  // persona's name (uppercased) in place of "ASSISTANT".
-  $: activePersona = $activeChat
-    ? findPersona($settings.personas, $activeChat.personaId)
-    : undefined;
 
   async function respondPermission(
     permissionId: string,
@@ -608,6 +562,55 @@
 
 
 
+  let messages = $derived($activeChat?.messages ?? []);
+  $effect(() => {
+    if ($settings.activeWorkspaceId && $settings.activeWorkspaceId !== lastPushedWorkspaceId) {
+      lastPushedWorkspaceId = $settings.activeWorkspaceId;
+      SetActiveWorkspace(lastPushedWorkspaceId).catch(() => {});
+    }
+  });
+  let gridCols =
+    $derived($settings.showLeft && $settings.showRight ? 'grid-cols-[280px_1fr_320px]' :
+    $settings.showLeft && !$settings.showRight ? 'grid-cols-[280px_1fr_0]' :
+    !$settings.showLeft && $settings.showRight ? 'grid-cols-[0_1fr_320px]' :
+    'grid-cols-[0_1fr_0]');
+  // Refresh model list when the *effective* provider changes — the
+  // active workspace may override it. The Models picker in
+  // SettingsPanel still binds to the global provider; this fetch is
+  // about the list shown for outbound chat.
+  $effect(() => {
+    const p = $effectiveSettings.provider;
+    if (p) untrack(() => reloadModels(p));
+  });
+  $effect(() => {
+    const p = $effectiveSettings.provider;
+    if (p && !restoredProviders.has(p)) {
+      const want = modelToRestore(p, models, $settings.lastModelByProvider, $effectiveSettings.model);
+      if (want) {
+        restoredProviders.add(p);
+        untrack(() => setEffectiveOverride('model', want));
+      }
+    }
+  });
+  let canAlwaysApprove = $derived((name: string) => !noAlwaysTools.has(name));
+  // Context usage for the active chat. Uses the *effective* model so a
+  // workspace override of the model picks the right context window.
+  let ctxWindow = $derived(contextWindowFor($effectiveSettings.model, $modelCatalog));
+  let ctxUsed = $derived(($activeChat?.tokensIn ?? 0) + ($activeChat?.tokensOut ?? 0));
+  // Gate: attachments are pending but the *effective* model isn't on
+  // the multimodal allowlist. Disables send + surfaces an inline warning.
+  // Only image attachments need a multimodal-capable model. PDFs and
+  // other documents reach the model either natively (Anthropic) or via
+  // Go-side text extraction (OpenAI / OpenRouter), so they work
+  // regardless of vision support. (§7.5)
+  let hasImageAttachment = $derived(attachments.some(a => a.mimeType.startsWith('image/')));
+  let attachmentsBlocked = $derived(hasImageAttachment && !!$effectiveSettings.model && !isMultimodal($effectiveSettings.model, $modelCatalog));
+  // Effective persona for the active chat — drives the dynamic
+  // assistant-bubble label. When set, the message header reads the
+  // persona's name (uppercased) in place of "ASSISTANT".
+  let activePersona = $derived($activeChat
+    ? findPersona($settings.personas, $activeChat.personaId)
+    : undefined);
 </script>
 
 <div class="grid h-screen bg-bg text-fg {gridCols}">
@@ -618,7 +621,7 @@
   </aside>
 
   <main class="flex flex-col min-w-0 h-screen">
-    <Topbar on:export={exportActiveChat} />
+    <Topbar onExport={exportActiveChat} />
 
     <MessageList
       {messages}
@@ -626,7 +629,7 @@
       {canAlwaysApprove}
       personaLabel={activePersona?.name ?? ''}
       bind:scrollEl={messagesEl}
-      on:permission={(e) => respondPermission(e.detail.id, e.detail.name, e.detail.decision)}
+      onPermission={(p) => respondPermission(p.id, p.name, p.decision)}
     />
 
     {#if error}
@@ -635,7 +638,7 @@
         <button
           class="text-error-fg/70 hover:text-error-fg cursor-pointer leading-none"
           aria-label="dismiss error"
-          on:click={() => error = ''}
+          onclick={() => error = ''}
         >×</button>
       </div>
     {/if}
@@ -649,15 +652,15 @@
       {attachmentsBlocked}
       {ctxUsed}
       {ctxWindow}
-      on:send={send}
-      on:cancel={cancel}
-      on:error={(e) => (error = e.detail)}
+      onSend={send}
+      onCancel={cancel}
+      onError={(msg) => (error = msg)}
     />
   </main>
 
   <aside class="overflow-hidden min-w-0" aria-hidden={!$settings.showRight}>
     {#if $settings.showRight}
-      <SettingsPanel mode="workspace" {providers} {models} {busy} {outputDir} onReset={resetApp} on:modelsRefreshed={(e) => reloadModels(e.detail.provider)} />
+      <SettingsPanel mode="workspace" {providers} {models} {busy} {outputDir} onReset={resetApp} onModelsRefreshed={reloadModels} />
     {/if}
   </aside>
 </div>
@@ -684,7 +687,7 @@
         >×</button>
       </div>
       <div class="flex-1 overflow-y-auto">
-        <SettingsPanel mode="global" {providers} {models} {busy} {outputDir} onReset={resetApp} on:modelsRefreshed={(e) => reloadModels(e.detail.provider)} />
+        <SettingsPanel mode="global" {providers} {models} {busy} {outputDir} onReset={resetApp} onModelsRefreshed={reloadModels} />
       </div>
     </div>
   {/if}

@@ -20,12 +20,25 @@
   import MCPServersSection from './settings/MCPServersSection.svelte';
   import GeneralSettings from './settings/GeneralSettings.svelte';
 
-  export let providers: string[] = [];
-  export let models: string[] = [];
-  export let busy: boolean = false;
-  export let outputDir: string = '';
-  export let onReset: () => void = () => {};
-  export let mode: 'workspace' | 'global' = 'global';
+  interface Props {
+    providers?: string[];
+    models?: string[];
+    busy?: boolean;
+    outputDir?: string;
+    onReset?: () => void;
+    onModelsRefreshed?: (provider: string) => void;
+    mode?: 'workspace' | 'global';
+  }
+
+  let {
+    providers = [],
+    models = [],
+    busy = false,
+    outputDir = '',
+    onReset = () => {},
+    onModelsRefreshed = () => {},
+    mode = 'global'
+  }: Props = $props();
 
   // "models" — provider / model / system / sampling / thinking.
   // "agents" — personas, knowledge, tools (workspace) OR trusted (global).
@@ -55,7 +68,7 @@
 
   <!-- Models tab -->
   <div use:melt={$tabsContent('models')}>
-    <ProviderSettings {providers} {models} {busy} {mode} on:modelsRefreshed />
+    <ProviderSettings {providers} {models} {busy} {mode} {onModelsRefreshed} />
   </div>
 
   <!-- Roles tab -->

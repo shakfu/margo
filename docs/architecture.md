@@ -46,7 +46,7 @@ Tests: `models_test.go`, `docs_test.go`.
 
 ### `pkg/margo/providers/{anthropic,openai,openrouter}`
 
-Each provider is a thin adapter from `margo.Request` → provider-native shape and provider stream → `margo.Chunk`. ~300 LoC each, similar layout:
+Each provider is a thin adapter from `margo.Request` → provider-native shape and provider stream → `margo.Chunk`. ~300 LoC each, similar layout. `openai` delegates to `openaicompat` (openai-go SDK); `openrouter` uses the OpenRouter Go SDK, which adds reasoning and the full model catalog:
 
 - `Name()` returns the provider id (string keyed by `Session.clientFor`).
 
@@ -58,7 +58,7 @@ Each provider is a thin adapter from `margo.Request` → provider-native shape a
 
 - `Stream(ctx, req)` — returns `<-chan margo.Chunk`. Tool-call arguments arrive in JSON fragments across multiple stream frames and are reassembled before emission.
 
-Tests use `httptest.NewServer` + `option.WithBaseURL` to replay fixtures without touching live APIs. The pattern is identical across providers; see `pkg/margo/providers/anthropic/anthropic_test.go` as the worked example.
+Tests use `httptest.NewServer` plus each SDK's base-URL override to replay fixtures without touching live APIs. The pattern is identical across providers; see `pkg/margo/providers/anthropic/anthropic_test.go` as the worked example.
 
 ### `pkg/margo/agent`
 
@@ -66,19 +66,19 @@ Eino integration and agent runners.
 
 - `adapter.go` — wraps a `margo.Client` as `eino.components/model.ToolCallingChatModel` so the rest of the Eino runtime works against any of our providers.
 
-- `runner.go` + `runner_{react,plan,workflow,adk}.go` — slash- command-selectable agent strategies:
+- `runner.go` + `{adk,plan,workflow}_runner.go` — slash-command-selectable agent strategies, all built on Eino ADK. `RunByType(runnerType, …)` is the dispatcher; empty string defaults to ReAct.
 
-  - **react** — ReAct loop (default; what plain chat uses with tools).
+  - **react** (`adk_runner.go`) — ReAct loop (default; what plain chat uses with tools).
 
   - **plan** — plan-then-execute (planning phase + tool-using execution phase).
 
   - **workflow** — sequential drafter → critic → refiner pipeline; each stage is its own `adk.ChatModelAgent` with a distinct system prompt and tool palette.
 
-  - **adk** — Eino ADK runner; lower-level access. `RunByType(runnerType, …)` is the dispatcher; empty string defaults to ReAct.
+- `adk_common.go` — `prepareRun` and `runADKAgent`, the setup and event loop all three runners share. The setup gives every agent one `Adapter` that trims each model call to the context budget and meters its usage and provider-billed cost, and installs the tool middleware (errors returned to the model as results, permission gate, cancellation). The loop bridges ADK events to `StepEvent`s and puts the metered total on `StepDone`.
 
 - `permission.go` — `WithPermissions` middleware. Wraps each tool's `InvokableRun` with a gate function; the gate emits a permission request and blocks on a `chan PermissionDecision`. `ReadOnlyTools` is a name allow-list of tools that bypass the gate (currently `current_time`, `search_knowledge`).
 
-- `budget.go` — `BudgetForModel` reads the context window from `margo.DefaultCatalog`; `RewriteMargoForBudget` summarises old history when a conversation is about to overflow. Uses characters/4 as a coarse token estimate (acknowledged inaccurate by ~20-40% on dense content; a real tokenizer is on the roadmap).
+- `budget.go` — `BudgetForModel` reads the context window via `margo.LookupModel` (live catalog first, embedded `models.json` second); `RewriteForBudget` / `RewriteMargoForBudget` drop the oldest turns when a conversation is about to overflow, never orphaning a tool result. Uses characters/4 as a coarse token estimate (acknowledged inaccurate by ~20-40% on dense content; a real tokenizer is on the roadmap).
 
 - `tools_*.go` — built-in tools (`current_time`, `web_fetch`, `search_knowledge`, `quarto_render`). Each uses Eino's `toolutils.InferTool` to derive a JSON Schema from a Go struct.
 
@@ -148,13 +148,13 @@ The default-shipped frontend.
 
 - `main.go` — Wails boot. Parses the `-workspace` flag, loads MCP config from disk, embeds the Svelte build via `//go:embed all:frontend/dist`, runs `wails.Run` with `OnStartup`/`OnShutdown` hooks.
 
-- `app.go` — Wails bindings. Pure wire-format adapter: JSON- tagged structs match the prior `wailsjs/go/main/App` shapes byte-for-byte; base64 ↔ bytes at the IPC edge; every streaming method consumes a `<-chan core.Event` from `Session` and translates to `runtime.EventsEmit` on `margo:stream:<id>:{chunk,done,error}` channels. ~417 lines after the refactor; was 1088.
+- `app.go` — Wails bindings. Pure wire-format adapter: JSON-tagged structs match the prior `wailsjs/go/main/App` shapes byte-for-byte; base64 ↔ bytes at the IPC edge; every streaming method consumes a `<-chan core.Event` from `Session` and translates to `runtime.EventsEmit` on `margo:stream:<id>:{chunk,done,error}` channels. 684 lines; was 1088 before the `core.Session` refactor.
 
-- `frontend/` — Svelte 4 + TypeScript + Tailwind + Melt UI.
+- `frontend/` — Svelte 5 + TypeScript + Tailwind + Melt UI.
 
   - `src/App.svelte` — chat pane, message rendering, input, streaming event handler, chat list orchestration.
 
-  - `src/lib/store.ts` — Svelte stores for settings, chats, workspaces. localStorage-backed; the canonical source for chat state today (a SQLite migration is a tracked future improvement — see REVIEW §7.6).
+  - `src/lib/store/` — Svelte stores for settings, chats, workspaces, personas and the model catalog, re-exported from `index.ts`. localStorage-backed; the canonical source for chat state today (a SQLite migration is a tracked future improvement — see REVIEW §7.6). `cost.ts` prices each turn: the provider-billed cost when the turn carries one, otherwise tokens at catalog rates.
 
   - `src/lib/SettingsPanel.svelte` — thin tabs shell.
 
@@ -372,11 +372,13 @@ Restart margo. The server appears in the MCP tab of the right sidebar (status: s
 
 ## 6. Test landscape
 
-- `make test` — runs everything default. ~14 packages, ~80 tests. Includes provider tests (anthropic / openai / openrouter) via `httptest`; covers the SSE / tool-call / multimodal paths.
+- `make test` — runs everything default: 14 packages, 233 top-level tests. Includes provider tests (anthropic / openai / openrouter) via `httptest`; covers the SSE / tool-call / multimodal paths.
 
 - `make test-integration` — adds the MCP integration tests (build tag `integration`). Requires `npx` on PATH; downloads the npm package on first run (slow). Excluded from `make test` because the cold-start cost is unfriendly to inner-loop development.
 
-Coverage as of this writing: thorough in `pkg/margo/agent`, `pkg/margo/rag`, `pkg/margo/mcp`, `pkg/margo/providers`; moderate in `pkg/margo/core`; minimal in `pkg/margo`; **zero in `frontend/`** — see REVIEW §7.5 for the planned Vitest + Playwright work.
+- `make test-frontend` — Vitest: 97 tests across `store`, `stream`, `cost`, `slash` and `attachments`. No Svelte component tests yet.
+
+Coverage as of this writing: thorough in `pkg/margo/agent`, `pkg/margo/rag`, `pkg/margo/mcp`, `pkg/margo/providers`; moderate in `pkg/margo/core`; minimal in `pkg/margo`; frontend logic modules covered, **components untested** — see TODO 11.1 (component tests) and 10.12 (Playwright smoke test).
 
 ## 7. Build / run
 

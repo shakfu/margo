@@ -6,10 +6,10 @@
   import { settings, activeWorkspace, setWorkspaceToolEnabled, isToolEnabledForWorkspace } from '../store';
   import { createCollapsible, melt } from '@melt-ui/svelte';
   import { ToolsMetadata } from '../../../wailsjs/go/main/App.js';
-  import { onMount } from 'svelte';
+  import { untrack } from 'svelte';
 
   type ToolMeta = { name: string; description: string; isReadOnly: boolean; isStreamable: boolean };
-  let toolsCatalog: ToolMeta[] = [];
+  let toolsCatalog: ToolMeta[] = $state([]);
 
   const { elements: { root: toolsRoot, trigger: toolsTrig, content: toolsContent }, states: { open: toolsOpen } } =
     createCollapsible({ defaultOpen: false });
@@ -21,12 +21,11 @@
       toolsCatalog = [];
     }
   }
-  onMount(refresh);
 
   // Refresh whenever the active workspace changes — the per-workspace
   // checkbox state derives from $activeWorkspace, but also re-pull the
   // catalog in case it grew (e.g. an MCP server just turned ready).
-  $: { void $settings.activeWorkspaceId; refresh(); }
+  $effect(() => { void $settings.activeWorkspaceId; untrack(refresh); });
 
   function onToggle(name: string, ev: Event) {
     const checked = (ev.currentTarget as HTMLInputElement).checked;
@@ -64,7 +63,7 @@
             <input
               type="checkbox" class="mt-0.5"
               checked={isToolEnabledForWorkspace($activeWorkspace, t.name)}
-              on:change={(ev) => onToggle(t.name, ev)}
+              onchange={(ev) => onToggle(t.name, ev)}
               aria-label={`Enable ${t.name}`}
             />
             <div class="flex-1 min-w-0">

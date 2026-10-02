@@ -42,6 +42,13 @@ type Adapter struct {
 	// Subsequent React-loop turns (assistant/tool turns) don't carry
 	// attachments — only the user's original prompt does.
 	finalUserAttachments []margo.Part
+	// budget, when positive, is the input-token budget each request is
+	// trimmed to (see RewriteForBudget). Zero disables trimming.
+	budget int
+	// meter, when set, accumulates the usage of every model call. Struct
+	// copies share the pointer, so all agents derived from one adapter
+	// count into one total.
+	meter *usageTotal
 }
 
 // NewAdapter returns a chat-model adapter for the given margo client.
@@ -61,13 +68,28 @@ func NewAdapter(c margo.Client, defaults margo.Request) *Adapter {
 // shipping. Used by StreamReact to inject image attachments that came
 // in via the front-end; the parts are independent of WithTools.
 func (a *Adapter) WithFinalUserAttachments(parts []margo.Part) *Adapter {
-	out := &Adapter{
-		client:               a.client,
-		defaults:             a.defaults,
-		tools:                a.tools,
-		finalUserAttachments: parts,
-	}
-	return out
+	out := *a
+	out.finalUserAttachments = parts
+	return &out
+}
+
+// WithBudget returns a new Adapter that trims each request's messages to
+// fit the given input-token budget before sending. Trimming here, rather
+// than in an ADK handler, covers every runner and every stage, including
+// the planexecute agents, which accept no handlers.
+func (a *Adapter) WithBudget(tokens int) *Adapter {
+	out := *a
+	out.budget = tokens
+	return &out
+}
+
+// WithUsageMeter returns a new Adapter that adds every model call's
+// usage to m. The adapter sees every call, including planexecute's
+// planner and replanner calls, which never surface as events.
+func (a *Adapter) WithUsageMeter(m *usageTotal) *Adapter {
+	out := *a
+	out.meter = m
+	return &out
 }
 
 // Compile-time assertions.
@@ -80,11 +102,11 @@ var (
 // is not modified, so a single base adapter can be safely shared across
 // goroutines and derived per-request with different tool sets.
 func (a *Adapter) WithTools(tools []*schema.ToolInfo) (einomodel.ToolCallingChatModel, error) {
-	out := &Adapter{
-		client:               a.client,
-		defaults:             a.defaults,
-		finalUserAttachments: a.finalUserAttachments,
-	}
+	// Copy the whole struct so options such as the budget survive; ADK
+	// derives every agent's model through WithTools.
+	cp := *a
+	out := &cp
+	out.tools = nil
 	if len(tools) > 0 {
 		converted := make([]margo.ToolDef, 0, len(tools))
 		for _, t := range tools {
@@ -126,6 +148,9 @@ func toolInfoToDef(t *schema.ToolInfo) (margo.ToolDef, error) {
 }
 
 func (a *Adapter) request(input []*schema.Message) margo.Request {
+	if a.budget > 0 {
+		input = RewriteForBudget(input, a.budget)
+	}
 	req := a.defaults
 	req.Messages = nil
 	req.Tools = a.tools
@@ -191,6 +216,7 @@ func (a *Adapter) Generate(ctx context.Context, input []*schema.Message, _ ...ei
 	if err != nil {
 		return nil, err
 	}
+	a.meter.add(resp.Usage)
 	out := &schema.Message{
 		Role:             schema.Assistant,
 		Content:          resp.Text,
@@ -250,6 +276,7 @@ func (a *Adapter) Stream(ctx context.Context, input []*schema.Message, _ ...eino
 				return
 			}
 			if chunk.Usage != nil {
+				a.meter.add(*chunk.Usage)
 				writer.Send(&schema.Message{
 					Role: schema.Assistant,
 					ResponseMeta: &schema.ResponseMeta{

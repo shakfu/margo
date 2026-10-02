@@ -33,7 +33,7 @@ margo/
 │   ├── mcp/              # Model Context Protocol client + subprocess manager
 │   ├── rag/              # embedder, chunker, vector store, indexer
 │   └── providers/
-│       ├── openaicompat/ # shared OpenAI Chat Completions wire format
+│       ├── openaicompat/ # OpenAI Chat Completions wire format (used by openai/)
 │       ├── anthropic/
 │       ├── openai/
 │       └── openrouter/
@@ -56,7 +56,7 @@ margo/
 │   │       ├── markdown.ts      # marked + hljs + DOMPurify; math-aware
 │   │       ├── mathjax.ts       # debounced typeset action
 │   │       └── settings/        # settings panel subcomponents
-│   ├── public/mathjax/          # vendored MathJax 3 SVG bundle
+│   ├── public/mathjax/          # vendored MathJax 4 (SVG output, fonts, speech)
 │   └── wailsjs/                 # auto-generated Go<->JS bindings
 │
 ├── docs/                 # architecture.md, concepts.md, dev/
@@ -68,9 +68,9 @@ margo/
 
 ## Setup
 
-Requirements: Go 1.24+, Node 20+, Wails v2 CLI (`go install github.com/wailsapp/wails/v2/cmd/wails@latest`).
+Requirements: Go 1.26+, Node 22+, Wails v2 CLI (`go install github.com/wailsapp/wails/v2/cmd/wails@v2.16.0`, then add `$(go env GOPATH)/bin` to `PATH`).
 
-Wails v2.11.0 pins `golang.org/x/tools` v0.30.0, which cannot read the export data Go 1.27 writes; every wails subcommand that analyses the module fails with `internal error: package "errors" without types was imported from ...`. The Makefile therefore pins `GOTOOLCHAIN=go1.26.2` for wails targets only — `go build`, `go test`, and `go vet` use whatever Go is installed. Override with `make dev WAILS_GOTOOLCHAIN=go1.27.0` once wails ships a newer x/tools. Note that a `toolchain` directive in `go.mod` does not solve this: it sets a minimum, so a newer local Go still wins.
+On Linux, wails also needs `libgtk-3-dev` and `libwebkit2gtk-4.1-dev` (or `-4.0-dev` on older distros). `wails doctor` reports webkit as missing when only 4.1 is installed; the Makefile detects 4.1 and passes `-tags webkit2_41`.
 
 ```sh
 cp .env.example .env
@@ -135,9 +135,9 @@ Flags: `-provider`, `-model`, `-prompt`, `-system`, `-stream`, `-list`, `-refres
 
 - **Attachments.** Images and PDFs, drag-drop or paste. Anthropic takes PDFs natively; other providers get server-side text extraction. Attachments from earlier turns are re-fed on follow-up questions.
 
-- **Markdown, code, math.** GFM via `marked`, ~30 languages via `highlight.js`, sanitized with `dompurify`. Vendored MathJax 3 (SVG output, no CDN): inline `$x$` / `\(x\)` and display `$$x$$` / `\[x\]`, matrices included.
+- **Markdown, code, math.** GFM via `marked`, ~30 languages via `highlight.js`, sanitized with `dompurify`. Vendored MathJax 4 (SVG output, no CDN): inline `$x$` / `\(x\)` and display `$$x$$` / `\[x\]`, matrices included.
 
-- **Cost meter and context gauge.** Running USD estimate and context-window usage per chat. Each turn is priced against the model that produced it, so switching model mid-chat does not reprice the history. The header shows the total; click it for the per-model split. A `+` suffix means some turns have no declared rate and the total is a floor.
+- **Cost meter and context gauge.** Running USD cost and context-window usage per chat. OpenRouter turns use the cost OpenRouter reports billing; other turns are estimated at catalog rates, each against the model that produced it, so switching model mid-chat does not reprice the history. The header shows the total; click it for the per-model split. A `+` suffix means some turns have no declared rate and the total is a floor.
 
 - **Markdown export.** Serialise a chat to a `.md` file, including attachments and tool steps.
 

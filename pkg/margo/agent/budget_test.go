@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -183,5 +184,93 @@ func TestRewriteMargoForBudgetTrimsAttachmentHeavyHistory(t *testing.T) {
 	// The user's latest ask must survive.
 	if got[len(got)-1].Content != "and now?" {
 		t.Errorf("final turn was dropped: %+v", got[len(got)-1])
+	}
+}
+
+// TestReactRunnerAppliesBudget guards the wiring, not the algorithm:
+// history over the default 128k budget must reach the model trimmed.
+func TestReactRunnerAppliesBudget(t *testing.T) {
+	var input []*schema.Message
+	for i := 0; i < 3; i++ {
+		input = append(input,
+			&schema.Message{Role: schema.User, Content: big(20_000)},
+			&schema.Message{Role: schema.Assistant, Content: big(20_000)},
+		)
+	}
+	input = append(input, &schema.Message{Role: schema.User, Content: "and now?"})
+
+	client := &scriptedClient{turns: [][]margo.Chunk{{{Kind: margo.ChunkText, Text: "ok"}}}}
+	err := ReactRunner{}.Run(context.Background(), client, margo.Request{Model: "unlisted-model"},
+		nil, input, nil, nil, func(StepEvent) {})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(client.reqs) != 1 {
+		t.Fatalf("got %d model calls, want 1", len(client.reqs))
+	}
+	got := client.reqs[0].Messages
+	if len(got) >= len(input) {
+		t.Fatalf("model received %d messages, want fewer than %d (no trim)", len(got), len(input))
+	}
+	if last := got[len(got)-1]; last.Role != margo.RoleUser || last.Content != "and now?" {
+		t.Errorf("final user turn not preserved: %+v", last)
+	}
+}
+
+// TestWorkflowRunnerAppliesBudget: every stage's model call is trimmed.
+// Before the budget moved into the adapter, only the ReAct runner
+// trimmed, so each workflow stage sent the full history.
+func TestWorkflowRunnerAppliesBudget(t *testing.T) {
+	var input []*schema.Message
+	for i := 0; i < 3; i++ {
+		input = append(input,
+			&schema.Message{Role: schema.User, Content: big(20_000)},
+			&schema.Message{Role: schema.Assistant, Content: big(20_000)},
+		)
+	}
+	input = append(input, &schema.Message{Role: schema.User, Content: "and now?"})
+
+	client := &scriptedClient{turns: [][]margo.Chunk{
+		{{Kind: margo.ChunkText, Text: "draft"}},
+		{{Kind: margo.ChunkText, Text: "critique"}},
+		{{Kind: margo.ChunkText, Text: "final"}},
+	}}
+	err := WorkflowRunner{}.Run(context.Background(), client, margo.Request{Model: "unlisted-model"},
+		nil, input, nil, nil, func(StepEvent) {})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(client.reqs) != 3 {
+		t.Fatalf("got %d model calls, want 3 (one per stage)", len(client.reqs))
+	}
+	for i, req := range client.reqs {
+		bigs := 0
+		for _, m := range req.Messages {
+			if len(m.Content) >= 20_000*4 {
+				bigs++
+			}
+		}
+		// Six 20k-token turns exceed the 96k threshold of the default
+		// 128k budget; at most four fit.
+		if bigs > 4 {
+			t.Errorf("stage %d sent %d oversized messages, want at most 4 (no trim)", i, bigs)
+		}
+	}
+}
+
+// TestAdapterBudgetSurvivesDerivation: ADK and planexecute derive each
+// agent's model with WithTools, so the budget must survive it, and every
+// runner's adapter must carry one.
+func TestAdapterBudgetSurvivesDerivation(t *testing.T) {
+	run := prepareRun(context.Background(), &scriptedClient{}, margo.Request{Model: "unlisted-model"}, nil, nil, nil)
+	if run.adapter.budget != BudgetForModel("unlisted-model") {
+		t.Fatalf("prepareRun budget = %d, want %d", run.adapter.budget, BudgetForModel("unlisted-model"))
+	}
+	derived, err := run.adapter.WithTools([]*schema.ToolInfo{{Name: "t"}})
+	if err != nil {
+		t.Fatalf("WithTools: %v", err)
+	}
+	if got := derived.(*Adapter).budget; got != run.adapter.budget {
+		t.Errorf("WithTools dropped the budget: %d, want %d", got, run.adapter.budget)
 	}
 }

@@ -7,8 +7,12 @@
   import { createCollapsible, createDialog, melt } from '@melt-ui/svelte';
   import { OpenPath } from '../../../wailsjs/go/main/App.js';
 
-  export let outputDir: string = '';
-  export let onReset: () => void = () => {};
+  interface Props {
+    outputDir?: string;
+    onReset?: () => void;
+  }
+
+  let { outputDir = '', onReset = () => {} }: Props = $props();
 
   const mk = (open: boolean) => createCollapsible({ defaultOpen: open });
   const { elements: { root: apprRoot, trigger: apprTrig, content: apprContent }, states: { open: apprOpen } } = mk(false);
@@ -46,7 +50,7 @@
   <div use:melt={$apprContent} class="section-body">
     <label class="flex flex-row items-center gap-2 text-[0.8rem] text-fg-muted">
       <span>Theme</span>
-      <button class="mini-btn" on:click={toggleTheme}>
+      <button class="mini-btn" onclick={toggleTheme}>
         {$settings.theme === 'light' ? 'light → dark' : 'dark → light'}
       </button>
     </label>
@@ -66,7 +70,7 @@
     <div class="text-[0.78rem] font-[family-name:var(--font-mono)] text-fg break-all bg-input-bg border border-border rounded px-2 py-1 mb-2">
       {outputDir || 'unavailable'}
     </div>
-    <button class="mini-btn" on:click={openOutputDir} disabled={!outputDir}>Open in Finder</button>
+    <button class="mini-btn" onclick={openOutputDir} disabled={!outputDir}>Open in Finder</button>
   </div>
 </section>
 
@@ -82,7 +86,7 @@
     </p>
     <button
       class="mini-btn border-error-border bg-error-bg text-error-fg hover:opacity-90"
-      on:click={() => resetDlgOpen.set(true)}
+      onclick={() => resetDlgOpen.set(true)}
     >Reset margo…</button>
   </div>
 </section>
@@ -100,7 +104,7 @@
       </p>
       <div class="mt-4 flex justify-end gap-2">
         <button use:melt={$resetDlgClose} class="px-3 py-1.5 text-[0.85rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg">Cancel</button>
-        <button class="px-3 py-1.5 text-[0.85rem] rounded border border-error-border bg-error-bg text-error-fg cursor-pointer hover:opacity-90 font-semibold" on:click={confirmReset}>Reset</button>
+        <button class="px-3 py-1.5 text-[0.85rem] rounded border border-error-border bg-error-bg text-error-fg cursor-pointer hover:opacity-90 font-semibold" onclick={confirmReset}>Reset</button>
       </div>
     </div>
   {/if}

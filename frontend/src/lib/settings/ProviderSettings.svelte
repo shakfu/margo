@@ -5,27 +5,39 @@
   // section state; reads/writes route through writeKey based on `mode`.
   import { settings, effectiveSettings, rememberModel, modelForProvider, type WorkspaceOverrides } from '../store';
   import { createSelect, createCollapsible, melt } from '@melt-ui/svelte';
+  import { untrack } from 'svelte';
   import { get } from 'svelte/store';
   import { RefreshModels } from '../../../wailsjs/go/main/App.js';
   import { writeKey, type SettingsScope } from './writeKey';
-  import { createEventDispatcher } from 'svelte';
 
-  const dispatch = createEventDispatcher<{ modelsRefreshed: { provider: string } }>();
+  interface Props {
+    providers?: string[];
+    models?: string[];
+    busy?: boolean;
+    mode?: SettingsScope;
+    onModelsRefreshed?: (provider: string) => void;
+  }
 
-  export let providers: string[] = [];
-  export let models: string[] = [];
-  export let busy: boolean = false;
-  export let mode: SettingsScope = 'global';
+  let {
+    providers = [],
+    models = [],
+    busy = false,
+    mode = 'global',
+    onModelsRefreshed = () => {}
+  }: Props = $props();
 
-  $: display = mode === 'workspace' ? $effectiveSettings : $settings;
+  let display = $derived(mode === 'workspace' ? $effectiveSettings : $settings);
 
   function write<K extends keyof WorkspaceOverrides>(key: K, value: WorkspaceOverrides[K]) {
     writeKey(mode, key, value);
   }
 
+  // Store backing the selects. `mode` is fixed per instance.
+  const source = untrack(() => mode) === 'workspace' ? effectiveSettings : settings;
+
   // Provider select. Reads / writes route through `display` / write
   // so the same component works in both modes.
-  const initialProvider = mode === 'workspace' ? get(effectiveSettings).provider : get(settings).provider;
+  const initialProvider = get(source).provider;
   const {
     elements: { trigger: provSelTrig, menu: provSelMenu, option: provSelOpt },
     states: { selectedLabel: provLabel, open: provOpen, selected: provSelected },
@@ -37,7 +49,7 @@
 
   provSelected.subscribe(s => {
     if (!s) return;
-    const cur = mode === 'workspace' ? get(effectiveSettings).provider : get(settings).provider;
+    const cur = get(source).provider;
     if (s.value === cur) return;
     write('provider', s.value);
     // Model lists are per-provider, so the current pick is invalid.
@@ -46,8 +58,7 @@
     // just defers to the reactive fallback below.
     write('model', modelForProvider(s.value, models, get(settings).lastModelByProvider));
   });
-  const provSource = mode === 'workspace' ? effectiveSettings : settings;
-  provSource.subscribe(s => {
+  source.subscribe(s => {
     const cur = get(provSelected);
     if (s.provider && (!cur || cur.value !== s.provider)) {
       provSelected.set({ value: s.provider, label: s.provider });
@@ -55,7 +66,7 @@
   });
 
   // Model select. Same dual-mode pattern as Provider.
-  const initialModel = mode === 'workspace' ? get(effectiveSettings).model : get(settings).model;
+  const initialModel = get(source).model;
   const {
     elements: { trigger: modSelTrig, menu: modSelMenu, option: modSelOpt },
     states: { selectedLabel: modLabel, open: modOpen, selected: modSelected },
@@ -66,14 +77,13 @@
   });
   modSelected.subscribe(s => {
     if (!s) return;
-    const cur = mode === 'workspace' ? get(effectiveSettings).model : get(settings).model;
+    const cur = get(source).model;
     if (s.value === cur) return;
     write('model', s.value);
-    const provider = mode === 'workspace' ? get(effectiveSettings).provider : get(settings).provider;
+    const provider = get(source).provider;
     rememberModel(provider, s.value);
   });
-  const modSource = mode === 'workspace' ? effectiveSettings : settings;
-  modSource.subscribe(s => {
+  source.subscribe(s => {
     const cur = get(modSelected);
     if (s.model && (!cur || cur.value !== s.model)) {
       modSelected.set({ value: s.model, label: s.model });
@@ -83,15 +93,18 @@
   // When the models prop arrives, ensure the effective model is still
   // valid. Prefer the provider's remembered pick; fall back to the
   // catalog default only when that model is gone from the catalog.
-  $: if (models.length > 0 && display && !models.includes(display.model)) {
-    write('model', modelForProvider(display.provider, models, $settings.lastModelByProvider));
-  }
+  $effect(() => {
+    if (models.length > 0 && display && !models.includes(display.model)) {
+      const m = modelForProvider(display.provider, models, $settings.lastModelByProvider);
+      untrack(() => write('model', m));
+    }
+  });
 
   // Catalog refresh. The Go side caches per provider with a 24h TTL and
   // warms it at startup; this is the manual override for "the provider
   // shipped something an hour ago".
-  let refreshing = false;
-  let refreshError = '';
+  let refreshing = $state(false);
+  let refreshError = $state('');
   async function refreshModels() {
     const provider = display?.provider;
     if (!provider || refreshing) return;
@@ -100,7 +113,7 @@
     try {
       await RefreshModels(provider);
       // The parent owns the `models` prop; tell it to re-read.
-      dispatch('modelsRefreshed', { provider });
+      onModelsRefreshed(provider);
     } catch (e) {
       refreshError = String(e);
     } finally {
@@ -116,10 +129,9 @@
   const { elements: { root: sampRoot, trigger: sampTrig, content: sampContent }, states: { open: sampOpen } } = mk(false);
   const { elements: { root: thinkRoot, trigger: thinkTrig, content: thinkContent }, states: { open: thinkSectOpen } } = mk(false);
 
-  // Stop sequences edited as comma-separated text. Initialised empty;
-  // the reactive seed below sets the value before first paint.
-  let stopText = '';
-  $: stopText = (display?.stopSequences ?? []).join(', ');
+  // Stop sequences edited as comma-separated text. Writable derived:
+  // local edits stick until the stored value changes.
+  let stopText = $derived((display?.stopSequences ?? []).join(', '));
   function commitStopSequences() {
     const arr = stopText.split(',').map(s => s.trim()).filter(s => s.length > 0);
     write('stopSequences', arr);
@@ -173,7 +185,7 @@
       </div>
     {/if}
     <div class="flex flex-row items-center gap-2 mt-1">
-      <button class="mini-btn" on:click={refreshModels} disabled={busy || refreshing || !display?.provider}>
+      <button class="mini-btn" onclick={refreshModels} disabled={busy || refreshing || !display?.provider}>
         {refreshing ? 'Refreshing…' : 'Refresh list'}
       </button>
       <span class="text-fg-faint text-[0.72rem]">{models.length} model{models.length === 1 ? '' : 's'}</span>
@@ -194,7 +206,7 @@
     <textarea
       class="text-input"
       value={display.system}
-      on:input={(e) => write('system', e.currentTarget.value)}
+      oninput={(e) => write('system', e.currentTarget.value)}
       disabled={busy}
       rows="6"
       placeholder="Optional system prompt. Applies to all messages in the active chat."
@@ -218,10 +230,10 @@
         <input
           type="range" min="0" max="2" step="0.05"
           value={display.temperature ?? 1}
-          on:input={(e) => write('temperature', parseFloat(e.currentTarget.value))}
+          oninput={(e) => write('temperature', parseFloat(e.currentTarget.value))}
           disabled={busy} class="flex-1"
         />
-        <button class="mini-btn" on:click={() => write('temperature', null)} disabled={busy} title="Use provider default">reset</button>
+        <button class="mini-btn" onclick={() => write('temperature', null)} disabled={busy} title="Use provider default">reset</button>
       </div>
     </label>
 
@@ -234,10 +246,10 @@
         <input
           type="range" min="0" max="1" step="0.01"
           value={display.topP ?? 1}
-          on:input={(e) => write('topP', parseFloat(e.currentTarget.value))}
+          oninput={(e) => write('topP', parseFloat(e.currentTarget.value))}
           disabled={busy} class="flex-1"
         />
-        <button class="mini-btn" on:click={() => write('topP', null)} disabled={busy}>reset</button>
+        <button class="mini-btn" onclick={() => write('topP', null)} disabled={busy}>reset</button>
       </div>
     </label>
 
@@ -246,14 +258,14 @@
       <input
         type="number" class="text-input" min="1" step="1"
         value={display.maxTokens}
-        on:input={(e) => write('maxTokens', parseInt(e.currentTarget.value, 10) || 0)}
+        oninput={(e) => write('maxTokens', parseInt(e.currentTarget.value, 10) || 0)}
         disabled={busy}
       />
     </label>
 
     <label class="field">
       <span>Stop sequences (comma-separated)</span>
-      <input type="text" class="text-input" bind:value={stopText} on:blur={commitStopSequences} disabled={busy} />
+      <input type="text" class="text-input" bind:value={stopText} onblur={commitStopSequences} disabled={busy} />
     </label>
   </div>
 </section>
@@ -271,7 +283,7 @@
     <label class="flex flex-row items-center gap-2 text-[0.8rem] text-fg-muted">
       <input
         type="checkbox" checked={display.thinkEnabled}
-        on:change={(e) => write('thinkEnabled', e.currentTarget.checked)}
+        onchange={(e) => write('thinkEnabled', e.currentTarget.checked)}
         disabled={busy} class="m-0"
       />
       <span>Enable extended thinking (Anthropic)</span>
@@ -281,7 +293,7 @@
       <input
         type="number" class="text-input" min="1024" step="256"
         value={display.thinkBudget}
-        on:input={(e) => write('thinkBudget', parseInt(e.currentTarget.value, 10) || 1024)}
+        oninput={(e) => write('thinkBudget', parseInt(e.currentTarget.value, 10) || 1024)}
         disabled={busy || !display.thinkEnabled}
       />
     </label>

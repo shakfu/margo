@@ -4,13 +4,13 @@
   import { settings } from '../store';
   import { createCollapsible, melt } from '@melt-ui/svelte';
   import { IndexPath, KnowledgeSources, DeleteKnowledgeSource, PickKnowledgePath } from '../../../wailsjs/go/main/App.js';
-  import { onMount } from 'svelte';
+  import { untrack } from 'svelte';
 
   type KSource = { path: string; isDir: boolean; fileCount: number; chunkCount: number; indexedAt: string };
-  let kbSources: KSource[] = [];
-  let kbBusy = false;
-  let kbError = '';
-  let kbStatus = '';
+  let kbSources: KSource[] = $state([]);
+  let kbBusy = $state(false);
+  let kbError = $state('');
+  let kbStatus = $state('');
 
   const { elements: { root: kbRoot, trigger: kbTrig, content: kbContent }, states: { open: kbOpen } } =
     createCollapsible({ defaultOpen: false });
@@ -23,9 +23,8 @@
     }
   }
 
-  onMount(refreshKbSources);
   // Reload when active workspace changes — the indexed-source list is per-workspace.
-  $: { void $settings.activeWorkspaceId; refreshKbSources(); }
+  $effect(() => { void $settings.activeWorkspaceId; untrack(refreshKbSources); });
 
   async function indexAtPath(path: string) {
     kbError = '';
@@ -95,16 +94,16 @@
               </div>
             </div>
             <div class="flex flex-col gap-1 shrink-0">
-              <button class="mini-btn" on:click={() => refreshKbSource(s.path)} disabled={kbBusy} title="Re-scan; unchanged files are reused">Refresh</button>
-              <button class="mini-btn" on:click={() => removeKbSource(s.path)} disabled={kbBusy}>Remove</button>
+              <button class="mini-btn" onclick={() => refreshKbSource(s.path)} disabled={kbBusy} title="Re-scan; unchanged files are reused">Refresh</button>
+              <button class="mini-btn" onclick={() => removeKbSource(s.path)} disabled={kbBusy}>Remove</button>
             </div>
           </li>
         {/each}
       </ul>
     {/if}
     <div class="flex gap-2">
-      <button class="mini-btn" on:click={() => addKbPath(false)} disabled={kbBusy}>+ Index file</button>
-      <button class="mini-btn" on:click={() => addKbPath(true)} disabled={kbBusy}>+ Index folder</button>
+      <button class="mini-btn" onclick={() => addKbPath(false)} disabled={kbBusy}>+ Index file</button>
+      <button class="mini-btn" onclick={() => addKbPath(true)} disabled={kbBusy}>+ Index folder</button>
     </div>
     {#if kbBusy}<div class="text-[0.7rem] text-fg-faint mt-1 italic">indexing…</div>{/if}
     {#if kbStatus && !kbBusy}<div class="text-[0.7rem] text-fg-muted mt-1 break-words">{kbStatus}</div>{/if}

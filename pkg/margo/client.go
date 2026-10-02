@@ -123,6 +123,11 @@ type Usage struct {
 	OutputTokens int
 	FirstTokenMs int64
 	TotalMs      int64
+
+	// Cost is the USD amount the provider billed, when it reports one
+	// (OpenRouter does). Nil means unreported; callers estimate from
+	// token counts and catalog rates instead.
+	Cost *float64
 }
 
 type Response struct {

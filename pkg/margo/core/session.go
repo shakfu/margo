@@ -288,6 +288,7 @@ func (s *Session) Chat(ctx context.Context, req ChatRequest) (Response, error) {
 		Usage: Usage{
 			InputTokens:  resp.Usage.InputTokens,
 			OutputTokens: resp.Usage.OutputTokens,
+			Cost:         resp.Usage.Cost,
 		},
 	}, nil
 }
@@ -340,6 +341,7 @@ func (s *Session) Stream(ctx context.Context, id string, req ChatRequest) (<-cha
 				OutputTokens: lastUsage.OutputTokens,
 				FirstTokenMs: lastUsage.FirstTokenMs,
 				TotalMs:      lastUsage.TotalMs,
+				Cost:         lastUsage.Cost,
 			}
 		}
 		out <- done
@@ -394,6 +396,8 @@ func (s *Session) StreamAgent(ctx context.Context, id string, req AgentRequest) 
 			switch ev.Kind {
 			case agent.StepText:
 				out <- Event{Kind: EventText, Text: ev.Text}
+			case agent.StepThinking:
+				out <- Event{Kind: EventThinking, Text: ev.Text}
 			case agent.StepToolCall:
 				out <- Event{Kind: EventToolCall, Name: ev.Name, Arguments: ev.Arguments}
 			case agent.StepToolStream:
@@ -414,6 +418,7 @@ func (s *Session) StreamAgent(ctx context.Context, id string, req AgentRequest) 
 						OutputTokens: ev.Usage.OutputTokens,
 						FirstTokenMs: ev.Usage.FirstTokenMs,
 						TotalMs:      ev.Usage.TotalMs,
+						Cost:         ev.Usage.Cost,
 					}
 				}
 				out <- done

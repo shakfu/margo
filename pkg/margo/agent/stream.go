@@ -2,6 +2,9 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"io"
+	"sync"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -15,6 +18,7 @@ type StepKind string
 
 const (
 	StepText       StepKind = "text"
+	StepThinking   StepKind = "thinking"
 	StepToolCall   StepKind = "tool_call"
 	StepToolStream StepKind = "tool_stream"
 	StepToolResult StepKind = "tool_result"
@@ -40,6 +44,8 @@ type RetrievalHit struct {
 // Field semantics by Kind:
 //   - StepText:       Text holds the streamed content delta of the agent's
 //     final answer.
+//   - StepThinking:   Text holds a reasoning delta from a model call, for
+//     providers that report reasoning.
 //   - StepToolCall:   Name is the tool's identifier, Arguments is the raw
 //     JSON the model produced for the call.
 //   - StepToolStream: Name is the tool's identifier, Text holds an incremental
@@ -96,6 +102,125 @@ func PublishStep(ctx context.Context, ev StepEvent) {
 		return
 	}
 	emit(ev)
+}
+
+// failedToolCalls records the IDs of tool calls that failed in one run,
+// so the event bridge can mark their results as errors.
+type failedToolCalls struct {
+	mu  sync.Mutex
+	ids map[string]bool
+}
+
+func (f *failedToolCalls) add(id string) {
+	if id == "" {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.ids == nil {
+		f.ids = map[string]bool{}
+	}
+	f.ids[id] = true
+}
+
+func (f *failedToolCalls) has(id string) bool {
+	if f == nil || id == "" {
+		return false
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ids[id]
+}
+
+// toolErrorsAsResults returns a failed tool call to the model as the
+// call's result, so the run continues and the model can recover or
+// answer without the tool. Without it the error aborts the whole run.
+// A cancelled run still aborts. A streaming tool that fails mid-stream
+// ends its output with the error text (see recoverStream).
+func toolErrorsAsResults(failed *failedToolCalls) compose.ToolMiddleware {
+	// convert reports false when the run itself was cancelled.
+	convert := func(ctx context.Context, in *compose.ToolInput, err error) (string, bool) {
+		if ctx.Err() != nil {
+			return "", false
+		}
+		if in != nil {
+			failed.add(in.CallID)
+		}
+		return toolErrorText(err), true
+	}
+	return compose.ToolMiddleware{
+		Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+			return func(ctx context.Context, in *compose.ToolInput) (*compose.ToolOutput, error) {
+				out, err := next(ctx, in)
+				if err == nil {
+					return out, nil
+				}
+				msg, ok := convert(ctx, in, err)
+				if !ok {
+					return nil, err
+				}
+				return &compose.ToolOutput{Result: msg}, nil
+			}
+		},
+		Streamable: func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
+			return func(ctx context.Context, in *compose.ToolInput) (*compose.StreamToolOutput, error) {
+				out, err := next(ctx, in)
+				if err == nil {
+					callID := ""
+					if in != nil {
+						callID = in.CallID
+					}
+					return &compose.StreamToolOutput{Result: recoverStream(ctx, callID, out.Result, failed)}, nil
+				}
+				msg, ok := convert(ctx, in, err)
+				if !ok {
+					return nil, err
+				}
+				return &compose.StreamToolOutput{Result: schema.StreamReaderFromArray([]string{msg})}, nil
+			}
+		},
+	}
+}
+
+// recoverStream forwards a streaming tool's output. An error after the
+// first chunk becomes a final error chunk, so the model sees the partial
+// output and the failure instead of the run aborting. Cancellation still
+// propagates as an error.
+func recoverStream(ctx context.Context, callID string, src *schema.StreamReader[string], failed *failedToolCalls) *schema.StreamReader[string] {
+	r, w := schema.Pipe[string](1)
+	go func() {
+		defer w.Close()
+		defer src.Close()
+		for {
+			chunk, err := src.Recv()
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			if err != nil {
+				if ctx.Err() != nil {
+					w.Send("", err)
+					return
+				}
+				failed.add(callID)
+				w.Send("\n"+toolErrorText(err), nil)
+				return
+			}
+			if closed := w.Send(chunk, nil); closed {
+				return
+			}
+		}
+	}()
+	return r
+}
+
+// toolErrorText is the result text the model receives for a failed call.
+// A denial asks the model not to retry, so the user is not re-prompted
+// for the same tool within one request.
+func toolErrorText(err error) string {
+	if errors.Is(err, ErrPermissionDenied) {
+		return "Error: the user denied permission to run this tool. Do not call it again for this request; continue without it."
+	}
+	return "Error: " + err.Error()
 }
 
 // abortOnCtxCancel races each tool invocation against ctx.Done(). When the

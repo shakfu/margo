@@ -153,6 +153,8 @@ type StreamUsage struct {
 	OutputTokens int   `json:"outputTokens"`
 	FirstTokenMs int64 `json:"firstTokenMs"`
 	TotalMs      int64 `json:"totalMs"`
+	// Cost is the provider-billed USD amount; omitted when not reported.
+	Cost *float64 `json:"cost,omitempty"`
 }
 
 // StreamDoneEvent is the payload for `margo:stream:<id>:done`.
@@ -243,6 +245,7 @@ func toStreamUsage(u *core.Usage) *StreamUsage {
 		OutputTokens: u.OutputTokens,
 		FirstTokenMs: u.FirstTokenMs,
 		TotalMs:      u.TotalMs,
+		Cost:         u.Cost,
 	}
 }
 
@@ -265,6 +268,7 @@ func (a *App) Chat(provider, system string, messages []ChatMessage, opts ChatOpt
 		Usage: StreamUsage{
 			InputTokens:  resp.Usage.InputTokens,
 			OutputTokens: resp.Usage.OutputTokens,
+			Cost:         resp.Usage.Cost,
 		},
 	}, nil
 }
@@ -522,6 +526,8 @@ func (a *App) StreamAgent(id, provider, system string, messages []ChatMessage, o
 			switch ev.Kind {
 			case core.EventText:
 				runtime.EventsEmit(a.ctx, base+":chunk", AgentStepEvent{Kind: "text", Text: ev.Text})
+			case core.EventThinking:
+				runtime.EventsEmit(a.ctx, base+":chunk", AgentStepEvent{Kind: "thinking", Text: ev.Text})
 			case core.EventToolCall:
 				runtime.EventsEmit(a.ctx, base+":chunk", AgentStepEvent{Kind: "tool_call", Name: ev.Name, Arguments: ev.Arguments})
 			case core.EventToolStream:

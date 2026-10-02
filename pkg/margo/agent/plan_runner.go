@@ -84,5 +84,5 @@ func (PlanExecuteRunner) Run(
 		return fmt.Errorf("plan-execute: assemble: %w", err)
 	}
 
-	return runADKAgent(run.ctx, entry, input, run.emit)
+	return run.runADKAgent(entry, input)
 }

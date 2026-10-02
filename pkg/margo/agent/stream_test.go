@@ -22,6 +22,7 @@ type scriptedClient struct {
 	mu    sync.Mutex
 	turns [][]margo.Chunk
 	calls int
+	reqs  []margo.Request // every request Stream received, in order
 }
 
 func (s *scriptedClient) Name() string { return "scripted" }
@@ -30,8 +31,9 @@ func (s *scriptedClient) Complete(ctx context.Context, _ margo.Request) (margo.R
 	return margo.Response{}, nil
 }
 
-func (s *scriptedClient) Stream(ctx context.Context, _ margo.Request) (<-chan margo.Chunk, error) {
+func (s *scriptedClient) Stream(ctx context.Context, req margo.Request) (<-chan margo.Chunk, error) {
 	s.mu.Lock()
+	s.reqs = append(s.reqs, req)
 	if s.calls >= len(s.turns) {
 		s.mu.Unlock()
 		ch := make(chan margo.Chunk)

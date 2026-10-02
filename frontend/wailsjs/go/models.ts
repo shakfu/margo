@@ -263,6 +263,7 @@ export namespace main {
 	    outputTokens: number;
 	    firstTokenMs: number;
 	    totalMs: number;
+	    cost?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new StreamUsage(source);
@@ -274,6 +275,7 @@ export namespace main {
 	        this.outputTokens = source["outputTokens"];
 	        this.firstTokenMs = source["firstTokenMs"];
 	        this.totalMs = source["totalMs"];
+	        this.cost = source["cost"];
 	    }
 	}
 	export class ChatResponse {

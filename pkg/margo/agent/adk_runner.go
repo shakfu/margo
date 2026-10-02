@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/eino/adk"
@@ -38,25 +39,6 @@ func (ReactRunner) Run(
 ) error {
 	run := prepareRun(ctx, c, defaults, attachments, gate, emit)
 
-	// Budget rewriter (6.3) — moved from
-	// `react.AgentConfig.MessageRewriter` to `BeforeChatModel`
-	// middleware under ADK. Algorithm unchanged: trim oldest turns
-	// until the estimated input-token count fits under
-	// `budget * 0.75`, never orphaning a tool result from its
-	// assistant. Runs before every ChatModel call inside the loop,
-	// so accumulated tool results that push the conversation over
-	// budget mid-loop get trimmed too.
-	budget := BudgetForModel(defaults.Model)
-	budgetMiddleware := adk.AgentMiddleware{
-		BeforeChatModel: func(_ context.Context, state *adk.ChatModelAgentState) error {
-			if state == nil || len(state.Messages) == 0 {
-				return nil
-			}
-			state.Messages = RewriteForBudget(state.Messages, budget)
-			return nil
-		},
-	}
-
 	agentImpl, err := adk.NewChatModelAgent(run.ctx, &adk.ChatModelAgentConfig{
 		Name:        "margo-react",
 		Description: "ReAct loop wired to a margo provider client",
@@ -67,13 +49,12 @@ func (ReactRunner) Run(
 		Instruction: "",
 		Model:       run.adapter,
 		ToolsConfig: run.toolsConfig(tools),
-		Middlewares: []adk.AgentMiddleware{budgetMiddleware},
 	})
 	if err != nil {
 		return fmt.Errorf("adk: new chat model agent: %w", err)
 	}
 
-	return runADKAgent(run.ctx, agentImpl, input, run.emit)
+	return run.runADKAgent(agentImpl, input)
 }
 
 // bridgeAgentEvent translates one ADK event into zero or more
@@ -92,7 +73,7 @@ func bridgeAgentEvent(
 	ev *adk.AgentEvent,
 	emit func(StepEvent),
 	firstToken *time.Time,
-	usage *margo.Usage,
+	failed *failedToolCalls,
 ) error {
 	// Actions today: ignore Exit / BreakLoop / Interrupted. The
 	// ChatModelAgent uses Exit internally to end the loop cleanly;
@@ -112,10 +93,10 @@ func bridgeAgentEvent(
 	mv := ev.Output.MessageOutput
 
 	if mv.IsStreaming && mv.MessageStream != nil {
-		return drainMessageStream(mv, emit, firstToken, usage)
+		return drainMessageStream(mv, emit, firstToken, failed)
 	}
 	if mv.Message != nil {
-		emitOneMessage(mv.Message, mv.Role, mv.ToolName, emit, firstToken, usage)
+		emitOneMessage(mv.Message, mv.Role, mv.ToolName, emit, firstToken, failed)
 	}
 	return nil
 }
@@ -130,11 +111,12 @@ func drainMessageStream(
 	mv *adk.MessageVariant,
 	emit func(StepEvent),
 	firstToken *time.Time,
-	usage *margo.Usage,
+	failed *failedToolCalls,
 ) error {
 	defer mv.MessageStream.Close()
 	role := mv.Role
 	toolName := mv.ToolName
+	callID := ""
 
 	var contentBuf strings.Builder
 	seenToolCalls := map[string]bool{}
@@ -149,6 +131,12 @@ func drainMessageStream(
 		}
 		if chunk == nil {
 			continue
+		}
+		if callID == "" {
+			callID = chunk.ToolCallID
+		}
+		if chunk.ReasoningContent != "" && role != schema.Tool {
+			emit(StepEvent{Kind: StepThinking, Text: chunk.ReasoningContent})
 		}
 		if chunk.Content != "" {
 			contentBuf.WriteString(chunk.Content)
@@ -170,14 +158,9 @@ func drainMessageStream(
 			}
 			emit(StepEvent{Kind: StepToolCall, Name: tc.Function.Name, Arguments: tc.Function.Arguments})
 		}
-		if chunk.ResponseMeta != nil && chunk.ResponseMeta.Usage != nil {
-			u := chunk.ResponseMeta.Usage
-			usage.InputTokens = u.PromptTokens
-			usage.OutputTokens = u.CompletionTokens
-		}
 	}
 	if role == schema.Tool {
-		emit(StepEvent{Kind: StepToolResult, Name: toolName, Result: contentBuf.String()})
+		emit(StepEvent{Kind: StepToolResult, Name: toolName, Result: contentBuf.String(), IsError: failed.has(callID)})
 	}
 	return nil
 }
@@ -190,14 +173,17 @@ func emitOneMessage(
 	toolName string,
 	emit func(StepEvent),
 	firstToken *time.Time,
-	usage *margo.Usage,
+	failed *failedToolCalls,
 ) {
+	if msg.ReasoningContent != "" && role != schema.Tool {
+		emit(StepEvent{Kind: StepThinking, Text: msg.ReasoningContent})
+	}
 	if msg.Content != "" {
 		if firstToken.IsZero() {
 			*firstToken = time.Now()
 		}
 		if role == schema.Tool {
-			emit(StepEvent{Kind: StepToolResult, Name: toolName, Result: msg.Content})
+			emit(StepEvent{Kind: StepToolResult, Name: toolName, Result: msg.Content, IsError: failed.has(msg.ToolCallID)})
 		} else {
 			emit(StepEvent{Kind: StepText, Text: msg.Content})
 		}
@@ -207,9 +193,40 @@ func emitOneMessage(
 			emit(StepEvent{Kind: StepToolCall, Name: tc.Function.Name, Arguments: tc.Function.Arguments})
 		}
 	}
-	if msg.ResponseMeta != nil && msg.ResponseMeta.Usage != nil {
-		u := msg.ResponseMeta.Usage
-		usage.InputTokens = u.PromptTokens
-		usage.OutputTokens = u.CompletionTokens
+}
+
+// usageTotal sums usage over every model call in a run. The adapter
+// adds each call as its usage arrives. The cost is known only when every
+// call reported one, so a partial sum never passes for the bill.
+type usageTotal struct {
+	mu            sync.Mutex
+	in, out       int
+	cost          float64
+	calls, costed int
+}
+
+func (t *usageTotal) add(u margo.Usage) {
+	if t == nil {
+		return
 	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.in += u.InputTokens
+	t.out += u.OutputTokens
+	t.calls++
+	if u.Cost != nil {
+		t.cost += *u.Cost
+		t.costed++
+	}
+}
+
+func (t *usageTotal) usage() margo.Usage {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	u := margo.Usage{InputTokens: t.in, OutputTokens: t.out}
+	if t.calls > 0 && t.costed == t.calls {
+		c := t.cost
+		u.Cost = &c
+	}
+	return u
 }

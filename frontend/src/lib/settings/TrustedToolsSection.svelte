@@ -39,11 +39,11 @@
         {#each $settings.autoApproveTools as name (name)}
           <li class="flex items-center gap-2 text-[0.78rem] font-[family-name:var(--font-mono)] bg-input-bg border border-border rounded px-2 py-1">
             <span class="flex-1 break-all">{name}</span>
-            <button class="mini-btn" title="Revoke; future calls will prompt again" on:click={() => revokeTool(name)}>Revoke</button>
+            <button class="mini-btn" title="Revoke; future calls will prompt again" onclick={() => revokeTool(name)}>Revoke</button>
           </li>
         {/each}
       </ul>
-      <button class="mini-btn" on:click={revokeAllTools}>Revoke all</button>
+      <button class="mini-btn" onclick={revokeAllTools}>Revoke all</button>
     {/if}
   </div>
 </section>

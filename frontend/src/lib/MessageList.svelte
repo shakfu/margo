@@ -6,23 +6,32 @@
   // Extracted from App.svelte. Presentational: it renders what it is
   // given and reports the one interaction it cannot resolve itself, the
   // permission decision, back to the parent that owns the run.
-  import { createEventDispatcher } from 'svelte';
   import { mathjax } from './mathjax';
   import { renderMarkdownStreaming } from './markdown';
   import AttachmentThumb from './AttachmentThumb.svelte';
   import type { Message, Usage } from './store';
 
-  export let messages: Message[] = [];
-  export let busy = false;
-  export let personaLabel = '';
-  export let canAlwaysApprove: (name: string) => boolean = () => true;
 
-  // Bound out so the parent can scroll the transcript after a send.
-  export let scrollEl: HTMLElement | undefined = undefined;
 
-  const dispatch = createEventDispatcher<{
-    permission: { id: string; name: string; decision: 'approve' | 'deny' | 'always' };
-  }>();
+  interface Props {
+    messages?: Message[];
+    busy?: boolean;
+    personaLabel?: string;
+    canAlwaysApprove?: (name: string) => boolean;
+    // Bound out so the parent can scroll the transcript after a send.
+    scrollEl?: HTMLElement | undefined;
+    onPermission?: (p: { id: string; name: string; decision: 'approve' | 'deny' | 'always' }) => void;
+  }
+
+  let {
+    messages = [],
+    busy = false,
+    personaLabel = '',
+    canAlwaysApprove = () => true,
+    scrollEl = $bindable(undefined),
+    onPermission = () => {}
+  }: Props = $props();
+
 
   // The assistant bubble is labelled with the active persona when one is
   // set, so a chat in a named voice reads as that voice.
@@ -70,12 +79,12 @@
                       <span class="text-fg-muted">Allow this tool to run?</span>
                       <button
                         class="px-2 py-0.5 text-[0.75rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg"
-                        on:click={() => dispatch("permission", { id: step.permissionId ?? "", name: step.name, decision: "approve" })}
+                        onclick={() => onPermission({ id: step.permissionId ?? "", name: step.name, decision: "approve" })}
                       >Approve</button>
                       {#if canAlwaysApprove(step.name)}
                         <button
                           class="px-2 py-0.5 text-[0.75rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg"
-                          on:click={() => dispatch("permission", { id: step.permissionId ?? "", name: step.name, decision: "always" })}
+                          onclick={() => onPermission({ id: step.permissionId ?? "", name: step.name, decision: "always" })}
                           title="Auto-approve this tool in future runs"
                         >Always</button>
                       {:else}
@@ -83,7 +92,7 @@
                       {/if}
                       <button
                         class="px-2 py-0.5 text-[0.75rem] rounded border border-error-border bg-error-bg text-error-fg cursor-pointer hover:opacity-90"
-                        on:click={() => dispatch("permission", { id: step.permissionId ?? "", name: step.name, decision: "deny" })}
+                        onclick={() => onPermission({ id: step.permissionId ?? "", name: step.name, decision: "deny" })}
                       >Deny</button>
                     </div>
                   {:else if step.permissionStatus === 'approved'}

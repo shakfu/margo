@@ -59,6 +59,8 @@ type Usage struct {
 	OutputTokens int   `json:"outputTokens"`
 	FirstTokenMs int64 `json:"firstTokenMs"`
 	TotalMs      int64 `json:"totalMs"`
+	// Cost is the provider-billed USD amount; nil when not reported.
+	Cost *float64 `json:"cost,omitempty"`
 }
 
 // Response is the non-streaming completion result.

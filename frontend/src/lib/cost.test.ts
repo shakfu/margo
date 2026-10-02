@@ -92,15 +92,62 @@ const priced: Catalog = {
   openai: [{ id: 'norate', contextTokens: 1000 }],
 };
 
-function turn(model: string | undefined, provider: string, tin: number, tout: number): Message {
+function turn(model: string | undefined, provider: string, tin: number, tout: number, cost?: number): Message {
   return {
     role: 'assistant',
     content: '',
     model,
     provider,
-    usage: { inputTokens: tin, outputTokens: tout, firstTokenMs: 0, totalMs: 0 },
+    usage: { inputTokens: tin, outputTokens: tout, firstTokenMs: 0, totalMs: 0, cost },
   } as Message;
 }
+
+describe('costBreakdown with provider-billed cost', () => {
+  test('a billed cost replaces the token-rate estimate', () => {
+    // The estimate would be $1; the provider billed $0.25 (e.g. cache hits).
+    const got = costBreakdown([turn('cheap', 'openrouter', 1_000_000, 0, 0.25)], priced);
+    expect(got.total).toBeCloseTo(0.25, 6);
+    expect(got.entries[0]).toMatchObject({ priced: true, billed: true });
+    expect(got.billed).toBe(true);
+    expect(got.partial).toBe(false);
+  });
+
+  test('a billed cost prices a model the catalog has no rate for', () => {
+    const got = costBreakdown([turn('norate', 'openrouter', 1_000_000, 0, 0.5)], priced);
+    expect(got.total).toBeCloseTo(0.5, 6);
+    expect(got.partial).toBe(false);
+  });
+
+  test('a billed zero is free, not unknown', () => {
+    const got = costBreakdown([turn('norate', 'openrouter', 1_000_000, 0, 0)], priced);
+    expect(got.entries[0]).toMatchObject({ priced: true, billed: true, cost: 0 });
+  });
+
+  test('mixing billed and estimated turns sums both and is not billed', () => {
+    const got = costBreakdown(
+      [turn('cheap', 'openrouter', 1_000_000, 0, 0.25), turn('cheap', 'openrouter', 1_000_000, 0)],
+      priced,
+    );
+    expect(got.entries).toHaveLength(1);
+    expect(got.total).toBeCloseTo(1.25, 6);
+    expect(got.entries[0].billed).toBe(false);
+    expect(got.billed).toBe(false);
+  });
+
+  test('an estimated-only chat is not billed', () => {
+    expect(costBreakdown([turn('cheap', 'anthropic', 10, 10)], priced).billed).toBe(false);
+  });
+
+  test('an unpriced turn sharing a model with a billed turn keeps the total a floor', () => {
+    const got = costBreakdown(
+      [turn('norate', 'openrouter', 10, 10, 0.5), turn('norate', 'openrouter', 10, 10)],
+      priced,
+    );
+    expect(got.total).toBeCloseTo(0.5, 6);
+    expect(got.entries[0]).toMatchObject({ priced: false, billed: false });
+    expect(got.partial).toBe(true);
+  });
+});
 
 describe('costBreakdown', () => {
   test('prices each turn against its own model, not the current one', () => {

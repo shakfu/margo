@@ -92,3 +92,37 @@ func TestPlanExecuteRunnerAssemblesAndCancels(t *testing.T) {
 		t.Fatalf("PlanExecuteRunner did not return within 3s of cancel — assembly or event loop is hung")
 	}
 }
+
+// TestPlanExecuteRunnerCountsEveryModelCall: the planner and replanner
+// calls do not surface as events, so usage counted from events saw one
+// call of three. The adapter counts all of them.
+func TestPlanExecuteRunnerCountsEveryModelCall(t *testing.T) {
+	cost := 0.001
+	u := func() margo.Chunk {
+		return margo.Chunk{Usage: &margo.Usage{InputTokens: 100, OutputTokens: 10, Cost: &cost}}
+	}
+	client := &scriptedClient{turns: [][]margo.Chunk{
+		{{Kind: margo.ChunkToolCall, ToolCall: &margo.ToolCall{ID: "p1", Name: "plan", Arguments: `{"steps":["say hi"]}`}}, u()},
+		{{Kind: margo.ChunkText, Text: "hi"}, u()},
+		{{Kind: margo.ChunkToolCall, ToolCall: &margo.ToolCall{ID: "r1", Name: "respond", Arguments: `{"response":"done"}`}}, u()},
+	}}
+	var done *margo.Usage
+	err := PlanExecuteRunner{}.Run(context.Background(), client, margo.Request{Model: "test"}, nil,
+		[]*schema.Message{{Role: schema.User, Content: "go"}}, nil, nil, func(ev StepEvent) {
+			if ev.Kind == StepDone {
+				done = ev.Usage
+			}
+		})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(client.reqs) != 3 {
+		t.Fatalf("got %d model calls, want 3 (planner, executor, replanner)", len(client.reqs))
+	}
+	if done == nil || done.InputTokens != 300 || done.OutputTokens != 30 {
+		t.Fatalf("usage = %+v, want 300 in / 30 out", done)
+	}
+	if done.Cost == nil || *done.Cost < 0.003-1e-12 || *done.Cost > 0.003+1e-12 {
+		t.Errorf("cost = %v, want 0.003", done.Cost)
+	}
+}

@@ -12,7 +12,7 @@
   // mcp.json directly for persistent additions; AddMCPServer only adds
   // for the current session).
   import { createCollapsible, melt } from '@melt-ui/svelte';
-  import { onDestroy, onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { MCPServers, AddMCPServer, RemoveMCPServer } from '../../../wailsjs/go/main/App.js';
 
   // Mirror of main.MCPServerInfo from app.go. Inlining (rather than
@@ -32,19 +32,18 @@
   const { elements: { root: mcpRoot, trigger: mcpTrig, content: mcpContent }, states: { open: mcpOpen } } =
     createCollapsible({ defaultOpen: false });
 
-  let servers: ServerInfo[] = [];
-  let pollHandle: ReturnType<typeof setInterval> | null = null;
-  let error = '';
+  let servers: ServerInfo[] = $state([]);
+  let error = $state('');
 
   // Add-server form state. Hidden behind a toggle so the section stays
   // compact at rest. Args are entered as a space-separated string and
   // split on commit; quoting is not supported in MVP (community
   // server commands rarely need it: `npx -y package /path`).
-  let showAdd = false;
-  let addName = '';
-  let addCommand = '';
-  let addArgsText = '';
-  let addEnvText = ''; // KEY=value lines, one per line
+  let showAdd = $state(false);
+  let addName = $state('');
+  let addCommand = $state('');
+  let addArgsText = $state('');
+  let addEnvText = $state(''); // KEY=value lines, one per line
 
   async function refresh() {
     try {
@@ -57,20 +56,14 @@
 
   onMount(refresh);
 
-  // Poll only while the section is expanded. Stop on collapse and on
-  // destroy. The reactive block reads $mcpOpen and (re)arms the timer.
-  $: {
-    if ($mcpOpen) {
-      void refresh();
-      if (!pollHandle) {
-        pollHandle = setInterval(refresh, 2000);
-      }
-    } else if (pollHandle) {
-      clearInterval(pollHandle);
-      pollHandle = null;
-    }
-  }
-  onDestroy(() => { if (pollHandle) clearInterval(pollHandle); });
+  // Poll only while the section is expanded. The cleanup stops the
+  // timer on collapse and on destroy.
+  $effect(() => {
+    if (!$mcpOpen) return;
+    untrack(() => void refresh());
+    const h = setInterval(refresh, 2000);
+    return () => clearInterval(h);
+  });
 
   function parseEnv(text: string): Record<string, string> {
     const out: Record<string, string> = {};
@@ -163,7 +156,7 @@
                   <div class="text-error-fg text-[0.7rem] leading-snug mt-0.5 break-words">{s.error}</div>
                 {/if}
               </div>
-              <button class="mini-btn" on:click={() => remove(s.name)} title="Stop and unregister this server">Remove</button>
+              <button class="mini-btn" onclick={() => remove(s.name)} title="Stop and unregister this server">Remove</button>
             </div>
             {#if s.status === 'failed' && s.stderrTail && s.stderrTail.length > 0}
               <details class="text-[0.7rem] text-fg-faint">
@@ -195,13 +188,13 @@
           <textarea class="text-input" rows="3" bind:value={addEnvText} placeholder="GITHUB_TOKEN=ghp_..."></textarea>
         </label>
         <div class="flex justify-end gap-2">
-          <button class="mini-btn" on:click={() => (showAdd = false)}>Cancel</button>
-          <button class="mini-btn" on:click={commitAdd} disabled={!addName.trim() || !addCommand.trim()}>Add</button>
+          <button class="mini-btn" onclick={() => (showAdd = false)}>Cancel</button>
+          <button class="mini-btn" onclick={commitAdd} disabled={!addName.trim() || !addCommand.trim()}>Add</button>
         </div>
         <div class="text-[0.7rem] text-fg-faint">Note: session-only. Edit mcp.json to persist.</div>
       </div>
     {:else}
-      <button class="mini-btn" on:click={() => (showAdd = true)}>+ Add server</button>
+      <button class="mini-btn" onclick={() => (showAdd = true)}>+ Add server</button>
     {/if}
 
     {#if error}<div class="text-[0.7rem] text-error-fg mt-1 break-words">{error}</div>{/if}

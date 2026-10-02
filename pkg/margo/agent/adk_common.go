@@ -16,12 +16,15 @@ import (
 // runSetup is the shared prologue every ADK-backed runner needs before
 // it can assemble its agents: a non-nil emitter, a context carrying that
 // emitter for tools to publish through, the tool middleware stack, and
-// the model adapter with attachments stamped onto the final user turn.
+// the model adapter with attachments stamped onto the final user turn and
+// each request trimmed to the model's context budget.
 type runSetup struct {
 	ctx         context.Context
 	emit        func(StepEvent)
 	adapter     *Adapter
 	middlewares []compose.ToolMiddleware
+	failed      *failedToolCalls
+	meter       *usageTotal
 }
 
 // prepareRun builds the pieces common to ReactRunner, PlanExecuteRunner
@@ -42,16 +45,26 @@ func prepareRun(
 	// -> StepRetrieve) reach the emitter via this context stash.
 	ctx = WithStepEmitter(ctx, emit)
 
-	middlewares := []compose.ToolMiddleware{abortOnCtxCancel}
+	// Outermost first: errors (including a denial) become tool results,
+	// then the permission gate, then the cancellation race.
+	failed := &failedToolCalls{}
+	meter := &usageTotal{}
+	middlewares := []compose.ToolMiddleware{toolErrorsAsResults(failed)}
 	if gate != nil {
-		middlewares = append([]compose.ToolMiddleware{permissionMiddleware(gate)}, middlewares...)
+		middlewares = append(middlewares, permissionMiddleware(gate))
 	}
+	middlewares = append(middlewares, abortOnCtxCancel)
 
 	return runSetup{
-		ctx:         ctx,
-		emit:        emit,
-		adapter:     NewAdapter(c, defaults).WithFinalUserAttachments(attachments),
+		ctx:  ctx,
+		emit: emit,
+		adapter: NewAdapter(c, defaults).
+			WithFinalUserAttachments(attachments).
+			WithBudget(BudgetForModel(defaults.Model)).
+			WithUsageMeter(meter),
 		middlewares: middlewares,
+		failed:      failed,
+		meter:       meter,
 	}
 }
 
@@ -70,13 +83,14 @@ func (s runSetup) toolsConfig(tools []tool.BaseTool) adk.ToolsConfig {
 	}
 }
 
-// runADKAgent drives an assembled agent to completion, bridging its
-// AgentEvent stream into StepEvents and emitting the closing StepDone
-// with wall-clock timings.
+// runADKAgent drives an assembled agent to completion, bridging its AgentEvent
+// stream into StepEvents and emitting the closing StepDone with
+// wall-clock timings.
 //
 // Cancellation returns the context error without emitting StepError:
 // the user pressed stop, which is not a failure to report back to them.
-func runADKAgent(ctx context.Context, entry adk.Agent, input []*schema.Message, emit func(StepEvent)) error {
+func (s runSetup) runADKAgent(entry adk.Agent, input []*schema.Message) error {
+	ctx, emit := s.ctx, s.emit
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		EnableStreaming: true,
 		Agent:           entry,
@@ -84,7 +98,6 @@ func runADKAgent(ctx context.Context, entry adk.Agent, input []*schema.Message, 
 
 	started := time.Now()
 	var firstToken time.Time
-	usage := margo.Usage{}
 
 	iter := runner.Run(ctx, input)
 	for {
@@ -102,11 +115,12 @@ func runADKAgent(ctx context.Context, entry adk.Agent, input []*schema.Message, 
 			emit(StepEvent{Kind: StepError, Text: ev.Err.Error()})
 			return ev.Err
 		}
-		if err := bridgeAgentEvent(ev, emit, &firstToken, &usage); err != nil {
+		if err := bridgeAgentEvent(ev, emit, &firstToken, s.failed); err != nil {
 			return err
 		}
 	}
 
+	usage := s.meter.usage()
 	usage.TotalMs = time.Since(started).Milliseconds()
 	if !firstToken.IsZero() {
 		usage.FirstTokenMs = firstToken.Sub(started).Milliseconds()

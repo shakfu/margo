@@ -9,19 +9,11 @@ BUILD_DIR  := build/bin
 CLI_BIN    := $(BUILD_DIR)/margo-cli
 TUI_BIN    := $(BUILD_DIR)/margo-tui
 
-# Wails v2.11.0 pins golang.org/x/tools v0.30.0, which cannot read the
-# export data Go 1.27 writes. Every wails subcommand that analyses the
-# module then dies with:
-#
-#   internal error: package "errors" without types was imported from ...
-#
-# Pin the toolchain for wails targets only; go build / test / vet run on
-# whatever Go is installed. A `toolchain` directive in go.mod does not
-# help here — it sets a minimum, so a newer local Go still wins.
-#
-# Raise this when wails ships a release with a newer x/tools.
-WAILS_GOTOOLCHAIN ?= go1.26.2
-WAILS      := GOTOOLCHAIN=$(WAILS_GOTOOLCHAIN) wails
+WAILS      := wails
+
+# Ubuntu 24.04+ ships only webkit2gtk-4.1; wails v2 links 4.0 unless
+# built with this tag.
+WAILS_TAGS := $(shell pkg-config --exists webkit2gtk-4.1 2>/dev/null && echo -tags webkit2_41)
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "Targets:\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -29,19 +21,19 @@ help: ## Show this help
 # ---------- Wails app ----------
 
 dev: ## Run Wails app in dev mode (live reload)
-	$(WAILS) dev
+	$(WAILS) dev $(WAILS_TAGS)
 
 build: ## Build production Wails app
-	$(WAILS) build
+	$(WAILS) build $(WAILS_TAGS)
 
 build-debug: ## Build Wails app with debug symbols + devtools
-	$(WAILS) build -debug -devtools
+	$(WAILS) build -debug -devtools $(WAILS_TAGS)
 
 build-universal: ## Build macOS universal binary (arm64 + amd64)
 	$(WAILS) build -platform darwin/universal
 
 package: ## Build and package (e.g. .app bundle on macOS)
-	$(WAILS) build -clean
+	$(WAILS) build -clean $(WAILS_TAGS)
 
 run: build ## Build then launch the app
 	@if [ "$$(uname)" = "Darwin" ]; then open $(BUILD_DIR)/$(BINARY).app; else $(BUILD_DIR)/$(BINARY); fi
@@ -107,11 +99,26 @@ frontend-install: ## npm install in frontend/ and vendor mathjax
 	cd frontend && npm install
 	$(MAKE) vendor-mathjax
 
-vendor-mathjax: ## Copy mathjax bundle from node_modules to frontend/public/mathjax
-	@mkdir -p frontend/public/mathjax
-	cp frontend/node_modules/mathjax/es5/tex-svg-full.js frontend/public/mathjax/tex-svg-full.js
-	cp frontend/node_modules/mathjax/LICENSE frontend/public/mathjax/LICENSE
-	@echo "vendored mathjax: $$(ls -lh frontend/public/mathjax/tex-svg-full.js | awk '{print $$5}')"
+# MathJax 4 loads TeX extensions, glyph ranges and speech data on demand,
+# from the CDN by default. Vendor every file it can request so the app
+# renders offline; index.html points loader.paths.fonts at MJ_OUT/fonts.
+MJ_SRC := frontend/node_modules/mathjax
+MJ_FONTS := frontend/node_modules/@mathjax
+MJ_OUT := frontend/public/mathjax
+
+vendor-mathjax: ## Copy mathjax and its on-demand files from node_modules to frontend/public/mathjax
+	rm -rf $(MJ_OUT)
+	mkdir -p $(MJ_OUT)/input/tex $(MJ_OUT)/sre/mathmaps $(MJ_OUT)/fonts/mathjax-newcm-font/svg
+	cp $(MJ_SRC)/tex-svg.js $(MJ_SRC)/LICENSE $(MJ_OUT)/
+	cp -r $(MJ_SRC)/input/tex/extensions $(MJ_OUT)/input/tex/
+	cp $(MJ_SRC)/sre/speech-worker.js $(MJ_OUT)/sre/
+	cp $(MJ_SRC)/sre/mathmaps/base.json $(MJ_SRC)/sre/mathmaps/en.json $(MJ_SRC)/sre/mathmaps/nemeth.json $(MJ_OUT)/sre/mathmaps/
+	cp -r $(MJ_FONTS)/mathjax-newcm-font/svg/dynamic $(MJ_OUT)/fonts/mathjax-newcm-font/svg/
+	for e in bbm bboldx dsfont mhchem; do \
+	  mkdir -p $(MJ_OUT)/fonts/mathjax-$$e-font-extension && \
+	  cp $(MJ_FONTS)/mathjax-$$e-font-extension/svg.js $(MJ_OUT)/fonts/mathjax-$$e-font-extension/; \
+	done
+	@echo "vendored mathjax: $$(du -sh $(MJ_OUT) | cut -f1)"
 
 frontend-dev: ## Run Vite dev server standalone (no Wails)
 	cd frontend && npm run dev
@@ -136,4 +143,4 @@ doctor: ## Verify required toolchain (go, wails, npm)
 	@echo "wails: $$(wails version 2>/dev/null || echo MISSING)"
 	@echo "node:  $$(node --version 2>/dev/null || echo MISSING)"
 	@echo "npm:   $$(npm --version 2>/dev/null || echo MISSING)"
-	@echo "wails builds with GOTOOLCHAIN=$(WAILS_GOTOOLCHAIN) (see Makefile)"
+	@echo "wails tags: $(or $(WAILS_TAGS),none)"

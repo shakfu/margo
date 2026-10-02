@@ -6,7 +6,6 @@
   // attachments (both bound out, because send() needs them) plus every
   // mechanic for getting files in. The parent keeps send/cancel, since
   // those drive the stream it owns.
-  import { createEventDispatcher } from 'svelte';
   import { effectiveSettings, settings } from './store';
   import { SLASH_COMMANDS, type SlashSuggestion } from './slash';
   import {
@@ -17,21 +16,39 @@
     type PendingAttachment,
   } from './attachments';
 
-  export let input = '';
-  export let attachments: PendingAttachment[] = [];
-  export let busy = false;
-  export let streaming = false;
-  export let cancelling = false;
-  export let attachmentsBlocked = false;
-  export let ctxUsed = 0;
-  export let ctxWindow = 0;
+  interface Props {
+    input?: string;
+    attachments?: PendingAttachment[];
+    busy?: boolean;
+    streaming?: boolean;
+    cancelling?: boolean;
+    attachmentsBlocked?: boolean;
+    ctxUsed?: number;
+    ctxWindow?: number;
+    onSend?: () => void;
+    onCancel?: () => void;
+    onError?: (msg: string) => void;
+  }
 
-  const dispatch = createEventDispatcher<{ send: void; cancel: void; error: string }>();
+  let {
+    input = $bindable(''),
+    attachments = $bindable([]),
+    busy = false,
+    streaming = false,
+    cancelling = false,
+    attachmentsBlocked = false,
+    ctxUsed = 0,
+    ctxWindow = 0,
+    onSend = () => {},
+    onCancel = () => {},
+    onError = () => {}
+  }: Props = $props();
 
-  let dragOver = false;
-  let fileInputEl: HTMLInputElement | null = null;
 
-  $: ctxPct = ctxWindow > 0 ? Math.min(100, Math.round((ctxUsed / ctxWindow) * 100)) : 0;
+  let dragOver = $state(false);
+  let fileInputEl: HTMLInputElement | null = $state(null);
+
+  let ctxPct = $derived(ctxWindow > 0 ? Math.min(100, Math.round((ctxUsed / ctxWindow) * 100)) : 0);
 
   // Slash autocomplete. Suggestions populate from the static command
   // catalog plus the user's persona names, which is why the personas
@@ -57,8 +74,8 @@
     return out.slice(0, 8);
   }
 
-  $: slashSuggestions = computeSlashSuggestions(input, $settings.personas);
-  $: showSlashHint = input.startsWith('/') && slashSuggestions.length > 0;
+  let slashSuggestions = $derived(computeSlashSuggestions(input, $settings.personas));
+  let showSlashHint = $derived(input.startsWith('/') && slashSuggestions.length > 0);
 
   function applySuggestion(text: string) {
     input = text;
@@ -69,13 +86,13 @@
     for (const file of Array.from(files)) {
       const reason = rejectionReason(file);
       if (reason) {
-        dispatch('error', reason);
+        onError(reason);
         continue;
       }
       try {
         attachments = [...attachments, await toPendingAttachment(file)];
       } catch (e) {
-        dispatch('error', `Failed to read "${file.name}": ${String(e)}`);
+        onError(`Failed to read "${file.name}": ${String(e)}`);
       }
     }
   }
@@ -112,16 +129,16 @@
   function onKey(e: KeyboardEvent) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      dispatch('send');
+      onSend();
     }
   }
 </script>
 
 <footer
   class="flex flex-col gap-2 px-5 pt-3.5 pb-4 border-t border-border max-w-[820px] w-full mx-auto box-border {dragOver ? 'bg-bubble-user/40' : ''}"
-  on:dragover={onComposerDragOver}
-  on:dragleave={onComposerDragLeave}
-  on:drop={onComposerDrop}
+  ondragover={onComposerDragOver}
+  ondragleave={onComposerDragLeave}
+  ondrop={onComposerDrop}
 >
   {#if attachments.length > 0}
     <div class="flex flex-wrap gap-2">
@@ -131,7 +148,7 @@
             <img src={a.previewUrl} alt={a.name} class="h-14 w-14 object-cover rounded border border-border" />
             <button
               class="absolute -top-1 -right-1 bg-bg-elev border border-border rounded-full w-4 h-4 flex items-center justify-center text-[0.7rem] leading-none cursor-pointer hover:bg-hover-bg"
-              on:click={() => removeAttachment(a.id)}
+              onclick={() => removeAttachment(a.id)}
               aria-label="remove attachment"
             >×</button>
           </div>
@@ -141,7 +158,7 @@
             <span class="truncate max-w-[140px]">{a.name}</span>
             <button
               class="absolute -top-1 -right-1 bg-bg-elev border border-border rounded-full w-4 h-4 flex items-center justify-center text-[0.7rem] leading-none cursor-pointer hover:bg-hover-bg"
-              on:click={() => removeAttachment(a.id)}
+              onclick={() => removeAttachment(a.id)}
               aria-label="remove attachment"
             >×</button>
           </div>
@@ -162,7 +179,7 @@
     accept={ATTACHMENT_MIME_ACCEPT.join(',')}
     multiple
     bind:this={fileInputEl}
-    on:change={onFileInputChange}
+    onchange={onFileInputChange}
     class="hidden"
   />
   {#if showSlashHint}
@@ -171,8 +188,8 @@
         <button
           type="button"
           class="text-left px-2 py-1 rounded hover:bg-hover-bg flex items-center gap-2 bg-bubble-user"
-          on:click={() => applySuggestion(s.text)}
-          on:mousedown|preventDefault
+          onclick={() => applySuggestion(s.text)}
+          onmousedown={(e) => e.preventDefault()}
         >
           <code class="font-[family-name:var(--font-mono)] text-fg">{s.text.trim()}</code>
           <span class="text-fg-muted truncate">{s.description}</span>
@@ -183,7 +200,7 @@
   <div class="flex items-end gap-2">
     <button
       class="topbar-btn h-9 w-9 flex items-center justify-center"
-      on:click={onPaperclip}
+      onclick={onPaperclip}
       title="Attach image"
       disabled={busy || !$effectiveSettings.provider}
       aria-label="attach image"
@@ -192,7 +209,7 @@
       class="flex-1 bg-input-bg text-fg border border-border rounded-md px-3 py-2.5 font-[inherit] text-[0.9rem] resize-none outline-none focus:border-border-strong disabled:opacity-50 disabled:cursor-not-allowed"
       placeholder={$effectiveSettings.provider ? "Send a message, or type / for commands…" : "Configure a provider in the settings panel..."}
       bind:value={input}
-      on:keydown={onKey}
+      onkeydown={onKey}
       disabled={busy || !$effectiveSettings.provider}
       rows="2"
     ></textarea>
@@ -207,13 +224,13 @@
       {#if busy && streaming}
         <button
           class="composer-btn cancel-btn"
-          on:click={() => dispatch('cancel')}
+          onclick={onCancel}
           disabled={cancelling}
         >{cancelling ? 'cancelling…' : 'cancel'}</button>
       {:else}
         <button
           class="composer-btn send-btn"
-          on:click={() => dispatch('send')}
+          onclick={onSend}
           disabled={busy || !$effectiveSettings.provider || attachmentsBlocked || (!input.trim() && attachments.length === 0)}
         >{busy ? '...' : 'send'}</button>
       {/if}

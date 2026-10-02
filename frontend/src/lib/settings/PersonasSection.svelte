@@ -20,7 +20,7 @@
     states: { open: persDlgOpen },
   } = createDialog({ role: 'dialog' });
 
-  let editing: Persona | null = null;
+  let editing: Persona | null = $state(null);
 
   function openCreate() {
     editing = {
@@ -49,7 +49,7 @@
   function commitEdit() {
     if (!editing) return;
     if (!editing.name.trim() || !editing.systemPrompt.trim()) return;
-    upsertPersona(editing);
+    upsertPersona($state.snapshot(editing));
     editing = null;
     persDlgOpen.set(false);
   }
@@ -72,7 +72,7 @@
   // Hoisted out of the template: Svelte's {@const} must be the
   // immediate child of a block (#if / #each / …) and the top-level
   // <ul> isn't one.
-  $: noDefault = !$activeWorkspace?.defaultPersonaId;
+  let noDefault = $derived(!$activeWorkspace?.defaultPersonaId);
 </script>
 
 <section class="border-b border-border" use:melt={$persRoot}>
@@ -101,7 +101,7 @@
         </div>
         <div class="flex flex-col gap-1 shrink-0">
           {#if !noDefault}
-            <button class="mini-btn" on:click={() => setWorkspaceDefaultPersona($settings.activeWorkspaceId, undefined)} title="New chats will start with no persona">Set default</button>
+            <button class="mini-btn" onclick={() => setWorkspaceDefaultPersona($settings.activeWorkspaceId, undefined)} title="New chats will start with no persona">Set default</button>
           {/if}
         </div>
       </li>
@@ -121,19 +121,19 @@
           </div>
           <div class="flex flex-col gap-1 shrink-0">
             {#if !isDefault}
-              <button class="mini-btn" on:click={() => setWorkspaceDefaultPersona($settings.activeWorkspaceId, p.id)} title="New chats in this workspace will start with this persona">Set default</button>
+              <button class="mini-btn" onclick={() => setWorkspaceDefaultPersona($settings.activeWorkspaceId, p.id)} title="New chats in this workspace will start with this persona">Set default</button>
             {/if}
             {#if p.builtin}
-              <button class="mini-btn" on:click={() => openDuplicate(p)} title="Duplicate; the copy is editable">Duplicate</button>
+              <button class="mini-btn" onclick={() => openDuplicate(p)} title="Duplicate; the copy is editable">Duplicate</button>
             {:else}
-              <button class="mini-btn" on:click={() => openEdit(p)}>Edit</button>
-              <button class="mini-btn" on:click={() => deletePersona(p.id)}>Delete</button>
+              <button class="mini-btn" onclick={() => openEdit(p)}>Edit</button>
+              <button class="mini-btn" onclick={() => deletePersona(p.id)}>Delete</button>
             {/if}
           </div>
         </li>
       {/each}
     </ul>
-    <button class="mini-btn" on:click={openCreate}>+ New persona</button>
+    <button class="mini-btn" onclick={openCreate}>+ New persona</button>
   </div>
 </section>
 
@@ -165,7 +165,7 @@
         </label>
         <label class="flex flex-col gap-1 text-[0.78rem] text-fg-muted">
           <span>Scope</span>
-          <select class="text-input" value={editing.workspaceId ?? ''} on:change={onScopeChange}>
+          <select class="text-input" value={editing.workspaceId ?? ''} onchange={onScopeChange}>
             <option value="">Global (visible in all workspaces)</option>
             {#each $settings.workspaces as w (w.id)}
               <option value={w.id}>{w.name}</option>
@@ -174,8 +174,8 @@
         </label>
       </div>
       <div class="mt-4 flex justify-end gap-2">
-        <button use:melt={$persDlgClose} class="px-3 py-1.5 text-[0.85rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg" on:click={cancelEdit}>Cancel</button>
-        <button class="px-3 py-1.5 text-[0.85rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg font-semibold" on:click={commitEdit} disabled={!editing.name.trim() || !editing.systemPrompt.trim()}>Save</button>
+        <button use:melt={$persDlgClose} class="px-3 py-1.5 text-[0.85rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg" onclick={cancelEdit}>Cancel</button>
+        <button class="px-3 py-1.5 text-[0.85rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg font-semibold" onclick={commitEdit} disabled={!editing.name.trim() || !editing.systemPrompt.trim()}>Save</button>
       </div>
     </div>
   {/if}

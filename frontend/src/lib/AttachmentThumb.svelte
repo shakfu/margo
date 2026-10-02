@@ -9,12 +9,16 @@
   import type { StoredAttachment } from './store';
   import { LoadAttachment, OpenPath } from '../../wailsjs/go/main/App.js';
 
-  export let a: StoredAttachment;
+  interface Props {
+    a: StoredAttachment;
+  }
 
-  let dataUrl = '';
-  let err = '';
+  let { a }: Props = $props();
 
-  $: isImage = a.mimeType.startsWith('image/');
+  let dataUrl = $state('');
+  let err = $state('');
+
+  let isImage = $derived(a.mimeType.startsWith('image/'));
 
   onMount(async () => {
     if (!isImage) return; // documents render as a badge; no need to load bytes
@@ -41,7 +45,7 @@
   <button
     class="relative group block"
     title={`${a.name} (${sizeLabel(a.size)})`}
-    on:click={openOriginal}
+    onclick={openOriginal}
     aria-label={`Open ${a.name}`}
   >
     {#if dataUrl}
@@ -49,14 +53,14 @@
     {:else if err}
       <div class="h-14 w-14 rounded border border-error-border bg-error-bg flex items-center justify-center text-[0.6rem] text-error-fg" title={err}>!</div>
     {:else}
-      <div class="h-14 w-14 rounded border border-border bg-input-bg" />
+      <div class="h-14 w-14 rounded border border-border bg-input-bg"></div>
     {/if}
   </button>
 {:else}
   <button
     class="flex items-center gap-2 px-2 py-1 border border-border bg-input-bg rounded text-[0.74rem] text-fg-muted hover:bg-hover-bg"
     title={a.path}
-    on:click={openOriginal}
+    onclick={openOriginal}
   >
     <span class="font-[family-name:var(--font-mono)]">📄</span>
     <span class="truncate max-w-[180px]">{a.name}</span>

@@ -12,11 +12,15 @@
   } from './store';
   import { PickWorkspaceDir, DeleteChatAttachments } from '../../wailsjs/go/main/App.js';
 
-  export let busy: boolean = false;
+  interface Props {
+    busy?: boolean;
+  }
 
-  let search = '';
-  let renamingId = '';
-  let renameValue = '';
+  let { busy = false }: Props = $props();
+
+  let search = $state('');
+  let renamingId = $state('');
+  let renameValue = $state('');
 
   const {
     elements: { trigger: dlgTrigger, overlay: dlgOverlay, content: dlgContent, title: dlgTitle, close: dlgClose, portalled: dlgPortalled },
@@ -32,13 +36,13 @@
     states: { open: wsOpen },
   } = createDialog({ role: 'dialog' });
 
-  let pendingDelete: { id: string; title: string } | null = null;
-  let newWorkspaceName = '';
+  let pendingDelete: { id: string; title: string } | null = $state(null);
+  let newWorkspaceName = $state('');
   // Template selection in the create form. Empty string = "Empty
   // workspace" (no template). 7.1.f.
-  let newWorkspaceTemplateId = '';
-  let editingWorkspaceId = '';
-  let editingWorkspaceName = '';
+  let newWorkspaceTemplateId = $state('');
+  let editingWorkspaceId = $state('');
+  let editingWorkspaceName = $state('');
 
   // Workspace Melt UI Select. Mirrors the Provider/Model selects in
   // SettingsPanel so the styling stays consistent. (Replaces the native
@@ -135,7 +139,7 @@
   // Workspaces sorted most-recently-used first (7.1.e). updatedAt is
   // bumped by setActiveWorkspace, so just-activated workspaces float
   // to the top of the picker. The manage dialog keeps insertion order.
-  $: workspacesByRecency = [...$settings.workspaces].sort((a, b) => b.updatedAt - a.updatedAt);
+  let workspacesByRecency = $derived([...$settings.workspaces].sort((a, b) => b.updatedAt - a.updatedAt));
 
   function askDelete(id: string, title: string, e: Event) {
     e.stopPropagation();
@@ -161,9 +165,9 @@
     dlgOpen.set(false);
   }
 
-  $: filtered = $chats.filter(c =>
+  let filtered = $derived($chats.filter(c =>
     c.title.toLowerCase().includes(search.toLowerCase())
-  );
+  ));
 
   function select(id: string) {
     if (busy) return;
@@ -208,7 +212,7 @@
       <span class="font-semibold text-[0.9rem]">Workspace</span>
       <button
         class="text-[0.7rem] text-fg-faint hover:text-fg cursor-pointer"
-        on:click={openManage}
+        onclick={openManage}
         title="Create, rename, or delete workspaces"
       >manage…</button>
     </div>
@@ -240,7 +244,7 @@
     <span class="font-semibold text-[0.9rem]">Chats</span>
     <button
       class="bg-input-bg text-fg border border-border rounded px-2 py-0.5 text-base leading-none cursor-pointer hover:bg-hover-bg disabled:opacity-40 disabled:cursor-not-allowed"
-      on:click={newChat}
+      onclick={newChat}
       disabled={busy}
       title="New chat"
     >+</button>
@@ -257,8 +261,8 @@
     {#each filtered as c (c.id)}
       <div
         class="group relative px-2.5 py-2 rounded cursor-pointer mb-0.5 hover:bg-hover-bg {c.id === $activeChatId ? 'bg-accent' : ''}"
-        on:click={() => select(c.id)}
-        on:keydown={(e) => e.key === 'Enter' && select(c.id)}
+        onclick={() => select(c.id)}
+        onkeydown={(e) => e.key === 'Enter' && select(c.id)}
         role="button"
         tabindex="0"
       >
@@ -266,9 +270,9 @@
           <input
             class="w-full px-1.5 py-1 border border-border-strong rounded bg-bg text-fg text-[0.85rem] outline-none box-border"
             bind:value={renameValue}
-            on:blur={commitRename}
-            on:keydown={onRenameKey}
-            on:click|stopPropagation
+            onblur={commitRename}
+            onkeydown={onRenameKey}
+            onclick={(e) => e.stopPropagation()}
             use:focus
           />
         {:else}
@@ -280,12 +284,12 @@
           <div class="absolute right-1.5 top-1.5 flex gap-0.5 opacity-0 transition-opacity duration-100 group-hover:opacity-100">
             <button
               class="bg-bg text-fg-muted border border-border rounded-sm px-1.5 py-0.5 text-[0.7rem] cursor-pointer hover:bg-hover-bg hover:text-fg"
-              on:click={(e) => startRename(c.id, c.title, e)}
+              onclick={(e) => startRename(c.id, c.title, e)}
               title="Rename"
             >edit</button>
             <button
               class="bg-bg text-fg-muted border border-border rounded-sm p-1 cursor-pointer hover:text-error-fg hover:border-error-border inline-flex items-center justify-center"
-              on:click={(e) => askDelete(c.id, c.title, e)}
+              onclick={(e) => askDelete(c.id, c.title, e)}
               title="Delete"
               aria-label="Delete chat"
             >
@@ -321,11 +325,11 @@
         <button
           use:melt={$dlgClose}
           class="px-3 py-1.5 text-[0.85rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg"
-          on:click={cancelDelete}
+          onclick={cancelDelete}
         >Cancel</button>
         <button
           class="px-3 py-1.5 text-[0.85rem] rounded border border-error-border bg-error-bg text-error-fg cursor-pointer hover:opacity-90 font-semibold"
-          on:click={confirmDelete}
+          onclick={confirmDelete}
         >Delete</button>
       </div>
     </div>
@@ -352,8 +356,8 @@
                 <input
                   class="flex-1 px-1.5 py-1 border border-border-strong rounded bg-bg text-fg text-[0.85rem] outline-none"
                   bind:value={editingWorkspaceName}
-                  on:blur={commitWsRename}
-                  on:keydown={onWsRenameKey}
+                  onblur={commitWsRename}
+                  onkeydown={onWsRenameKey}
                   use:focus
                 />
               {:else}
@@ -364,13 +368,13 @@
               {/if}
               <button
                 class="text-[0.72rem] px-1.5 py-0.5 rounded border border-border bg-bg text-fg-muted cursor-pointer hover:bg-hover-bg hover:text-fg"
-                on:click={() => startWsRename(w)}
+                onclick={() => startWsRename(w)}
                 title="Rename"
               >rename</button>
               {#if w.id !== DEFAULT_WORKSPACE_ID}
                 <button
                   class="text-[0.72rem] px-1.5 py-0.5 rounded border border-error-border bg-error-bg text-error-fg cursor-pointer hover:opacity-90"
-                  on:click={() => removeWorkspace(w.id)}
+                  onclick={() => removeWorkspace(w.id)}
                   title="Delete workspace and its chats"
                 >delete</button>
               {/if}
@@ -382,12 +386,12 @@
               </span>
               <button
                 class="px-1.5 py-0.5 rounded border border-border bg-bg text-fg-muted cursor-pointer hover:bg-hover-bg hover:text-fg"
-                on:click={() => pickDir(w.id)}
+                onclick={() => pickDir(w.id)}
               >choose…</button>
               {#if w.dir}
                 <button
                   class="px-1.5 py-0.5 rounded border border-border bg-bg text-fg-muted cursor-pointer hover:bg-hover-bg hover:text-fg"
-                  on:click={() => clearDir(w.id)}
+                  onclick={() => clearDir(w.id)}
                 >clear</button>
               {/if}
             </div>
@@ -399,7 +403,7 @@
         <select
           class="px-2 py-1 border border-border rounded bg-bg text-fg text-[0.85rem] outline-none focus:border-border-strong cursor-pointer"
           value={newWorkspaceTemplateId}
-          on:change={onTemplateChange}
+          onchange={onTemplateChange}
         >
           <option value="">Empty workspace</option>
           {#each WORKSPACE_TEMPLATES as t (t.id)}
@@ -412,11 +416,11 @@
             type="text"
             placeholder="New workspace name"
             bind:value={newWorkspaceName}
-            on:keydown={(e) => e.key === 'Enter' && createWorkspace()}
+            onkeydown={(e) => e.key === 'Enter' && createWorkspace()}
           />
           <button
             class="px-3 py-1 text-[0.85rem] rounded border border-border bg-bg text-fg cursor-pointer hover:bg-hover-bg disabled:opacity-40 disabled:cursor-not-allowed"
-            on:click={createWorkspace}
+            onclick={createWorkspace}
             disabled={!newWorkspaceName.trim() && !newWorkspaceTemplateId}
           >Create</button>
         </div>

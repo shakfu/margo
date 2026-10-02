@@ -8,6 +8,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Nothing yet.
 
+## [0.3.0]
+
+### Changed
+
+- OpenRouter provider rewritten on the OpenRouter Go SDK (`github.com/OpenRouterTeam/go-sdk`, beta, pinned at v0.9.21), replacing `openaicompat` and the hand-rolled catalog decoder. It now sends `Thinking` as `reasoning.effort` and streams reasoning deltas as thinking chunks. The SDK's reasoning type has no `max_tokens`, so the budget maps to effort: below 4096 is `low`, below 16384 `medium`, otherwise `high`. Two SDK defaults are overridden. 5xx retries were unbounded for up to an hour and are now capped at 10s. The `WithHTTPReferer`/`WithXTitle` options never reach chat requests in v0.9.21, so the attribution headers are set per request.
+
+- The cost meter uses the provider-billed cost when a provider reports one, and the token-rate estimate otherwise. OpenRouter is the only provider that reports it today (`usage.cost`), so OpenRouter turns now include cache discounts and current prices, which the static catalog rates miss. When a chat mixes billed and estimated models, estimated lines in the per-model popover are marked `~`. Agent runs report it too; a run's cost is set only when every model call in it reported one.
+
+- MathJax 3 -> 4. v4 has no self-contained `-full` bundle: it loads TeX extensions, glyph ranges and the speech engine on demand, and fetches fonts from `cdn.jsdelivr.net` by default. `make vendor-mathjax` now copies every file it can request into `frontend/public/mathjax/` (14 MB, up from 2.2 MB), and `index.html` points `loader.paths.fonts` there, so math renders offline. Screen-reader output changes from hidden assistive MathML to SRE speech labels, run in a web worker.
+
+- Frontend migrated to Svelte 5 runes (`$props`, `$state`, `$derived`, `$effect`), with Vite 8, Vitest 5, `@sveltejs/vite-plugin-svelte` 7 and `svelte-check` 4. Component events are now callback props (`onSend`, `onPermission`, `onModelsRefreshed`, ...) in place of the deprecated `createEventDispatcher`. Effects that call into store-writing helpers wrap the call in `untrack`: a Svelte 5 effect tracks every read made during the call, where `$:` tracked only the names written in the block.
+
+- Go dependencies updated to latest minor versions, including `wails/v2` 2.16, `anthropic-sdk-go` 1.78 and `openai-go/v3` 3.71. The `go` directive is now 1.26, required by the updated modules.
+
+- The context-budget trim moved into the model adapter (`Adapter.WithBudget`), from the ReAct runner's `adk.AgentMiddleware`, which eino 0.9 deprecates. It now trims every model call of every runner. The plan and workflow runners previously did not trim at all, so long runs could overflow the context window; `planexecute`'s agents accept no ADK handlers, so the adapter is the one place that reaches them. `WithTools` now copies the whole adapter, since ADK derives each agent's model through it and a field-by-field copy would drop the budget.
+
+- `WAILS_GOTOOLCHAIN` removed: wails 2.16 uses an x/tools that reads Go 1.27 export data. Wails targets now pass `-tags webkit2_41` when `pkg-config` finds webkit2gtk-4.1, which is the only version Ubuntu 24.04 ships.
+
+- `docs/dev/agents_and_tools.md` rewritten for the Eino ADK design. It had described the pre-ADK `react.NewAgent` loop and callback handlers.
+
+### Fixed
+
+- Agent runs dropped model reasoning. The adapter stored it on `schema.Message.ReasoningContent`, which the event bridge never read. It now arrives as `thinking` events and shows in the same thinking block as plain chat.
+
+- A denied permission or a failing tool aborted the whole agent run with `[NodeRunError] failed to stream tool call ...`. The error now reaches the model as the call's result, so the run continues and the model can retry or answer without the tool; the UI shows the result in red (`IsError` was never set before). A denial asks the model not to retry. Cancellation still ends the run. The permission test had accepted either outcome and is now strict. A streaming tool that fails mid-stream keeps its partial output, followed by the error.
+
+- Agent runs (`/agent`, plan and workflow runners) under-counted tokens and cost. Each model call's usage overwrote the running total instead of adding to it, and the plan runner's planner and replanner calls were never counted, because usage was read from ADK events and those calls emit none. The model adapter now meters every call directly.
+
 ## [0.2.0]
 
 ### Added

@@ -29,7 +29,7 @@ Shipped (see CHANGELOG): `StepToolStream` event kind, `OnEndWithStreamOutput` wi
 
 This is Eino's actual value prop and where we currently get nothing. First custom graph worth building: **plan-then-execute**. A planner node generates a structured task list, a worker node executes each step with tools, a reducer node summarises. Demonstrate by replacing the single ReAct loop with a graph for a specific user-visible feature (e.g. "summarise this PDF", "refactor this file"). Once one graph is in place, additional workflows are cheap.
 
-Pointers: `compose.NewGraph[I, O]()`, `AddChatModelNode`, `AddToolsNode`, `AddLambdaNode`, `AddBranch`, `Compile`. The `docs/dev/agents_and_tools.md` Pattern 2 sketch is the starting point.
+Plan-then-execute shipped on ADK's `planexecute` prebuilt instead (`/agent-plan`; see "Adding a runner" in `docs/dev/agents_and_tools.md`). A raw graph remains an option for shapes ADK does not cover. Pointers: `compose.NewGraph[I, O]()`, `AddChatModelNode`, `AddToolsNode`, `AddLambdaNode`, `AddBranch`, `Compile`.
 
 ### 6.6 RAG: embedding + indexer + retriever
 
@@ -390,6 +390,8 @@ cheaper before adoption grows.
 
 #### 10.3 OpenRouter live model fetch
 
+Shipped in 0.2.0 (see CHANGELOG): `CatalogCache` fetches each provider's catalog, caches it for 24h, and merges it over `models.json`. In 0.3.0 the fetch moved onto the OpenRouter Go SDK.
+
 `models.json` declares ~17 OpenRouter models with no cost data (only the `:free` tier rows have explicit zero rates). Fetch the live catalogue from `/api/v1/models` at boot, cache to disk, merge into the in-memory `Catalog` so cost meter coverage becomes universal for OR users without hand-maintaining rates.
 
 **Why:** OR ships new models continuously; hand-maintaining is unsustainable. The mechanism doubles as a template for Anthropic / OpenAI catalogue refresh if they ever ship `/models` endpoints.
@@ -599,7 +601,7 @@ The 0.2.0 code review's prioritised list is fully shipped (see the 0.2.0 CHANGEL
 
 `lib/` has five test files covering the logic modules — `store`, `stream`, `cost`, `slash`, `attachments` — and none covering the ten Svelte components. Adding `@testing-library/svelte` is the whole blocker.
 
-The concrete gap: the reactive in `App.svelte` that re-applies the remembered model on launch is verified only by a human restarting the app. That is the same shape as the bug it fixes — the write path and the provider-switch path were both wired and tested, and the restore path simply was not wired at all, with nothing to catch it.
+The concrete gap: the `$effect` in `App.svelte` that re-applies the remembered model on launch is verified only by a human restarting the app. That is the same shape as the bug it fixes — the write path and the provider-switch path were both wired and tested, and the restore path simply was not wired at all, with nothing to catch it.
 
 **Why P1:** every other item here is cosmetic or environmental. This one is a class of bug that has already shipped once.
 
@@ -643,15 +645,16 @@ Three shapes:
 
 `internal/config` (30 lines) and both `cmd/` binaries sit at 0%. `margo-cli` became testable in 0.2.0 when `run()` was split from `main()`; `margo-tui` has not had the same treatment.
 
-#### 11.6 Toolchain pins to retire
+#### 11.6 `make lint` reports 25 issues
 
-Two tools cannot read the export data Go 1.27 emits, both because they embed an older `golang.org/x/tools`:
+golangci-lint v2.14.0 loads Go 1.27 export data when built from source (`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`). A prebuilt binary works only if its release was built with a Go at least as new as the local toolchain; otherwise every stdlib import reports as unloadable.
 
-- Wails v2.11.0 — worked around by `WAILS_GOTOOLCHAIN=go1.26.2` in the Makefile. Drop the pin when Wails ships a release with newer x/tools.
+With the v2 defaults (no `.golangci.yml`) it reports 21 errcheck and 4 staticcheck findings. Of note:
 
-- golangci-lint — not fixable from the repo; the binary needs rebuilding against a Go at least as new as the local toolchain, or `make lint` reports every stdlib import as unloadable.
+- `pkg/margo/core/export.go:151` uses the deprecated `strings.Title`.
+- `pkg/margo/catalog_cache_test.go:511` (SA4000) is a false positive: calling `overlayFingerprint` twice checks that it is deterministic. Suppress with `//nolint:staticcheck`.
 
-#### 11.7 `App.svelte` is 691 lines
+#### 11.7 `App.svelte` is 694 lines
 
 Down from 1,310 after `Topbar`, `Composer` and `MessageList` came out. What remains is `send()` (the slash pre-processing, history assembly, attachment rehydration and both transport paths), the settings panes and the dialogs. Splitting further is possible but has diminishing returns without §11.1 to catch regressions.
 
