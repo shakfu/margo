@@ -6,7 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- CI frontend job runs on Node 24, up from 20. The 0.3.0 test dependencies (jsdom 30, vitest 5, undici 8) need Node 22.22.2 or newer. On Node 20, undici called the missing `worker_threads.markAsUncloneable`, so every vitest worker crashed before running a test. `npm ci` passed because it only warns on engine mismatches.
 
 ## [0.3.0]
 
