@@ -19,6 +19,8 @@
   import TrustedToolsSection from './settings/TrustedToolsSection.svelte';
   import MCPServersSection from './settings/MCPServersSection.svelte';
   import GeneralSettings from './settings/GeneralSettings.svelte';
+  import { settings } from './store';
+  import { tierAllows } from './tier';
 
   interface Props {
     providers?: string[];
@@ -50,15 +52,35 @@
   // "general" — appearance / output / reset. Global only.
   const {
     elements: { root: tabsRoot, list: tabsList, trigger: tabsTrigger, content: tabsContent },
+    states: { value: activeTab },
   } = createTabs({ defaultValue: 'models' });
+
+  let showMcp = $derived(mode === 'workspace' && tierAllows($settings.uiTier, 'mcpServers'));
+  // Entries stay visible at any tier: they skip the permission prompt, so
+  // the user must always be able to revoke them.
+  let showTrusted = $derived(
+    mode === 'global' &&
+    (tierAllows($settings.uiTier, 'trustedTools') || ($settings.autoApproveTools ?? []).length > 0)
+  );
+  // In global mode the Roles tab holds only the trusted-tools section.
+  let showRoles = $derived(mode === 'workspace' || showTrusted);
+
+  // A tier change can remove the open tab; melt then renders no content.
+  $effect(() => {
+    if (($activeTab === 'mcp' && !showMcp) || ($activeTab === 'agents' && !showRoles)) {
+      activeTab.set('models');
+    }
+  });
 </script>
 
 <div class="flex flex-col h-full bg-bg-elev border-l border-border overflow-y-auto" use:melt={$tabsRoot}>
   <div class="px-3.5 pt-3.5 pb-2 font-semibold text-[0.9rem]">Settings</div>
   <div use:melt={$tabsList} class="flex border-b border-border px-2 gap-0.5" aria-label="Settings tabs">
     <button class="tab-trigger" use:melt={$tabsTrigger('models')}>Models</button>
-    <button class="tab-trigger" use:melt={$tabsTrigger('agents')}>Roles</button>
-    {#if mode === 'workspace'}
+    {#if showRoles}
+      <button class="tab-trigger" use:melt={$tabsTrigger('agents')}>Roles</button>
+    {/if}
+    {#if showMcp}
       <button class="tab-trigger" use:melt={$tabsTrigger('mcp')}>MCP</button>
     {/if}
     {#if mode === 'global'}
@@ -78,14 +100,14 @@
       <KnowledgeSection />
       <ToolsSection />
     {/if}
-    {#if mode === 'global'}
+    {#if showTrusted}
       <TrustedToolsSection />
     {/if}
   </div>
 
   <!-- MCP tab — workspace mode only (status is global, but the user
        reaches this UI from the workspace sidebar). -->
-  {#if mode === 'workspace'}
+  {#if showMcp}
     <div use:melt={$tabsContent('mcp')}>
       <MCPServersSection />
     </div>

@@ -7,7 +7,7 @@
   // mechanic for getting files in. The parent keeps send/cancel, since
   // those drive the stream it owns.
   import { effectiveSettings, settings } from './store';
-  import { SLASH_COMMANDS, type SlashSuggestion } from './slash';
+  import { computeSlashSuggestions } from './slash';
   import {
     ATTACHMENT_MIME_ACCEPT,
     rejectionReason,
@@ -50,31 +50,7 @@
 
   let ctxPct = $derived(ctxWindow > 0 ? Math.min(100, Math.round((ctxUsed / ctxWindow) * 100)) : 0);
 
-  // Slash autocomplete. Suggestions populate from the static command
-  // catalog plus the user's persona names, which is why the personas
-  // list is read here rather than passed in.
-  function computeSlashSuggestions(s: string, personas: { name: string }[]): SlashSuggestion[] {
-    if (!s.startsWith('/')) return [];
-    const typed = s.slice(1).toLowerCase();
-    const out: SlashSuggestion[] = [];
-    for (const c of SLASH_COMMANDS) {
-      if (c.command.toLowerCase().startsWith(typed)) {
-        out.push({ text: `/${c.command} `, description: c.description });
-      }
-    }
-    if ('persona'.startsWith(typed) || typed.startsWith('persona')) {
-      for (const p of personas) {
-        const slug = p.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-        const text = `/persona ${slug} `;
-        if (text.toLowerCase().startsWith(s.toLowerCase())) {
-          out.push({ text, description: `Switch to the ${p.name} persona` });
-        }
-      }
-    }
-    return out.slice(0, 8);
-  }
-
-  let slashSuggestions = $derived(computeSlashSuggestions(input, $settings.personas));
+  let slashSuggestions = $derived(computeSlashSuggestions(input, $settings.personas, $settings.uiTier));
   let showSlashHint = $derived(input.startsWith('/') && slashSuggestions.length > 0);
 
   function applySuggestion(text: string) {

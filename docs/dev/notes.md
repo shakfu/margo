@@ -378,7 +378,7 @@ the most-advanced controls per `lib/settings/*.svelte` subcomponent (sampling, t
 
 **Why:** the substrate-with-variants moat hypothesis only works if the substrate has a tier-aware visibility layer. The `SettingsPanel` split into per-section components was done specifically to enable this; adding tier gates per-subcomponent is much cheaper than against the prior 1100-LoC monolith.
 
-**Open decision:** variants as separate build binaries (clean mental model) or runtime modes of one binary (cleaner marketing pitch — "margo, with simple mode"). Pick before this work begins.
+**Decision:** runtime modes of one binary. `uiTier` is a persisted setting, so a mode needs no second build pipeline. A separate variant build can still ship a different default tier. The tier table is `lib/tier.ts`. Default `expert` keeps the existing UI unchanged.
 
 #### 10.2 Per-workspace MCP server scoping
 

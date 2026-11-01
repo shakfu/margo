@@ -16,6 +16,9 @@
 // caller can surface an inline error rather than silently shipping the
 // typo to the model.
 
+import { tierAllows } from './tier';
+import type { UiTier } from './store/types';
+
 export type SlashCommand =
   | { kind: 'agent'; runnerType: string; task: string }
   | { kind: 'persona'; slug: string } // empty slug means "clear persona"
@@ -86,3 +89,32 @@ export const SLASH_COMMANDS: Array<{ command: string; description: string }> = [
   { command: '/persona', description: 'Set or clear this chat\'s persona.' },
   { command: '/default', description: 'Clear persona for this chat.' },
 ];
+
+// Autocomplete catalog for a tier. Hides the /agent-<type> runner picks
+// only: parseSlash still accepts them when typed.
+export function slashCommandsForTier(tier: UiTier) {
+  return SLASH_COMMANDS.filter(c => !c.command.startsWith('/agent-') || tierAllows(tier, 'agentRunners'));
+}
+
+// Autocomplete rows for the composer: the tier's commands plus the user's
+// persona names.
+export function computeSlashSuggestions(s: string, personas: { name: string }[], tier: UiTier): SlashSuggestion[] {
+  if (!s.startsWith('/')) return [];
+  const lower = s.toLowerCase();
+  const typed = lower.slice(1);
+  const out: SlashSuggestion[] = [];
+  for (const c of slashCommandsForTier(tier)) {
+    if (c.command.startsWith(lower)) {
+      out.push({ text: `${c.command} `, description: c.description });
+    }
+  }
+  if ('persona'.startsWith(typed) || typed.startsWith('persona')) {
+    for (const p of personas) {
+      const text = `/persona ${slugify(p.name)} `;
+      if (text.startsWith(lower)) {
+        out.push({ text, description: `Switch to the ${p.name} persona` });
+      }
+    }
+  }
+  return out.slice(0, 8);
+}

@@ -9,6 +9,7 @@
   import { get } from 'svelte/store';
   import { RefreshModels } from '../../../wailsjs/go/main/App.js';
   import { writeKey, type SettingsScope } from './writeKey';
+  import { tierAllows } from '../tier';
 
   interface Props {
     providers?: string[];
@@ -215,6 +216,7 @@
 </section>
 
 <!-- Sampling -->
+{#if tierAllows($settings.uiTier, 'sampling')}
 <section class="border-b border-border" use:melt={$sampRoot}>
   <button class="section-head" use:melt={$sampTrig}>
     <span class="caret">{$sampOpen ? '▾' : '▸'}</span>
@@ -263,14 +265,18 @@
       />
     </label>
 
-    <label class="field">
-      <span>Stop sequences (comma-separated)</span>
-      <input type="text" class="text-input" bind:value={stopText} onblur={commitStopSequences} disabled={busy} />
-    </label>
+    {#if tierAllows($settings.uiTier, 'stopSequences')}
+      <label class="field">
+        <span>Stop sequences (comma-separated)</span>
+        <input type="text" class="text-input" bind:value={stopText} onblur={commitStopSequences} disabled={busy} />
+      </label>
+    {/if}
   </div>
 </section>
+{/if}
 
 <!-- Thinking -->
+{#if tierAllows($settings.uiTier, 'thinking')}
 <section class="border-b border-border" use:melt={$thinkRoot}>
   <button class="section-head" use:melt={$thinkTrig}>
     <span class="caret">{$thinkSectOpen ? '▾' : '▸'}</span>
@@ -302,3 +308,4 @@
     </p>
   </div>
 </section>
+{/if}

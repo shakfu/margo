@@ -6,6 +6,8 @@ import tailwindcss from '@tailwindcss/vite'
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [svelte(), tailwindcss()],
+  // Vitest resolves `svelte` to its server build otherwise, where mount() throws.
+  resolve: process.env.VITEST ? {conditions: ['browser']} : undefined,
   test: {
     // jsdom gives us a `window` + `localStorage` shim — needed by
     // store.ts, which reads localStorage at module-init time. node

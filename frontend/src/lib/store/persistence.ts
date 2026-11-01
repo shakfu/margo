@@ -10,7 +10,7 @@
 // is the module boundary consumers depend on.
 
 import { BUILTIN_PERSONAS, BUILTIN_AGENTS, LEGACY_BUILTIN_AGENT_IDS } from './builtins';
-import { DEFAULT_WORKSPACE_ID, type Agent, type Chat, type Persona, type Settings, type Workspace } from './types';
+import { DEFAULT_WORKSPACE_ID, UI_TIERS, type Agent, type Chat, type Persona, type Settings, type Workspace } from './types';
 
 export const LEGACY_CHATS_KEY = 'margo:chats:v1';
 export const SETTINGS_KEY = 'margo:settings:v1';
@@ -106,6 +106,7 @@ export const defaults: Settings = {
   system: '',
   streaming: true,
   theme: 'light',
+  uiTier: 'expert',
   showLeft: true,
   showRight: true,
   maxTokens: 4096,
@@ -138,6 +139,8 @@ export function loadSettings(): Settings {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) {
       const merged = { ...defaults, ...JSON.parse(raw) };
+      // An unknown tier would make every tierAllows comparison false.
+      if (!UI_TIERS.includes(merged.uiTier)) merged.uiTier = defaults.uiTier;
       // Merge builtin personas into the persisted list, preserving custom
       // entries and any user edits to builtins. Builtins are matched by id
       // and re-asserted with the latest ship version of their fields, so a

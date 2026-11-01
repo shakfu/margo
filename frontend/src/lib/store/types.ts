@@ -225,12 +225,18 @@ export interface WorkspaceTemplate {
 // fixed point so migration logic doesn't need to invent one.
 export const DEFAULT_WORKSPACE_ID = 'default';
 
+// Which settings controls the UI shows; see lib/tier.ts. Hidden controls'
+// stored values still apply.
+export const UI_TIERS = ['novice', 'standard', 'expert'] as const;
+export type UiTier = (typeof UI_TIERS)[number];
+
 export interface Settings {
   provider: string;
   model: string;
   system: string;
   streaming: boolean;
   theme: 'light' | 'dark';
+  uiTier: UiTier;
   showLeft: boolean;
   showRight: boolean;
   maxTokens: number;

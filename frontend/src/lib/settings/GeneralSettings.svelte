@@ -2,7 +2,7 @@
   // General tab: Appearance / Output / Reset. Global-mode only; the
   // workspace right-pane hides this whole tab. Owns the Reset confirm
   // dialog so the parent shell stays free of dialog state.
-  import { settings } from '../store';
+  import { settings, UI_TIERS } from '../store';
   import { setHighlightTheme } from '../markdown';
   import { createCollapsible, createDialog, melt } from '@melt-ui/svelte';
   import { OpenPath } from '../../../wailsjs/go/main/App.js';
@@ -53,6 +53,14 @@
       <button class="mini-btn" onclick={toggleTheme}>
         {$settings.theme === 'light' ? 'light → dark' : 'dark → light'}
       </button>
+    </label>
+    <label class="flex flex-row items-center gap-2 text-[0.8rem] text-fg-muted">
+      <span>Interface level</span>
+      <select class="text-input w-auto" bind:value={$settings.uiTier}>
+        {#each UI_TIERS as tier}
+          <option value={tier}>{tier}</option>
+        {/each}
+      </select>
     </label>
   </div>
 </section>
