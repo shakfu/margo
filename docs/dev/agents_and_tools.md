@@ -148,7 +148,7 @@ For `oneOf`, `anyOf`, `$defs` or recursive types, build the schema with `schema.
 
 ### 7. MCP tools
 
-Tools from MCP servers are not in `builtinTools`. `buildTools` resolves names of the form `mcp:<server>:<tool>` against the MCP manager and wraps them with `mcp.AsEinoTool`. They are never read-only, so every call prompts until the user chooses "Always".
+Tools from MCP servers are not in `builtinTools`. `buildTools` resolves names of the form `mcp:<server>:<tool>` against the MCP servers in scope for the request's workspace (`AgentRequest.WorkspaceID`) and wraps them with `mcp.AsEinoTool`. They are never read-only, so every call prompts until the user chooses "Always".
 
 ## Adding a runner
 

@@ -112,7 +112,7 @@ Hand-rolled Model Context Protocol client. The platform thesis's central bet.
 
 - `server.go` — `Server` wraps one subprocess: spawn via `exec.Cmd`, ring-buffered stderr tail, polite shutdown via stdin-close with 3s SIGKILL fallback.
 
-- `manager.go` — named registry. Loads `<UserConfigDir>/Margo/mcp.json` (Claude-Desktop-compatible shape) and starts every server eagerly + async. `Tools()` returns aggregated `NamespacedTool` values (`mcp:<server>:<tool>`) from every Ready server.
+- `manager.go` — named registry. Loads `<UserConfigDir>/Margo/mcp.json` (Claude-Desktop-compatible shape) and starts every server eagerly + async. `Tools()` returns aggregated `NamespacedTool` values (`mcp:<server>:<tool>`) from every Ready server; `ToolsFor(workspaceID)` restricts them to servers in scope for that workspace.
 
 - `adapter.go` — wraps each MCP tool as `eino.tool.InvokableTool` so the agent runner equips them like any builtin.
 
@@ -369,6 +369,8 @@ Edit `<UserConfigDir>/Margo/mcp.json`:
 ```
 
 Restart margo. The server appears in the MCP tab of the right sidebar (status: starting → ready). Its tools surface in the Tools tab prefixed `mcp:filesystem:`; enable them on the agents that need them.
+
+Add `"workspaces": ["<workspace id>", ...]` to a server to scope it. Its tools then appear only in those workspaces; without the field the server is global. The server still runs in every workspace. The MCP tab shows the active workspace's id.
 
 ## 6. Test landscape
 

@@ -317,7 +317,7 @@ func TestStreamErrorsBeforeRegisteringUnknownProvider(t *testing.T) {
 
 func TestBuildToolsRejectsUnknownBuiltin(t *testing.T) {
 	s := newTestSession(t, nil)
-	_, err := s.buildTools([]string{"current_time", "does_not_exist"})
+	_, err := s.buildTools([]string{"current_time", "does_not_exist"}, "")
 	if err == nil || !strings.Contains(err.Error(), "unknown tool: does_not_exist") {
 		t.Fatalf("got %v, want an unknown-tool error", err)
 	}
@@ -327,7 +327,7 @@ func TestBuildToolsRejectsUnknownBuiltin(t *testing.T) {
 // model's first call to it.
 func TestBuildToolsRejectsUnknownMCPTool(t *testing.T) {
 	s := newTestSession(t, nil)
-	_, err := s.buildTools([]string{"mcp:ghost:read_file"})
+	_, err := s.buildTools([]string{"mcp:ghost:read_file"}, "")
 	if err == nil || !strings.Contains(err.Error(), "unknown tool: mcp:ghost:read_file") {
 		t.Fatalf("got %v, want an unknown-tool error", err)
 	}
@@ -335,7 +335,7 @@ func TestBuildToolsRejectsUnknownMCPTool(t *testing.T) {
 
 func TestBuildToolsResolvesBuiltins(t *testing.T) {
 	s := newTestSession(t, nil)
-	tools, err := s.buildTools([]string{"current_time", "web_fetch"})
+	tools, err := s.buildTools([]string{"current_time", "web_fetch"}, "")
 	if err != nil {
 		t.Fatalf("buildTools: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestBuildToolsResolvesBuiltins(t *testing.T) {
 func TestToolsMetadataFlags(t *testing.T) {
 	s := newTestSession(t, nil)
 	byName := map[string]ToolMetadata{}
-	for _, m := range s.ToolsMetadata(context.Background()) {
+	for _, m := range s.ToolsMetadata(context.Background(), "") {
 		byName[m.Name] = m
 	}
 
@@ -381,7 +381,7 @@ func TestToolsMetadataFlags(t *testing.T) {
 
 func TestToolsIsSorted(t *testing.T) {
 	s := newTestSession(t, nil)
-	got := s.Tools()
+	got := s.Tools("")
 	for i := 1; i < len(got); i++ {
 		if got[i-1] > got[i] {
 			t.Fatalf("Tools() not sorted: %v", got)

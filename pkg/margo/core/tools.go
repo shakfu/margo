@@ -42,18 +42,19 @@ var builtinTools = func() map[string]toolCtor {
 
 // Tools returns the names of every available tool, builtins first
 // (sorted), then any MCP tools currently exposed by Ready servers
-// (in mcp:server:tool form, sorted within their namespace).
+// (in mcp:server:tool form, sorted within their namespace). MCP tools
+// are limited to servers in scope for workspaceID.
 //
 // The split-then-merge order makes the front-end's tool picker stable:
 // rebuilding the list mid-session can only add MCP entries at the end;
 // builtins never reshuffle.
-func (s *Session) Tools() []string {
+func (s *Session) Tools(workspaceID string) []string {
 	out := make([]string, 0, len(builtinTools))
 	for name := range builtinTools {
 		out = append(out, name)
 	}
 	sort.Strings(out)
-	for _, nt := range s.mcp.Tools() {
+	for _, nt := range s.mcp.ToolsFor(workspaceID) {
 		out = append(out, nt.Qualified)
 	}
 	return out
@@ -63,8 +64,9 @@ func (s *Session) Tools() []string {
 // expose their `agent.ReadOnlyTools` flag; MCP tools default to
 // non-read-only because the server author can't be trusted to mark
 // themselves safe — users grant per-tool always-approve through the
-// existing permission flow if they want lower friction.
-func (s *Session) ToolsMetadata(ctx context.Context) []ToolMetadata {
+// existing permission flow if they want lower friction. MCP entries are
+// limited to servers in scope for workspaceID.
+func (s *Session) ToolsMetadata(ctx context.Context, workspaceID string) []ToolMetadata {
 	out := make([]ToolMetadata, 0, len(builtinTools))
 	for name, ctor := range builtinTools {
 		t := ctor(s)
@@ -88,7 +90,7 @@ func (s *Session) ToolsMetadata(ctx context.Context) []ToolMetadata {
 	// tools/call returns a single CallToolResult in 2025-06-18 — no
 	// per-tool streaming. Read-only=false by policy.
 	mcpEntries := make([]ToolMetadata, 0)
-	for _, nt := range s.mcp.Tools() {
+	for _, nt := range s.mcp.ToolsFor(workspaceID) {
 		desc := strings.TrimSpace(nt.Tool.Description)
 		mcpEntries = append(mcpEntries, ToolMetadata{
 			Name:         nt.Qualified,
@@ -103,20 +105,20 @@ func (s *Session) ToolsMetadata(ctx context.Context) []ToolMetadata {
 }
 
 // buildTools resolves a name list to constructed tools. Names with the
-// "mcp:" prefix are resolved against the MCP manager; everything else
-// must be a builtin. Returns the first unknown name as an error so the
+// "mcp:" prefix are resolved against the MCP servers in scope for
+// workspaceID; everything else must be a builtin. Returns the first unknown name as an error so the
 // caller can surface a clear message.
 //
-// Unknown MCP tool names (server doesn't exist or hasn't reached
-// Ready) error here rather than at first call so the agent runner
+// Unknown MCP tool names (server doesn't exist, hasn't reached Ready,
+// or is scoped to another workspace) error here rather than at first call so the agent runner
 // can surface "you asked for an MCP tool that isn't available" once,
 // up-front, rather than letting the model burn turns invoking a
 // tool that will always fail.
-func (s *Session) buildTools(names []string) ([]tool.BaseTool, error) {
+func (s *Session) buildTools(names []string, workspaceID string) ([]tool.BaseTool, error) {
 	tools := make([]tool.BaseTool, 0, len(names))
 	// Cache the manager's tool list once so we don't iterate per name.
 	mcpByQualified := map[string]mcp.NamespacedTool{}
-	for _, nt := range s.mcp.Tools() {
+	for _, nt := range s.mcp.ToolsFor(workspaceID) {
 		mcpByQualified[nt.Qualified] = nt
 	}
 	for _, n := range names {

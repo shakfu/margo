@@ -16,15 +16,15 @@
 
   async function refresh() {
     try {
-      toolsCatalog = (await ToolsMetadata()) as ToolMeta[];
+      toolsCatalog = (await ToolsMetadata($settings.activeWorkspaceId)) as ToolMeta[];
     } catch (_) {
       toolsCatalog = [];
     }
   }
 
-  // Refresh whenever the active workspace changes — the per-workspace
-  // checkbox state derives from $activeWorkspace, but also re-pull the
-  // catalog in case it grew (e.g. an MCP server just turned ready).
+  // Refresh whenever the active workspace changes: the catalog includes
+  // only MCP servers in scope for it, and may have grown (e.g. an MCP
+  // server just turned ready).
   $effect(() => { void $settings.activeWorkspaceId; untrack(refresh); });
 
   function onToggle(name: string, ev: Event) {

@@ -94,18 +94,18 @@ export function StartupWorkspaceDir() {
   return window['go']['main']['App']['StartupWorkspaceDir']();
 }
 
-export function StreamAgent(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9) {
-  return window['go']['main']['App']['StreamAgent'](arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9);
+export function StreamAgent(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10) {
+  return window['go']['main']['App']['StreamAgent'](arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10);
 }
 
 export function StreamChat(arg1, arg2, arg3, arg4, arg5, arg6) {
   return window['go']['main']['App']['StreamChat'](arg1, arg2, arg3, arg4, arg5, arg6);
 }
 
-export function Tools() {
-  return window['go']['main']['App']['Tools']();
+export function Tools(arg1) {
+  return window['go']['main']['App']['Tools'](arg1);
 }
 
-export function ToolsMetadata() {
-  return window['go']['main']['App']['ToolsMetadata']();
+export function ToolsMetadata(arg1) {
+  return window['go']['main']['App']['ToolsMetadata'](arg1);
 }

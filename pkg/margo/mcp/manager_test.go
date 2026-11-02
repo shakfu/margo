@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -235,5 +236,83 @@ func TestCallQualifiedRoutesAndRejects(t *testing.T) {
 	m.mu.Unlock()
 	if _, err := m.CallQualified(ctx, "mcp:pending:tool", json.RawMessage(`{}`)); err == nil {
 		t.Errorf("not-ready server should be rejected")
+	}
+}
+
+func TestServerSpecVisibleIn(t *testing.T) {
+	global := ServerSpec{Command: "x"}
+	scoped := ServerSpec{Command: "x", Workspaces: []string{"ws-a", "ws-b"}}
+	cases := []struct {
+		spec ServerSpec
+		ws   string
+		want bool
+	}{
+		{global, "", true},
+		{global, "ws-a", true},
+		{scoped, "ws-a", true},
+		{scoped, "ws-b", true},
+		{scoped, "ws-c", false},
+		{scoped, "", false},
+	}
+	for _, c := range cases {
+		if got := c.spec.VisibleIn(c.ws); got != c.want {
+			t.Errorf("%v.VisibleIn(%q) = %v, want %v", c.spec.Workspaces, c.ws, got, c.want)
+		}
+	}
+}
+
+func TestLoadConfigParsesWorkspaces(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	data := `{"mcpServers": {"fs": {"command": "npx", "workspaces": ["ws-a"]}, "web": {"command": "npx"}}}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := cfg.MCPServers["fs"].Workspaces; len(got) != 1 || got[0] != "ws-a" {
+		t.Errorf("fs.Workspaces = %v, want [ws-a]", got)
+	}
+	if got := cfg.MCPServers["web"].Workspaces; len(got) != 0 {
+		t.Errorf("web.Workspaces = %v, want empty (global)", got)
+	}
+}
+
+// ToolsFor must hide a scoped server's tools from other workspaces and
+// from the no-workspace caller, while Tools stays unfiltered.
+func TestManagerToolsForFiltersByWorkspace(t *testing.T) {
+	m := NewManager(nil)
+	m.mu.Lock()
+	m.servers["global"] = &Server{
+		name: "global", status: StatusReady, exitWaitDone: closedChan(),
+		tools: []Tool{{Name: "g"}},
+	}
+	m.servers["scoped"] = &Server{
+		name: "scoped", status: StatusReady, exitWaitDone: closedChan(),
+		spec:  ServerSpec{Workspaces: []string{"ws-a"}},
+		tools: []Tool{{Name: "s"}},
+	}
+	m.mu.Unlock()
+
+	qualified := func(nts []NamespacedTool) []string {
+		out := []string{}
+		for _, nt := range nts {
+			out = append(out, nt.Qualified)
+		}
+		return out
+	}
+	cases := map[string][]string{
+		"ws-a": {"mcp:global:g", "mcp:scoped:s"},
+		"ws-b": {"mcp:global:g"},
+		"":     {"mcp:global:g"},
+	}
+	for ws, want := range cases {
+		if got := qualified(m.ToolsFor(ws)); !slices.Equal(got, want) {
+			t.Errorf("ToolsFor(%q) = %v, want %v", ws, got, want)
+		}
+	}
+	if got := qualified(m.Tools()); len(got) != 2 {
+		t.Errorf("Tools() = %v, want both servers' tools", got)
 	}
 }

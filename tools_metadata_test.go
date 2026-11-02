@@ -12,7 +12,7 @@ import (
 func TestToolsMetadataShape(t *testing.T) {
 	a := NewApp()
 	a.ctx = context.Background()
-	got := a.ToolsMetadata()
+	got := a.ToolsMetadata("")
 	if len(got) == 0 {
 		t.Fatalf("expected at least one tool registered")
 	}
@@ -58,7 +58,7 @@ func TestToolsMetadataShape(t *testing.T) {
 func TestToolsMetadataSortedByName(t *testing.T) {
 	a := NewApp()
 	a.ctx = context.Background()
-	got := a.ToolsMetadata()
+	got := a.ToolsMetadata("")
 	for i := 1; i < len(got); i++ {
 		if got[i-1].Name > got[i].Name {
 			t.Errorf("ToolsMetadata not sorted: %q precedes %q", got[i-1].Name, got[i].Name)

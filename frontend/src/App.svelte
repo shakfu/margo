@@ -50,7 +50,6 @@
 
   let providers: string[] = $state([]);
   let models: string[] = $state([]);
-  let availableTools: string[] = [];
   let outputDir = $state('');
   let input = $state('');
   let busy = $state(false);
@@ -119,7 +118,7 @@
     void initModelCatalog();
     // Reconcile persisted "Always" grants against current policy: a
     // tool that has since become ineligible must prompt again.
-    ToolsMetadata().then(metas => {
+    ToolsMetadata($settings.activeWorkspaceId).then(metas => {
       noAlwaysTools = new Set(metas.filter(m => !m.allowsAlways).map(m => m.name));
       settings.update(s => ({
         ...s,
@@ -134,7 +133,6 @@
       } else if (providers.length === 0) {
         error = 'No providers configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY in .env and restart.';
       }
-      availableTools = await Tools();
       outputDir = await OutputDir();
     } catch (e) {
       error = String(e);
@@ -375,13 +373,7 @@
     const persona = findPersona($settings.personas, chat.personaId);
     const systemPrompt = persona ? persona.systemPrompt : $effectiveSettings.system;
     const useAgentRoute = !!forcedRunner;
-    // Workspace-scoped tool palette (§9.3): undefined enabledTools
-    // means "all available enabled" so existing workspaces behave
-    // like today until the user narrows the palette in the Tools tab.
     const ws = $activeWorkspace;
-    const agentTools = (ws && ws.enabledTools !== undefined)
-      ? availableTools.filter(t => ws.enabledTools!.includes(t))
-      : availableTools;
     // Snapshot pending attachments and clear immediately — re-using the
     // same array after a send would leak across messages.
     const sendAttachments = [
@@ -455,7 +447,17 @@
       if (useAgentRoute) {
         // Empty runnerType defaults to ReAct on the Go side, so the
         // legacy role-picker path stays unchanged.
-        await StreamAgent(id, $effectiveSettings.provider, systemPrompt, history, buildOptions(), agentTools, $settings.autoApproveTools, sendAttachments, forcedRunner ?? '');
+        // Fetched per run: the list depends on the workspace (MCP server
+        // scope) and grows as MCP servers become ready.
+        const wsId = ws?.id ?? '';
+        const availableTools = await Tools(wsId);
+        // Workspace-scoped tool palette (§9.3): undefined enabledTools
+        // means "all available enabled" so existing workspaces behave
+        // like today until the user narrows the palette in the Tools tab.
+        const agentTools = (ws && ws.enabledTools !== undefined)
+          ? availableTools.filter(t => ws.enabledTools!.includes(t))
+          : availableTools;
+        await StreamAgent(id, $effectiveSettings.provider, systemPrompt, history, buildOptions(), agentTools, $settings.autoApproveTools, sendAttachments, forcedRunner ?? '', wsId);
       } else {
         await StreamChat(id, $effectiveSettings.provider, systemPrompt, history, buildOptions(), sendAttachments);
       }

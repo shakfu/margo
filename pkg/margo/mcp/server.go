@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os/exec"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,13 +25,24 @@ import (
 //	  "command": "npx",
 //	  "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path"],
 //	  "env":  {"GITHUB_TOKEN": "..."},
-//	  "cwd":  "/optional/working/dir"
+//	  "cwd":  "/optional/working/dir",
+//	  "workspaces": ["<workspace id>"]
 //	}
+//
+// Workspaces is margo-specific. Empty means global: every workspace
+// sees the server's tools. Otherwise only the listed workspace ids do.
 type ServerSpec struct {
-	Command string            `json:"command"`
-	Args    []string          `json:"args,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
-	CWD     string            `json:"cwd,omitempty"`
+	Command    string            `json:"command"`
+	Args       []string          `json:"args,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
+	CWD        string            `json:"cwd,omitempty"`
+	Workspaces []string          `json:"workspaces,omitempty"`
+}
+
+// VisibleIn reports whether the server's tools are in scope for the
+// given workspace id. An empty id (no workspace) sees only global servers.
+func (s ServerSpec) VisibleIn(workspaceID string) bool {
+	return len(s.Workspaces) == 0 || slices.Contains(s.Workspaces, workspaceID)
 }
 
 // ServerStatus is the lifecycle state of one managed server. Drives the
@@ -95,6 +107,9 @@ func (s *Server) Status() (ServerStatus, error) {
 
 // Name returns the user-facing server name (from the mcpServers map key).
 func (s *Server) Name() string { return s.name }
+
+// Spec returns the spec the server was launched from.
+func (s *Server) Spec() ServerSpec { return s.spec }
 
 // StderrTail returns the last N stderr lines captured from the
 // subprocess. Useful for surfacing "why did this fail" in the UI.

@@ -309,11 +309,13 @@ func (a *App) StreamChat(id, provider, system string, messages []ChatMessage, op
 	return nil
 }
 
-// Tools returns the list of built-in agent tools by name.
-func (a *App) Tools() []string { return a.session.Tools() }
+// Tools returns the names of the agent tools available in a workspace.
+func (a *App) Tools(workspaceID string) []string { return a.session.Tools(workspaceID) }
 
-// ToolsMetadata returns one ToolMetadata per registered tool, sorted by name.
-func (a *App) ToolsMetadata() []ToolMetadata { return a.session.ToolsMetadata(a.ctx) }
+// ToolsMetadata returns one ToolMetadata per tool available in a workspace, sorted by name.
+func (a *App) ToolsMetadata(workspaceID string) []ToolMetadata {
+	return a.session.ToolsMetadata(a.ctx, workspaceID)
+}
 
 // openableRoots lists the directories OpenPath will hand to the OS.
 // Both are places margo itself writes: rendered artifacts and stored
@@ -504,7 +506,7 @@ func (a *App) DeleteChatAttachments(chatID string) error {
 //
 // runnerType is the slash-command runner identifier ("react", "plan",
 // "workflow"). Empty string defaults to ReAct.
-func (a *App) StreamAgent(id, provider, system string, messages []ChatMessage, opts ChatOptions, toolNames []string, autoApprove []string, attachments []AttachmentInput, runnerType string) error {
+func (a *App) StreamAgent(id, provider, system string, messages []ChatMessage, opts ChatOptions, toolNames []string, autoApprove []string, attachments []AttachmentInput, runnerType, workspaceID string) error {
 	ch, err := a.session.StreamAgent(a.ctx, id, core.AgentRequest{
 		ChatRequest: core.ChatRequest{
 			Provider:    provider,
@@ -516,6 +518,7 @@ func (a *App) StreamAgent(id, provider, system string, messages []ChatMessage, o
 		ToolNames:   toolNames,
 		AutoApprove: autoApprove,
 		RunnerType:  runnerType,
+		WorkspaceID: workspaceID,
 	})
 	if err != nil {
 		return err
@@ -568,6 +571,8 @@ type MCPServerInfo struct {
 	Error      string   `json:"error,omitempty"`
 	Tools      []string `json:"tools,omitempty"`
 	StderrTail []string `json:"stderrTail,omitempty"`
+	// Workspaces is the server's scope; empty means global.
+	Workspaces []string `json:"workspaces,omitempty"`
 }
 
 // MCPServers returns one info row per managed server, sorted by name.
@@ -588,6 +593,7 @@ func (a *App) MCPServers() []MCPServerInfo {
 			Status:     string(status),
 			Tools:      toolNames,
 			StderrTail: s.StderrTail(),
+			Workspaces: s.Spec().Workspaces,
 		}
 		if statusErr != nil {
 			row.Error = statusErr.Error()

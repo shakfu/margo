@@ -13,9 +13,9 @@ import (
 	"time"
 )
 
-// Manager owns the lifecycle of one or more MCP servers. The MVP
-// supports a global registry (every workspace sees the same servers);
-// per-workspace scoping is a future slice that will wrap this manager.
+// Manager owns the lifecycle of one or more MCP servers. It is one
+// registry per process: every server runs regardless of workspace, and
+// ToolsFor filters by ServerSpec.Workspaces at lookup time.
 //
 // Lifecycle convention is eager+async: StartAll launches every server
 // in parallel and returns immediately. Tools and CallTool callers
@@ -193,12 +193,19 @@ type NamespacedTool struct {
 // Tools returns the aggregated tool catalog across all servers. Empty
 // when no server is ready. Order: server name asc, then tool order as
 // the server returned them.
-func (m *Manager) Tools() []NamespacedTool {
-	servers := m.Servers()
+func (m *Manager) Tools() []NamespacedTool { return m.tools(func(*Server) bool { return true }) }
+
+// ToolsFor is Tools restricted to servers in scope for workspaceID
+// (see ServerSpec.VisibleIn).
+func (m *Manager) ToolsFor(workspaceID string) []NamespacedTool {
+	return m.tools(func(s *Server) bool { return s.Spec().VisibleIn(workspaceID) })
+}
+
+func (m *Manager) tools(include func(*Server) bool) []NamespacedTool {
 	out := []NamespacedTool{}
-	for _, s := range servers {
+	for _, s := range m.Servers() {
 		st, _ := s.Status()
-		if st != StatusReady {
+		if st != StatusReady || !include(s) {
 			continue
 		}
 		for _, t := range s.Tools() {

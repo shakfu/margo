@@ -358,7 +358,7 @@ func (s *Session) StreamAgent(ctx context.Context, id string, req AgentRequest) 
 	if err != nil {
 		return nil, err
 	}
-	tools, err := s.buildTools(req.ToolNames)
+	tools, err := s.buildTools(req.ToolNames, req.WorkspaceID)
 	if err != nil {
 		return nil, err
 	}

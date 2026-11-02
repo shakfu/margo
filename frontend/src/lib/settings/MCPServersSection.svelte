@@ -14,6 +14,7 @@
   import { createCollapsible, melt } from '@melt-ui/svelte';
   import { onMount, untrack } from 'svelte';
   import { MCPServers, AddMCPServer, RemoveMCPServer } from '../../../wailsjs/go/main/App.js';
+  import { settings } from '../store';
 
   // Mirror of main.MCPServerInfo from app.go. Inlining (rather than
   // importing from wailsjs/go/models.ts) keeps the import surface to
@@ -27,6 +28,14 @@
     error?: string;
     tools?: string[];
     stderrTail?: string[];
+    workspaces?: string[];
+  }
+
+  // scopeLabel names a server's scope relative to the active workspace.
+  // Servers scoped elsewhere still run; their tools are hidden here.
+  function scopeLabel(s: ServerInfo): string {
+    if (!s.workspaces || s.workspaces.length === 0) return 'global';
+    return s.workspaces.includes($settings.activeWorkspaceId) ? 'this workspace' : 'other workspace';
   }
 
   const { elements: { root: mcpRoot, trigger: mcpTrig, content: mcpContent }, states: { open: mcpOpen } } =
@@ -44,6 +53,7 @@
   let addCommand = $state('');
   let addArgsText = $state('');
   let addEnvText = $state(''); // KEY=value lines, one per line
+  let addScoped = $state(false); // limit to the active workspace
 
   async function refresh() {
     try {
@@ -86,6 +96,7 @@
       command: addCommand.trim(),
       args: addArgsText.trim() ? addArgsText.trim().split(/\s+/) : [],
       env: parseEnv(addEnvText),
+      workspaces: addScoped ? [$settings.activeWorkspaceId] : [],
     };
     try {
       // Wails accepts the plain JSON shape; the generated `mcp.ServerSpec`
@@ -95,6 +106,7 @@
       addCommand = '';
       addArgsText = '';
       addEnvText = '';
+      addScoped = false;
       showAdd = false;
       await refresh();
     } catch (e) {
@@ -135,6 +147,9 @@
       <code class="font-[family-name:var(--font-mono)] text-[0.72rem]">~/Library/Application Support/Margo/mcp.json</code>
       to make additions persist across restarts (Claude-Desktop-compatible). Each ready server's tools appear in
       the Tools section prefixed <code class="font-[family-name:var(--font-mono)] text-[0.72rem]">mcp:&lt;name&gt;:</code>.
+      To limit a server to some workspaces, give it a
+      <code class="font-[family-name:var(--font-mono)] text-[0.72rem]">"workspaces"</code> list of ids. This
+      workspace's id is <code class="font-[family-name:var(--font-mono)] text-[0.72rem] select-all">{$settings.activeWorkspaceId}</code>.
     </p>
 
     {#if servers.length === 0}
@@ -148,6 +163,7 @@
                 <div class="font-semibold text-fg flex items-center gap-1 flex-wrap">
                   <span>{s.name}</span>
                   <span class="text-[0.62rem] uppercase tracking-wider px-1 rounded {statusColor(s.status)}">{s.status}</span>
+                  <span class="text-fg-faint text-[0.62rem] uppercase tracking-wider" title={s.workspaces?.join(', ') ?? ''}>{scopeLabel(s)}</span>
                   {#if s.tools && s.tools.length > 0}
                     <span class="text-fg-faint text-[0.62rem] uppercase tracking-wider">{s.tools.length} tool{s.tools.length === 1 ? '' : 's'}</span>
                   {/if}
@@ -186,6 +202,10 @@
         <label class="flex flex-col gap-1 text-[0.78rem] text-fg-muted">
           <span>Environment (one KEY=value per line)</span>
           <textarea class="text-input" rows="3" bind:value={addEnvText} placeholder="GITHUB_TOKEN=ghp_..."></textarea>
+        </label>
+        <label class="flex items-center gap-2 text-[0.78rem] text-fg-muted">
+          <input type="checkbox" bind:checked={addScoped} />
+          <span>Only this workspace</span>
         </label>
         <div class="flex justify-end gap-2">
           <button class="mini-btn" onclick={() => (showAdd = false)}>Cancel</button>

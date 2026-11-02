@@ -197,4 +197,8 @@ type AgentRequest struct {
 	// RunnerType selects the slash-command runner ("react", "plan",
 	// "workflow"). Empty defaults to ReAct.
 	RunnerType string
+
+	// WorkspaceID selects which workspace-scoped MCP servers ToolNames
+	// may resolve against. Empty admits only global servers.
+	WorkspaceID string
 }

@@ -322,6 +322,7 @@ export namespace main {
 	    error?: string;
 	    tools?: string[];
 	    stderrTail?: string[];
+	    workspaces?: string[];
 	
 	    static createFrom(source: any = {}) {
 	        return new MCPServerInfo(source);
@@ -336,6 +337,7 @@ export namespace main {
 	        this.error = source["error"];
 	        this.tools = source["tools"];
 	        this.stderrTail = source["stderrTail"];
+	        this.workspaces = source["workspaces"];
 	    }
 	}
 
@@ -348,6 +350,7 @@ export namespace mcp {
 	    args?: string[];
 	    env?: Record<string, string>;
 	    cwd?: string;
+	    workspaces?: string[];
 	
 	    static createFrom(source: any = {}) {
 	        return new ServerSpec(source);
@@ -359,6 +362,7 @@ export namespace mcp {
 	        this.args = source["args"];
 	        this.env = source["env"];
 	        this.cwd = source["cwd"];
+	        this.workspaces = source["workspaces"];
 	    }
 	}
 
