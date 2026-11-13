@@ -8,7 +8,7 @@
 
 - [ ] 10.1 Variant scaffolding (`Settings.uiTier`)
 
-- [ ] 10.2 Per-workspace MCP server scoping #agent
+- [x] 10.2 Per-workspace MCP server scoping #agent
 
 - [x] 10.3 OpenRouter live model fetch #agent
 
